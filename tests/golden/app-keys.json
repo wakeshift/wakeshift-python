@@ -1,0 +1,161 @@
+{
+  "seeds": [
+    {
+      "name": "Z",
+      "seed": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "crc32": "190a55ad",
+      "public_key": "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik",
+      "kid": "E545QOZLVJFyIIjZoNdBYg",
+      "key_id": "E545QOZL"
+    },
+    {
+      "name": "S",
+      "seed": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "crc32": "91267e8a",
+      "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+      "kid": "Vkdap1RjR0wChd9dvyvKtw",
+      "key_id": "Vkdap1Rj"
+    },
+    {
+      "name": "O",
+      "seed": "3q2-7__7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "crc32": "568e8670",
+      "public_key": "VY9ILUO3Qh_O99IqS2U3_93Qt3xS90AxWHUPNI3BNwo",
+      "kid": "sA-Ti3oP--beaR_W5D8xrg",
+      "key_id": "sA-Ti3oP"
+    },
+    {
+      "name": "F",
+      "seed": "__________________________________________8",
+      "crc32": "ff6cab0b",
+      "public_key": "dqFZIESm5PURJlvKc6YE2QsFKdHfYCvjChmpJXZg0fU",
+      "kid": "r4IpWPLXWvuR-Kj02iUyMA",
+      "key_id": "r4IpWPLX"
+    }
+  ],
+  "accepted": [
+    {
+      "key": "wst_111111111111111111111111111111111111111111111e8AP6",
+      "seed": "Z",
+      "mode": null,
+      "app_id": null
+    },
+    {
+      "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+      "seed": "S",
+      "mode": null,
+      "app_id": null
+    },
+    {
+      "key": "wst_2h52eWJ6Nz65aiGDNwcugUMid1EBPpxtzZszqoePwD2ybDJTaf",
+      "seed": "O",
+      "mode": null,
+      "app_id": null
+    },
+    {
+      "key": "wst_2wkBET2rRgE8pahuaczxKbmv7ciehqsne57F9gtzf1PVd47xta",
+      "seed": "F",
+      "mode": null,
+      "app_id": null
+    },
+    {
+      "key": "wst_test_ci-bot_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "seed": "Z",
+      "mode": "test",
+      "app_id": "ci-bot",
+      "note": "old format"
+    },
+    {
+      "key": "wst_live_my-app_3q2-7__7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "seed": "O",
+      "mode": "live",
+      "app_id": "my-app",
+      "note": "old format; the seed has _ and -"
+    },
+    {
+      "key": "  wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV\n",
+      "seed": "S",
+      "mode": null,
+      "app_id": null,
+      "note": "whitespace is trimmed"
+    }
+  ],
+  "refused": [
+    {
+      "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSW",
+      "why": "checksum: the S key with its last character changed"
+    },
+    {
+      "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzS",
+      "why": "49 characters"
+    },
+    {
+      "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV1",
+      "why": "51 characters"
+    },
+    {
+      "key": "wst_zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+      "why": "the integer is 2^288 or more"
+    },
+    {
+      "key": "wst_1116qJFWMM0Fy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+      "why": "not base58 (0)"
+    },
+    {
+      "key": "wst_1116qJFWMMOFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+      "why": "not base58 (O)"
+    },
+    {
+      "key": "wst_1116qJFWMMIFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+      "why": "not base58 (I)"
+    },
+    {
+      "key": "wst_1116qJFWMMlFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+      "why": "not base58 (l)"
+    },
+    {
+      "key": "wst_ci-bot_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "why": "neither format: an app ID without a mode is never issued"
+    },
+    {
+      "key": "wst_test_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "why": "old format with no app ID"
+    },
+    {
+      "key": "wst_prod_ci-bot_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "why": "old format with an unknown mode"
+    },
+    {
+      "key": "wst_test_Ci_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "why": "old format: the app ID isn't lowercase"
+    },
+    {
+      "key": "wst_test_ci-bot_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "why": "old format, the seed cut short"
+    },
+    {
+      "key": "wst_test_ci-bot_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      "why": "old format, the seed padded"
+    },
+    {
+      "key": "wst_test_ci-bot_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "why": "old format, the seed too long"
+    },
+    {
+      "key": "wst_test_ci-bot",
+      "why": "old format with no seed"
+    },
+    {
+      "key": "sk_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+      "why": "not wst_"
+    },
+    {
+      "key": "1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+      "why": "no prefix"
+    },
+    {
+      "key": "",
+      "why": "empty"
+    }
+  ]
+}
