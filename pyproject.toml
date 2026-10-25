@@ -1,0 +1,69 @@
+[project]
+name = "wakeshift"
+version = "0.2.0"
+description = "Wake AI agents when your app's events happen: Wakeshift's SDK for MCP servers in Python"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Clawvisor Inc.", email = "support@wakeshift.ai" }]
+keywords = ["mcp", "agents", "events", "wakeshift"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Framework :: AsyncIO",
+]
+dependencies = [
+  "mcp>=2.3,<3",
+  "mcp-types>=2.3,<3",
+  "httpx>=0.27",
+  "cryptography>=42",
+  "pydantic>=2.7",
+  "starlette>=0.40",
+]
+
+[project.urls]
+Homepage = "https://wakeshift.ai"
+Documentation = "https://wakeshift.ai/docs"
+Source = "https://github.com/wakeshift/wakeshift-python"
+Issues = "https://github.com/wakeshift/wakeshift-python/issues"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "uvicorn>=0.30", "ruff>=0.6", "pyright>=1.1.380"]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/tests", "/scripts", "/uv.lock"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wakeshift"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = ["e2e: runs against a real Wakeshift core (scripts/e2e.sh)"]
+addopts = "-m 'not e2e'"
+
+[tool.ruff]
+line-length = 130
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
