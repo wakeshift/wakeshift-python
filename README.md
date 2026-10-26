@@ -6,19 +6,15 @@ Python 3.10 or later, on the official MCP Python SDK (`mcp` 2.3 or later). The s
 
 ## Install
 
-The SDK isn't on PyPI yet. Install it from this directory:
-
 ```sh
-# in sdk/python (the root of github.com/wakeshift/wakeshift-python)
-uv build                                   # writes dist/wakeshift-0.2.0-py3-none-any.whl
-
-# in your app
-uv add /path/to/wakeshift-0.2.0-py3-none-any.whl    # or pip install
+pip install wakeshift
 ```
+
+Or `uv add wakeshift`.
 
 ## Quickstart: events
 
-Register an app in the Wakeshift console (Build) and put its key in `WAKESHIFT_KEY`. The SDK talks to `https://app.wakeshift.ai` unless `WAKESHIFT_CORE` names another console (for example `https://app.staging.wakeshift.ai`).
+Register an app in the Wakeshift console (Build) and put its key in `WAKESHIFT_KEY`. The SDK talks to `https://app.wakeshift.ai` unless `WAKESHIFT_CORE` names another address.
 
 ```python
 import os
@@ -28,7 +24,7 @@ from pydantic import BaseModel
 
 from wakeshift import GuestAuth, Wakeshift
 
-wake = Wakeshift(os.environ["WAKESHIFT_KEY"], core=os.environ.get("WAKESHIFT_CORE"))
+wake = Wakeshift(os.environ["WAKESHIFT_KEY"])
 
 
 class Channel(BaseModel):
@@ -70,7 +66,7 @@ turn = wake.define_event(
 )
 
 server = MCPServer("chat")
-wake.serve_events(server)  # define every event first
+wake.attach(server)  # define every event first
 
 # Guests: MCP clients sign in with no account, each in its own workspace.
 guests = GuestAuth(wake, "https://chat.example.com/mcp")
@@ -90,13 +86,13 @@ That's all. An agent subscribes to `chat.message` for `eng`, and each message in
 
 - **`wake.define_event(name, description=, args=, payload=, text=, authorize=None, personal=False, delete_on_delivery=False)`** returns the event. `args` and `payload` are pydantic models or JSON Schemas. `args` is what a subscriber picks; its required string, integer and boolean fields route occurrences, so their values are lowercase IDs (a-z 0-9 . _ -), and an optional one filters on the payload field of the same name. `text(payload, args)` is the line the agent reads first. `authorize(subscriber, args)` (sync or async) decides who may subscribe. With `delete_on_delivery=True`, Wakeshift deletes each occurrence's text and payload once it's delivered.
 - **`await event.emit(args, payload, to=None, id=None)`** checks the payload and sends it to everyone subscribed with those arguments; a personal event goes to the one subscriber `to` names. `id` makes retries emit once.
-- **`wake.serve_events(server, user=None)`** serves `events/list`, `events/subscribe` and `events/unsubscribe` to clients that speak MCP Events, and adds the tools `subscribe_events` (for everyone else), `unsubscribe_events` and `list_subscriptions` (for every client, so a person can always see and stop what they're subscribed to). `user(ctx)` is your ID for the person behind a request; by default, the guest `GuestAuth` signed in. Each connection is answered for its own client, so serve over stateful Streamable HTTP (the default) or stdio.
+- **`wake.attach(server, identify=None)`** attaches Wakeshift to your MCP server. Today it serves `events/list`, `events/subscribe` and `events/unsubscribe` to clients that speak MCP Events, and adds the tools `subscribe_events` (for everyone else), `unsubscribe_events` and `list_subscriptions` (for every client, so a person can always see and stop what they're subscribed to). `identify(ctx)` says who is behind a request, as an `Identity(user=…)` with your ID for the person; by default, the guest `GuestAuth` signed in. Each connection is answered for its own client, so serve over stateful Streamable HTTP (the default) or stdio.
 - **`await event.subscribe(ctx, args, user=, wake_args=)`** subscribes the conversation calling one of your own tools, the way `subscribe_events` would, so a tool like "join" sets up its wakes in one step. `result(text)` is your tool's text with what the agent needs added. **`await event.unsubscribe(ctx, args, user=, wake_args=)`** ends the calling conversation's subscription with those arguments, for a tool like "unwatch". **`await event.end(user, id)`** ends one of a user's subscriptions by its ID.
 
 ## Sign-in
 
 - **`GuestAuth(wake, mcp_url)`** is a small OAuth server inside your app for MCP clients: dynamic client registration, authorize with PKCE, tokens, all signed with a key derived from your app key, so it keeps no state. Each registered client is a guest with its own workspace. `guests.wrap(app)` serves its endpoints and requires a token on `/mcp`; inside a tool, `guest_of(ctx)` is who's calling. Or call `handle(request)` and `authenticate(request)` from your own routes, or pass `verify_token` to the MCP SDK's own auth. Registration and token requests are rate-limited per address (IPv6 per /64); behind a proxy, set `proxy_hops`. `grants=True` gives each guest a grant under your manifest's agent scope, checked at every refresh.
-- **`WakeshiftSignIn(wake, redirect_uri)`** is Sign in with Wakeshift for the browser: `await start(link=)` redirects the person to Wakeshift, and `await finish(request, response)` on your callback returns who signed in (a Wakeshift user ID that's the same across sign-ins, devices and agents) and the link. It keeps no state either: a signed, HttpOnly cookie carries the PKCE verifier. `await wake.refresh(token)` renews a sign-in.
+- Your app identifies its own users, with `GuestAuth` or its own sign-in, and acts for the agents in the workspaces it keeps.
 
 ## Topics
 
@@ -133,10 +129,29 @@ Calls raise `WakeshiftError` with the API's `code` (`private_topic`, `bad_reques
 
 An app key is `wst_` followed by 50 letters and digits: your app's Ed25519 private key, with a checksum, so a mistyped key fails when you create `Wakeshift`. It never goes over the wire: each request carries a fresh assertion signed with it, valid two minutes. A key goes to `https://app.wakeshift.ai` unless you pass `core` or set `WAKESHIFT_CORE`.
 
-The key doesn't name your app. `await wake.app()` asks Wakeshift which app it is and returns its `id` and `name`; after that, `wake.app_id` is the app's ID (before it, reading `wake.app_id` raises). `WakeshiftSignIn` and the sign-in calls ask for themselves.
+The key doesn't name your app. `await wake.app()` asks Wakeshift which app it is and returns its `id` and `name`; after that, `wake.app_id` is the app's ID (before it, reading `wake.app_id` raises).
 
 Older keys, `wst_test_<app>_<seed>` and `wst_live_<app>_<seed>`, keep working. They name the app, so `wake.app_id` works at once. A `wst_test_` key needs `core` or `WAKESHIFT_CORE`. `wake.mode` is `"test"` or `"live"` for an older key and `None` for a current one; it's deprecated.
 
+## Documentation
+
+The guides and the full reference are at [wakeshift.ai/docs](https://wakeshift.ai/docs): the [quickstart](https://wakeshift.ai/docs/quickstart), [events](https://wakeshift.ai/docs/events), [your users](https://wakeshift.ai/docs/users) and [the Python SDK](https://wakeshift.ai/docs/python). The same calls are in the [TypeScript](https://github.com/wakeshift/wakeshift-node) and [Go](https://github.com/wakeshift/wakeshift-go) SDKs.
+
+## Development
+
+```sh
+uv sync
+uv run ruff check
+uv run pyright
+uv run pytest
+```
+
+The end-to-end tests run against a Wakeshift server, so they run in Wakeshift's own repository and are skipped here.
+
+## Contributing and security
+
+This repository is generated from Wakeshift's main repository. Pull requests are welcome: we apply them there and publish the result. See [CONTRIBUTING](CONTRIBUTING.md). Report a security problem privately to support@wakeshift.ai, not in an issue ([SECURITY](SECURITY.md)).
+
 ## License
 
-Apache-2.0.
+Apache License 2.0; see [LICENSE](LICENSE).

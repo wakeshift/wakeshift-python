@@ -1,6 +1,5 @@
-"""End to end against a real core: run with scripts/e2e.sh (make sdk-python-test),
-which starts one (TestSDKHarness in internal/coretest) with a self-serve app
-and points WAKESHIFT_SDK_HARNESS at its URL and test key. Skipped without it."""
+"""End to end against a real core: run with scripts/e2e.sh in Wakeshift's own
+repository, which starts one with a self-serve app and points WAKESHIFT_SDK_HARNESS at its URL and test key. Skipped without it."""
 
 from __future__ import annotations
 
@@ -27,7 +26,7 @@ import pytest
 from mcp.server.mcpserver import Context, MCPServer
 from pydantic import BaseModel
 
-from wakeshift import GuestAuth, Wakeshift, WakeshiftError, guest_of, is_code
+from wakeshift import GuestAuth, Identity, Wakeshift, WakeshiftError, guest_of, is_code
 from wakeshift.key import b64url
 
 from .helpers import Rpc, initialize, served
@@ -194,7 +193,9 @@ async def test_events_defined_served_emitted_bridged_and_native() -> None:
 
     # One server; each connection's user comes from a header here (an app's own sign-in in practice).
     server = MCPServer("ci-bot")
-    wake.serve_events(server, user=lambda ctx: ctx.request.headers.get("x-user") if ctx.request is not None else None)
+    wake.attach(
+        server, identify=lambda ctx: Identity(user=ctx.request.headers.get("x-user") if ctx.request is not None else None)
+    )
     lines: list[Lines] = []
     try:
         async with served(server, stateless=False) as (client, _):
@@ -395,6 +396,14 @@ async def test_guest_sign_in_against_a_real_core() -> None:
 
         # With an agent scope in the manifest, grants: a grant per guest, checked at each refresh.
         scope = [{"pattern": "app.ci-bot.ci.*", "description": "CI runs it watches"}]
+        # Wakeshift refuses a manifest that asks for Wakeshift accounts or redirect_uris: apps sign their own users in.
+        for refused in (
+            {"accounts": "wakeshift"},
+            {"agent": {"wake": scope, "post": scope, "ttl_days": 30, "redirect_uris": ["http://127.0.0.1:8000/cb"]}},
+        ):
+            with pytest.raises(WakeshiftError) as e:
+                await wake.publish_manifest(refused)
+            assert is_code(e.value, "bad_manifest")
         m = await wake.publish_manifest({"agent": {"wake": scope, "post": scope, "ttl_days": 30}})
         assert m["agent"]["ttl_days"] == 30
         current[0] = guest_granted
@@ -404,15 +413,6 @@ async def test_guest_sign_in_against_a_real_core() -> None:
         assert g2 is not None and g2.agent == "codex"
         await wake.check_agent(g2.workspace, g2.agent)  # the grant is live
         assert (await refresh(reg2, first["refresh_token"])).status_code == 200
-
-    # Sign in with Wakeshift: the code exchange reaches the core's token endpoint as the app.
-    with pytest.raises(WakeshiftError) as e:
-        await wake.sign_in(
-            code="wsc_not-a-code",
-            verifier=b64url(secrets.token_bytes(32)),
-            redirect_uri="http://127.0.0.1:8000/auth/wakeshift/callback",
-        )
-    assert is_code(e.value, "invalid_grant")
 
 
 async def test_a_current_key_asks_wakeshift_which_app_it_is() -> None:

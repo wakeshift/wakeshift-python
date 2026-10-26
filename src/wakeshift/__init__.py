@@ -6,11 +6,10 @@ the best way its client allows.
 
     wake = Wakeshift(key=os.environ["WAKESHIFT_KEY"])
     message = wake.define_event("chat.message", description=..., args=..., payload=..., text=...)
-    wake.serve_events(server)
+    wake.attach(server)
     await message.emit({"channel": "eng"}, {"from": "ada", "text": "shipped it"})
 """
 
-from .agent import Agent, Claims
 from .client import (
     CONVERSATION_ARG,
     DEFAULT_CORE,
@@ -21,14 +20,12 @@ from .client import (
     Addition,
     AppInfo,
     Call,
-    Connection,
     ConversationId,
     Harness,
     Published,
     PublishUrl,
     Recognised,
     SessionKey,
-    SignedIn,
     Subscription,
     SubscriptionStatus,
     TopicStatus,
@@ -43,6 +40,7 @@ from .events import (
     UNSUBSCRIBE_TOOL_DESCRIPTION,
     ArgsError,
     CallerSubscription,
+    Identity,
     Subscriber,
     WakeEvent,
     speaks_events,
@@ -50,7 +48,6 @@ from .events import (
 from .guest import Guest, GuestAuth, guest_of
 from .harness import harness_agent
 from .key import AppKey, parse_key, sign_assertion
-from .signin import SignInError, WakeshiftSignIn
 from .spec import EXTENSION_KEY, LEGACY_KEY, TEXT_META
 from .spec import REVISION as EVENTS_REVISION
 
@@ -72,24 +69,20 @@ __all__ = [
     "UNSUBSCRIBE_TOOL_DESCRIPTION",
     "WAKE_ARGS_SCHEMA",
     "Addition",
-    "Agent",
     "AppInfo",
     "AppKey",
     "ArgsError",
     "Call",
     "CallerSubscription",
-    "Claims",
-    "Connection",
     "ConversationId",
     "Guest",
     "GuestAuth",
     "Harness",
+    "Identity",
     "PublishUrl",
     "Published",
     "Recognised",
     "SessionKey",
-    "SignInError",
-    "SignedIn",
     "Subscriber",
     "Subscription",
     "SubscriptionStatus",
@@ -97,7 +90,6 @@ __all__ = [
     "WakeEvent",
     "Wakeshift",
     "WakeshiftError",
-    "WakeshiftSignIn",
     "apply_addition",
     "guest_of",
     "harness_agent",

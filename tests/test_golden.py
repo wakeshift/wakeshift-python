@@ -78,7 +78,7 @@ async def test_events_list_tools_and_manifest_match_the_other_sdks() -> None:
         personal=True,
     )
     server = MCPServer("sample")
-    wake.serve_events(server)
+    wake.attach(server)
     async with served(server) as (_, rpc):
         init = await rpc(
             "initialize",

@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "Wake AI agents when your app's events happen: Wakeshift's SDK for MCP servers in Python"
 readme = "README.md"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.10"
 authors = [{ name = "Clawvisor Inc.", email = "support@wakeshift.ai" }]
 keywords = ["mcp", "agents", "events", "wakeshift"]

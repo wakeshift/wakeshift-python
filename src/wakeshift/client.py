@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
-import secrets
 import sys
-import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Optional
 from urllib.parse import quote, urlencode
 
@@ -19,13 +16,12 @@ import httpx
 from mcp_types import CallToolResult, TextContent
 from pydantic import Field
 
-from .agent import Agent, Claims, Keys, verify_access_token
 from .errors import WakeshiftError
-from .key import AppKey, b64url, parse_key, sign_assertion
+from .key import AppKey, parse_key, sign_assertion
 from .retry import RETRY_PAUSES, refused
 
 if TYPE_CHECKING:
-    from .events import WakeEvent
+    from .events import Identity, WakeEvent
 
 #: Wakeshift's production core, the default for every key but a wst_test_ one. Override with ``core`` or WAKESHIFT_CORE.
 DEFAULT_CORE = "https://app.wakeshift.ai"
@@ -101,14 +97,10 @@ class Call:
     conversation: str | None = None
     #: The program the agent says it runs in (harness): a hint, never a credential.
     harness: str | None = None
-    #: For an app whose users sign in with Wakeshift: the signed-in agent's
-    #: exchanged token (an Agent's), which makes the subscription that agent's,
-    #: under its person's consent. Set it with ``agent=``.
-    agent_token: str | None = field(default=None, repr=False)
 
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {"client": self.client}
-        for k in ("user", "meta", "session", "user_agent", "conversation", "harness", "agent_token"):
+        for k in ("user", "meta", "session", "user_agent", "conversation", "harness"):
             v = getattr(self, k)
             if v:
                 out[k] = v
@@ -223,31 +215,6 @@ class AppInfo:
     key_name: str = ""
 
 
-@dataclass(frozen=True)
-class Connection:
-    workspace: str
-    grant: str
-    user: str
-    workspace_name: str
-    user_email: str
-
-
-@dataclass
-class SignedIn:
-    """What a Sign in with Wakeshift (or a refresh) gave the app."""
-
-    #: The person's Wakeshift user ID: the same across sign-ins, devices and agents.
-    user: str
-    workspace: str
-    agent: str
-    grant: str
-    access_token: str = field(repr=False)
-    expires_at: datetime
-    #: Rotates on every refresh: keep the newest, and treat it as a secret.
-    refresh_token: str = field(repr=False)
-    connection: Connection | None = None
-
-
 def _parse_time(s: str) -> datetime:
     s = s.strip()
     if s.endswith("Z"):
@@ -322,14 +289,10 @@ class Wakeshift:
         key: str,
         *,
         core: str | None = None,
-        mcp_url: str | None = None,
         timeout: float = 20.0,
         on_warning: Callable[[str], None] | None = None,
         http: httpx.AsyncClient | None = None,
     ) -> None:
-        """mcp_url is the app's MCP endpoint (the resource its access tokens are
-        issued for), for an app whose users sign in with Wakeshift (accounts:
-        "wakeshift"): what verify_access_token checks a token's audience against."""
         if not key:
             raise ValueError("wakeshift: no app key (WAKESHIFT_KEY?)")
         self._key: AppKey = parse_key(key)
@@ -354,9 +317,6 @@ class Wakeshift:
         self._events: dict[str, WakeEvent] = {}
         self._manifest_base: dict[str, Any] = {}
         self._published = False
-        self.mcp_url = mcp_url
-        self._keys = Keys(self._fetch_jwks)
-        self._exchanged: dict[str, Agent] = {}
 
     # ── The app ────────────────────────────────────────────────────────────
 
@@ -400,11 +360,6 @@ class Wakeshift:
                 self._app = info
             return self._app
 
-    async def _need_app_id(self) -> str:
-        if self._app_id is None:
-            await self.app()
-        return self.app_id
-
     def _assertion(self) -> str:
         return sign_assertion(self._key, self.core, app_id=self._app_id)
 
@@ -433,7 +388,6 @@ class Wakeshift:
         ctx: Any,
         *,
         user: str | None = None,
-        agent: Agent | None = None,
         args: Mapping[str, Any] | None = None,
         client: str | None = None,
         session: str | None = None,
@@ -442,22 +396,17 @@ class Wakeshift:
     ) -> Call:
         """Packs the tool call from an MCP tool's Context: its _meta and
         User-Agent, the client's name, the user, and session_key, harness and
-        conversation_id from args (the tool's arguments). For an app whose users
-        sign in with Wakeshift, agent (wake.exchange) makes the call that agent's:
-        user is agent.user() and its exchanged token goes with it."""
+        conversation_id from args (the tool's arguments)."""
         name, meta, headers = request_info(ctx)
-        call = self.call_of(
+        return self.call_of(
             client_name=name if client is None else client,
             meta=meta,
-            user=agent.user() if agent is not None else user,
+            user=user,
             session=session if session is not None else _arg(args, SESSION_ARG),
             user_agent=headers.get("user-agent", "") if headers else "",
             harness=harness if harness is not None else _arg(args, HARNESS_ARG),
             conversation=conversation if conversation is not None else _arg(args, CONVERSATION_ARG),
         )
-        if agent is not None:
-            call.agent_token = agent.token
-        return call
 
     def call_of(
         self,
@@ -622,7 +571,7 @@ class Wakeshift:
         """Defines one of the app's event types: what a subscriber picks (args),
         what each occurrence carries (payload), and the line an agent reads first
         (text). Returns the event, whose emit sends occurrences. Define every
-        event before serve_events::
+        event before attach::
 
             message = wake.define_event(
                 "chat.message",
@@ -641,103 +590,25 @@ class Wakeshift:
         self._published = False  # the manifest changed
         return ev
 
-    def serve_events(
+    def attach(
         self,
         server: Any,
         *,
-        user: Callable[[Any], str | None] | None = None,
-        agent: Callable[[Any], Awaitable[Agent | None] | Agent | None] | None = None,
+        identify: Callable[[Any], Identity | None] | None = None,
     ) -> None:
-        """Serves the defined events on an MCPServer, before you run it: MCP
-        Events (events/list, events/subscribe, events/unsubscribe) for clients
-        that speak it, such as ChatGPT, and the subscribe_events tool for everyone
+        """Attaches Wakeshift to an MCPServer, before you run it: the one call
+        that connects the two. Today it serves the defined events: MCP Events
+        (events/list, events/subscribe, events/unsubscribe) for clients that
+        speak it, such as ChatGPT, and the subscribe_events tool for everyone
         else; plus unsubscribe_events and list_subscriptions for every client.
 
-        user is the app's ID for the person behind a request (it gets the request
-        context); default: the guest GuestAuth signed in. For an app whose users
-        sign in with Wakeshift, agent is the signed-in agent behind a request
-        (wake.exchange of the token it sent): its subscriptions are made with its
-        token, in its person's workspace, and the subscriber is agent.user(). A
-        raise or None means not signed in."""
-        from .events import serve_events
+        identify tells who is behind a request (it gets the request context) as
+        an Identity; default: the guest GuestAuth signed in::
 
-        serve_events(self, server, list(self._events.values()), user=user, agent=agent)
+            wake.attach(server, identify=lambda ctx: Identity(user=my_user(ctx)))"""
+        from .events import attach_events
 
-    # ── Sign in with Wakeshift, for the app's MCP server ───────────────────
-
-    def protected_resource(self) -> dict[str, Any]:
-        """The app's OAuth protected-resource metadata (RFC 9728), which tells MCP
-        clients to sign in with Wakeshift: serve it as JSON at
-        /.well-known/oauth-protected-resource. Needs mcp_url."""
-        return {"resource": self._need_mcp_url(), "authorization_servers": [self.core], "bearer_methods_supported": ["header"]}
-
-    def challenge(self) -> str:
-        """The WWW-Authenticate value for an MCP request without a valid token
-        (answer 401 with it): it points the client at the resource metadata."""
-        from urllib.parse import urlsplit
-
-        u = urlsplit(self._need_mcp_url())
-        return f'Bearer resource_metadata="{u.scheme}://{u.netloc}/.well-known/oauth-protected-resource"'
-
-    async def verify_access_token(self, token: str) -> Claims:
-        """Checks an access token an MCP client sent: signed by Wakeshift (keys
-        from its JWKS), issued for this app's MCP URL (mcp_url), not expired.
-        Raises ValueError otherwise ("invalid token", "token for another app",
-        …): answer 401 with challenge()."""
-        return await verify_access_token(self._keys, token, self.core, self._need_mcp_url())
-
-    async def exchange(self, access_token: str) -> Agent:
-        """Turns the access token an agent sent the app into an Agent the app can
-        act for (RFC 8693 token exchange). Results are cached until shortly before
-        they expire (up to 15 minutes), so a revoked consent shows as the Agent's
-        calls failing (WakeshiftError no_grant or bad_agent_token), not as exchange
-        refusing: treat both as signed out."""
-        hit = self._exchanged.get(access_token)
-        if hit is not None and (hit.expires_at - datetime.now(timezone.utc)).total_seconds() > 30:
-            return hit
-        claims = await self.verify_access_token(access_token)
-        form = {
-            "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-            "subject_token": access_token,
-            "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
-            "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-            "client_assertion": self._assertion(),
-        }
-        resp, text = await self._send(
-            "POST",
-            self.core + "/oauth/token",
-            content=urlencode(form),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        try:
-            out = json.loads(text) if text else {}
-        except ValueError:
-            out = {}
-        if resp.status_code >= 400 or not isinstance(out, dict) or not isinstance(out.get("access_token"), str):
-            o = out if isinstance(out, dict) else {}
-            raise WakeshiftError(
-                resp.status_code,
-                o.get("error") or "bad_response",
-                o.get("error_description") or "Wakeshift didn't exchange the token",
-            )
-        expires = datetime.fromtimestamp(time.time() + float(out.get("expires_in") or 0), timezone.utc)
-        ag = Agent(workspace=claims.wakeshift_tenant, id=claims.wakeshift_agent, token=out["access_token"], expires_at=expires)
-        now = datetime.now(timezone.utc)
-        for k in [k for k, v in self._exchanged.items() if v.expires_at <= now]:
-            del self._exchanged[k]
-        self._exchanged[access_token] = ag
-        return ag
-
-    async def _fetch_jwks(self) -> Any:
-        resp, text = await self._send("GET", self.core + "/oauth/jwks")
-        if resp.status_code != 200:
-            raise WakeshiftError(resp.status_code, "jwks", "Wakeshift's keys aren't available")
-        return json.loads(text)
-
-    def _need_mcp_url(self) -> str:
-        if not self.mcp_url:
-            raise ValueError("wakeshift: pass mcp_url= (the app's MCP endpoint) to sign agents in with Wakeshift")
-        return self.mcp_url
+        attach_events(self, server, list(self._events.values()), identify=identify)
 
     async def ensure_events(self) -> None:
         """Publishes the manifest with the defined events, once (again after a define_event)."""
@@ -779,90 +650,8 @@ class Wakeshift:
         WakeshiftError no_grant once revoked, unknown_workspace once forgotten."""
         await self._request("POST", f"/workspaces/{quote(workspace, safe='')}/agents/{quote(agent, safe='')}/token")
 
-    # ── Sign in with Wakeshift ──────────────────────────────────────────────
-
-    @staticmethod
-    def pkce() -> tuple[str, str]:
-        """A new PKCE code verifier and its S256 challenge."""
-        verifier = b64url(secrets.token_bytes(32))
-        return verifier, b64url(hashlib.sha256(verifier.encode("ascii")).digest())
-
-    def authorize_url(self, *, redirect_uri: str, state: str, challenge: str, agent_hint: str = "") -> str:
-        """Wakeshift's sign-in page for this app (as OAuth client app:<id>).
-        Needs the app's ID: with a current key, await wake.app() first
-        (WakeshiftSignIn does)."""
-        q = {
-            "response_type": "code",
-            "client_id": "app:" + self.app_id,
-            "redirect_uri": redirect_uri,
-            "state": state,
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-            "agent_hint": agent_hint,
-        }
-        return self.core + "/oauth/authorize?" + urlencode(q)
-
-    async def sign_in(self, *, code: str, verifier: str, redirect_uri: str) -> SignedIn:
-        """Exchanges the code from Wakeshift's redirect for who signed in."""
-        return await self._tokens(
-            {"grant_type": "authorization_code", "code": code, "code_verifier": verifier, "redirect_uri": redirect_uri}
-        )
-
-    async def refresh(self, refresh_token: str) -> SignedIn:
-        """Renews a sign-in. Wakeshift refuses (WakeshiftError invalid_grant) once the person revokes the app's access."""
-        return await self._tokens({"grant_type": "refresh_token", "refresh_token": refresh_token})
-
-    async def _tokens(self, form: dict[str, str]) -> SignedIn:
-        body = dict(form)
-        app_id = await self._need_app_id()
-        body.update(
-            {
-                "client_id": "app:" + app_id,
-                "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-                "client_assertion": self._assertion(),
-            }
-        )
-        resp, text = await self._send(
-            "POST",
-            self.core + "/oauth/token",
-            content=urlencode(body),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        try:
-            out = json.loads(text) if text else {}
-        except ValueError:
-            out = {}
-        if not isinstance(out, dict):
-            out = {}
-        if resp.status_code >= 400:
-            raise WakeshiftError(
-                resp.status_code, out.get("error", ""), out.get("error_description") or text[:200] or resp.reason_phrase
-            )
-        if not isinstance(out.get("access_token"), str) or not out.get("wakeshift_user"):
-            raise WakeshiftError(
-                resp.status_code, "bad_response", f"Wakeshift at {self.core} answered the sign-in without its tokens"
-            )
-        s = SignedIn(
-            user=out["wakeshift_user"],
-            workspace=out.get("wakeshift_workspace", ""),
-            agent=out.get("wakeshift_agent", ""),
-            grant=out.get("wakeshift_grant", ""),
-            access_token=out["access_token"],
-            expires_at=datetime.fromtimestamp(time.time() + float(out.get("expires_in") or 0), tz=timezone.utc),
-            refresh_token=out.get("refresh_token", ""),
-        )
-        if out.get("wakeshift_workspace_grant"):
-            s.connection = Connection(
-                workspace=out.get("wakeshift_workspace", ""),
-                grant=out["wakeshift_workspace_grant"],
-                user=out["wakeshift_user"],
-                workspace_name=out.get("wakeshift_workspace_name", ""),
-                user_email=out.get("wakeshift_user_email", ""),
-            )
-        return s
-
     def secret_seed(self) -> bytes:
-        """The app key's seed: what GuestAuth and WakeshiftSignIn key their signed values from. Never send or log it."""
+        """The app key's seed: what GuestAuth keys its signed values from. Never send or log it."""
         return self._key.seed
 
     # ── HTTP ───────────────────────────────────────────────────────────────

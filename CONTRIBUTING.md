@@ -1,6 +1,6 @@
 # Contributing
 
-This repository is generated from Wakeshift's main repository. Pull requests are welcome: we apply them there and publish the result.
+This repository is generated from Wakeshift's main repository.
 
 We read every issue. Report bugs, ask questions and suggest changes in this repository's issues.
 
@@ -13,6 +13,6 @@ Before you open one:
 - Don't include keys, tokens or other secrets, including in tests.
 - Change only the code: files this repository's export generates (`.source-commit`) are updated when it's published.
 
-Report a security problem privately to support@wakeshift.ai, not in an issue.
+Report a security problem privately to support@wakeshift.ai, not in an issue: see [SECURITY](SECURITY.md).
 
 By contributing, you agree your contribution is licensed under the Apache License 2.0.

@@ -8,12 +8,11 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
 
-from wakeshift import AppInfo, Wakeshift, WakeshiftSignIn, parse_key, sign_assertion
+from wakeshift import AppInfo, Wakeshift, parse_key, sign_assertion
 from wakeshift.key import b64url_decode, public_key_of
 
 from .helpers import format_key, golden_file
@@ -146,24 +145,3 @@ async def test_an_older_keys_app_id_is_its_own() -> None:
     assert (wake.app_id, wake.mode) == ("ci-bot", "test")
     assert core.sent == []
     assert (await wake.app()).name == "CI"
-
-
-async def test_sign_in_with_a_current_key_asks_which_app_then_signs_in_as_it() -> None:
-    core = Core()
-    wake = core.wake()
-    login = WakeshiftSignIn(wake, "https://ci.example/cb")
-    res = await login.start(link="x")
-    assert core.paths() == ["/api/apps/v1/app"]
-    q = parse_qs(urlsplit(res.headers["location"]).query)
-    assert q["client_id"] == ["app:ci-bot"]
-
-    # sign_in and refresh, on a fresh client, ask first too.
-    core2 = Core()
-    wake2 = core2.wake()
-    await wake2.refresh("rt")
-    assert core2.paths() == ["/api/apps/v1/app", "/oauth/token"]
-    form = {k: v[0] for k, v in parse_qs(core2.sent[1].content.decode()).items()}
-    assert form["client_id"] == "app:ci-bot"
-    h, c = claims_of(form["client_assertion"])
-    assert h["kid"] == SEEDS["S"]["kid"]
-    assert c["iss"] == c["sub"] == "ci-bot"

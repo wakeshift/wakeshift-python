@@ -366,15 +366,3 @@ async def test_addition_warns_once_when_the_core_recognised_nothing() -> None:
     a2 = await wake2.addition(wake2.call_of(client_name="claude-code"))
     assert a2.agent is not None and (a2.agent.harness, a2.agent.via) == ("claude-code", "client")
     assert quiet == []
-
-
-@pytest.mark.parametrize(
-    "doc", [[], "keys", {"keys": "x"}, {"keys": [1, None, "k"]}, {"keys": [{"crv": "Ed25519", "kid": "k", "x": "!!"}]}]
-)
-async def test_a_malformed_jwks_is_no_keys_not_a_crash(doc: Any) -> None:
-    from wakeshift.agent import Keys
-
-    async def fetch() -> Any:
-        return doc
-
-    assert await Keys(fetch).get("k") is None

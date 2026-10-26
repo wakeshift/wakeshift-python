@@ -1,10 +1,10 @@
 """Events: what an app offers to be subscribed to, the way MCP Events
 (SEP-3415) lists them. An app defines its event types (define_event), serves
-them (serve_events) and emits occurrences (emit). Wakeshift delivers each
+them (attach) and emits occurrences (emit). Wakeshift delivers each
 occurrence to every subscriber the best way its client allows: natively (MCP
 Events, a webhook) for a client that speaks the extension, and through
 Wakeshift's wake paths for everyone else, who subscribe with the
-subscribe_events tool serve_events adds. A port of the Node SDK's events.ts;
+subscribe_events tool attach adds. A port of the Node SDK's events.ts;
 the tools' wording and events/list output are the same, checked against the
 shared golden files."""
 
@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any
 from mcp_types import CallToolResult, TextContent
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from .agent import Agent
 from .client import (
     WAKE_ARGS_SCHEMA,
     Addition,
@@ -56,10 +55,20 @@ Schema = type[BaseModel] | Mapping[str, Any]
 
 
 @dataclass(frozen=True)
+class Identity:
+    """Who is behind a request to the app's MCP server, as the app knows them
+    (attach's identify)."""
+
+    #: The app's ID for the person: what personal events and
+    #: list_subscriptions need, and native subscriptions belong to.
+    user: str | None = None
+
+
+@dataclass(frozen=True)
 class Subscriber:
     """Who is subscribing: what authorize decides on."""
 
-    #: The app's ID for the person (serve_events' user), if it has one.
+    #: The app's ID for the person (attach's identify), if it has one.
     user: str | None
     #: The MCP client's name, if known.
     client: str
@@ -67,7 +76,7 @@ class Subscriber:
     native: bool
 
 
-# The fixed wording of the tools serve_events adds, and of the refusals of a
+# The fixed wording of the tools attach adds, and of the refusals of a
 # native subscribe: the Node and Go SDKs use the same, word for word, and all
 # three test against sdk/typescript/test/event-tools.json. {name} is a
 # placeholder fill replaces.
@@ -434,7 +443,6 @@ class WakeEvent:
         args: Any,
         *,
         user: str | None = None,
-        agent: "Agent | None" = None,
         client: str | None = None,
         wake_args: Mapping[str, Any] | None = None,
     ) -> "CallerSubscription":
@@ -443,15 +451,12 @@ class WakeEvent:
         one step. For clients Wakeshift wakes its own ways; native MCP Events
         clients subscribe themselves. Your tool decides who may: authorize isn't
         consulted here. user is the app's ID for the person (required for a
-        personal event); for an app whose users sign in with Wakeshift, agent
-        (wake.exchange) makes the subscription that agent's instead; wake_args are
-        your tool's session_key, harness and conversation_id."""
+        personal event); wake_args are your tool's session_key, harness and
+        conversation_id."""
         _, a_json = self.parse_args(args)
-        if self.personal and not user and agent is None:
-            raise WakeshiftError(
-                400, "bad_arguments", f"{self.name} is personal: pass user (or agent), who the subscription belongs to"
-            )
-        call = self._wake.call(ctx, user=user, agent=agent, client=client, args=wake_args or {})
+        if self.personal and not user:
+            raise WakeshiftError(400, "bad_arguments", f"{self.name} is personal: pass user, who the subscription belongs to")
+        call = self._wake.call(ctx, user=user, client=client, args=wake_args or {})
         out = await self._wake.request_app(
             "POST", "/event-subscriptions", {"call": call.to_json(), "name": self.name, "arguments": a_json}
         )
@@ -471,7 +476,6 @@ class WakeEvent:
         args: Any,
         *,
         user: str | None = None,
-        agent: "Agent | None" = None,
         client: str | None = None,
         wake_args: Mapping[str, Any] | None = None,
     ) -> bool:
@@ -479,7 +483,7 @@ class WakeEvent:
         way unsubscribe_events would: for a tool like "unwatch". False if it
         wasn't subscribed."""
         _, a_json = self.parse_args(args)
-        call = self._wake.call(ctx, user=user, agent=agent, client=client, args=wake_args or {})
+        call = self._wake.call(ctx, user=user, client=client, args=wake_args or {})
         out = await self._wake.request_app(
             "POST", "/event-subscriptions/unsubscribe", {"call": call.to_json(), "name": self.name, "arguments": a_json}
         )
@@ -571,50 +575,42 @@ def _rpc_error_of(err: BaseException, codes: Codes) -> Exception:
     return MCPError(INTERNAL_ERROR, "Wakeshift refused the subscription: " + err.detail)
 
 
-def _default_user(ctx: Any) -> str | None:
+def _default_identify(ctx: Any) -> Identity:
     from .guest import guest_of
 
     g = guest_of(ctx)
-    return g.user if g else None
+    return Identity(user=g.user if g else None)
 
 
-def serve_events(
+def attach_events(
     wake: "Wakeshift",
     server: Any,
     events: list[WakeEvent],
     *,
-    user: Callable[[Any], str | None] | None = None,
-    agent: Callable[[Any], Awaitable[Agent | None] | Agent | None] | None = None,
+    identify: Callable[[Any], Identity | None] | None = None,
 ) -> None:
-    """The events part of Wakeshift.serve_events, on an MCPServer
+    """The events part of Wakeshift.attach, on an MCPServer
     (mcp.server.mcpserver.MCPServer)."""
     from mcp.server.mcpserver import Context
     from mcp.shared.exceptions import MCPError
     from mcp_types import RequestParams
 
     if not events:
-        raise ValueError("wakeshift: serve_events needs at least one event (wake.define_event) defined first")
+        raise ValueError("wakeshift: attach needs at least one event (wake.define_event) defined first")
     low = getattr(server, "_lowlevel_server", None)
     if low is None or not hasattr(server, "add_tool"):
-        raise TypeError("wakeshift: serve_events takes an MCPServer (mcp.server.mcpserver.MCPServer)")
-    user_of = user or _default_user
+        raise TypeError("wakeshift: attach takes an MCPServer (mcp.server.mcpserver.MCPServer)")
+    identify_of = identify or _default_identify
+
+    def user_of(ctx: Any) -> str | None:
+        who = identify_of(ctx)
+        return who.user if who else None
+
     by_name = {e.name: e for e in events}
 
     def ctx_of(c: Any) -> Any:
         # The low-level request context, whichever form the handler got.
         return getattr(c, "request_context", c)
-
-    async def who_of(rc: Any) -> tuple[str | None, Agent | None]:
-        # The caller: the signed-in agent and its user for an app whose users
-        # sign in with Wakeshift (agent), else the app's user.
-        if agent is None:
-            return user_of(rc), None
-        try:
-            got = agent(rc)
-            ag = await got if inspect.isawaitable(got) else got
-        except Exception:
-            ag = None
-        return (ag.user() if ag is not None else None), ag
 
     # ── Native: events/list, events/subscribe, events/unsubscribe ─────────
 
@@ -661,14 +657,12 @@ def serve_events(
             a_obj, a_json = ev.parse_args(p.get("arguments") or {})
         except ArgsError as err:
             raise MCPError(INVALID_PARAMS, str(err)) from err
-        who, ag = await who_of(ctx_of(ctx))
+        who = user_of(ctx_of(ctx))
         if not who:
             raise MCPError(codes.forbidden, fill("native_no_user"))
         call: dict[str, Any] = {"user": who, "client": client, "meta": meta}
         if ua:
             call["user_agent"] = ua
-        if ag is not None:
-            call["agent_token"] = ag.token
         if not unsubscribe and not await ev.allows(Subscriber(user=who, client=client, native=True), a_obj):
             raise MCPError(codes.forbidden, fill("native_refused", event=ev.name))
         body: dict[str, Any] = {
@@ -753,7 +747,7 @@ def serve_events(
         except ArgsError as err:
             return _fail(str(err))
         rc = ctx_of(ctx)
-        who, ag = await who_of(rc)
+        who = user_of(rc)
         if ev.personal and not who:
             return _fail(fill("personal_no_user", event=ev.name))
         client, _, _ = request_info(rc)
@@ -764,7 +758,7 @@ def serve_events(
             out = await wake.request_app(
                 "POST",
                 "/event-subscriptions",
-                {"call": wake.call(rc, user=who, agent=ag, args=wake_args).to_json(), "name": ev.name, "arguments": a_json},
+                {"call": wake.call(rc, user=who, args=wake_args).to_json(), "name": ev.name, "arguments": a_json},
             )
         except Exception as err:
             return _fail(fill("subscribe_failed", detail=_detail(err)))
@@ -784,7 +778,7 @@ def serve_events(
         ctx: Context | None = None,
     ) -> CallToolResult:
         rc = ctx_of(ctx)
-        who, ag = await who_of(rc)
+        who = user_of(rc)
         try:
             if id:
                 if not who:
@@ -799,7 +793,7 @@ def serve_events(
             out = await wake.request_app(
                 "POST",
                 "/event-subscriptions/unsubscribe",
-                {"call": wake.call(rc, user=who, agent=ag, args=wake_args).to_json(), "name": ev.name, "arguments": a_json},
+                {"call": wake.call(rc, user=who, args=wake_args).to_json(), "name": ev.name, "arguments": a_json},
             )
             return _ok(fill("unsubscribed" if out.get("ended") else "not_subscribed", event=ev.name, arguments=_compact(a_json)))
         except ArgsError as err:
@@ -813,7 +807,7 @@ def serve_events(
         conversation_id: str | None = None,
         ctx: Context | None = None,
     ) -> CallToolResult:
-        who, _ = await who_of(ctx_of(ctx))
+        who = user_of(ctx_of(ctx))
         if not who:
             return _fail(fill("list_no_user"))
         try:

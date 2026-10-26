@@ -1,7 +1,7 @@
 """Signed values: base64url JSON, a ".", and its HMAC-SHA256 under key, so only
 the app can make one and nobody can change one. Signed, not encrypted:
-whoever holds one can read it. GuestAuth's clients, codes and tokens and
-WakeshiftSignIn's cookie use these, each with its own key."""
+whoever holds one can read it. GuestAuth's clients, codes and tokens use
+these, each with its own key."""
 
 from __future__ import annotations
 

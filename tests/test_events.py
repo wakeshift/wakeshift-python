@@ -16,6 +16,7 @@ from wakeshift import (
     LIST_TOOL_DESCRIPTION,
     SUBSCRIBE_TOOL_DESCRIPTION,
     UNSUBSCRIBE_TOOL_DESCRIPTION,
+    Identity,
     WakeshiftError,
     speaks_events,
 )
@@ -193,7 +194,7 @@ async def test_bridged_clients_get_subscribe_events_every_client_gets_unsubscrib
     chat_event(wake)
     turn_event(wake)
     server = MCPServer("chat")
-    wake.serve_events(server, user=lambda ctx: "u1")
+    wake.attach(server, identify=lambda ctx: Identity(user="u1"))
     async with served(server, stateless=False) as (_, rpc):
         await initialize(rpc, "claude-code")
         tools = {t["name"]: t for t in (await rpc("tools/list", {}))["result"]["tools"]}
@@ -250,7 +251,7 @@ async def test_a_client_declaring_the_older_events_key_isnt_offered_subscribe_ev
     wake, _ = fake_wake()
     chat_event(wake)
     server = MCPServer("chat")
-    wake.serve_events(server, user=lambda ctx: "u1")
+    wake.attach(server, identify=lambda ctx: Identity(user="u1"))
     async with served(server, stateless=False) as (_, rpc):
         await initialize(rpc, "some-client", {"events": {}})
         tools = sorted(t["name"] for t in (await rpc("tools/list", {}))["result"]["tools"])
@@ -261,7 +262,7 @@ async def test_a_personal_event_needs_a_known_subscriber() -> None:
     wake, _ = fake_wake()
     turn_event(wake)
     server = MCPServer("poker")
-    wake.serve_events(server, user=lambda ctx: None)
+    wake.attach(server, identify=lambda ctx: Identity())
     async with served(server, stateless=False) as (_, rpc):
         await initialize(rpc, "claude-code")
         r = await rpc(
@@ -286,7 +287,7 @@ async def test_a_client_that_speaks_mcp_events_subscribes_natively_and_isnt_offe
     wake, _ = fake_wake(core)
     chat_event(wake)
     server = MCPServer("chat")
-    wake.serve_events(server, user=lambda ctx: "u1")
+    wake.attach(server, identify=lambda ctx: Identity(user="u1"))
     async with served(server, stateless=False) as (_, rpc):
         init = await initialize(rpc, "openai-mcp")
         caps = init["result"]["capabilities"]
@@ -356,7 +357,7 @@ async def test_draft_clients_get_the_drafts_codes() -> None:
     wake, _ = fake_wake(core)
     chat_event(wake)
     server = MCPServer("chat")
-    wake.serve_events(server, user=lambda ctx: "u1")
+    wake.attach(server, identify=lambda ctx: Identity(user="u1"))
     async with served(server, stateless=False) as (_, rpc):
         await initialize(rpc, "some-draft-client", capabilities={"extensions": {EXTENSION_KEY: {}}})
         delivery = {"mode": "webhook", "url": "https://x.example/cb", "secret": "whsec_x"}
@@ -427,7 +428,7 @@ async def test_an_authorize_that_raises_refuses_on_both_paths_and_the_app_hears_
         "chat.message", description="A message", args=Args, payload=Msg, text=lambda m, a: m.text, authorize=authorize
     )
     server = MCPServer("chat")
-    wake.serve_events(server, user=lambda ctx: "u1")
+    wake.attach(server, identify=lambda ctx: Identity(user="u1"))
     async with served(server, stateless=False) as (_, rpc):
         await initialize(rpc, "claude-code")
         r = await rpc(
@@ -444,13 +445,13 @@ async def test_an_authorize_that_raises_refuses_on_both_paths_and_the_app_hears_
     assert not [p for _, p, _ in core.requests if "subscribe" in p], "nothing reached the core"
 
 
-def test_serve_events_needs_events_and_an_mcpserver() -> None:
+def test_attach_needs_events_and_an_mcpserver() -> None:
     wake, _ = fake_wake()
     with pytest.raises(ValueError, match="at least one event"):
-        wake.serve_events(MCPServer("x"))
+        wake.attach(MCPServer("x"))
     chat_event(wake)
     with pytest.raises(TypeError, match="MCPServer"):
-        wake.serve_events(object())
+        wake.attach(object())
 
 
 async def test_an_events_subscribe_and_end_a_tool_subscribes_its_own_caller_and_ends_a_subscription_by_id() -> None:
