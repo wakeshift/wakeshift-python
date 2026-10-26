@@ -1,4 +1,4 @@
-"""harness_agent names the agent a guest's MCP client signs in as: its
+"""harness_agent names the agent for an MCP client: its
 harness's ID ("copilot-cli" → copilot, "Claude Code" → claude-code), else its
 name as an ID. A port of the core's harnesses.AgentID: the Node SDK's
 test/agent-ids.json is the Go function's output, and every SDK's tests check

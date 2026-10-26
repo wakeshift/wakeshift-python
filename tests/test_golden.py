@@ -34,6 +34,19 @@ class Turn(BaseModel):
     hand: list[str] | None = Field(None, description="Your hole cards")
 
 
+# Defined out of alphabetical order: arguments and required fields are listed
+# in name order, as the other SDKs list them.
+class RunArgs(BaseModel):
+    repo: str = Field(description="The repository")
+    pr: int = Field(description="The pull request")
+    branch: str | None = Field(None, description="Only runs on this branch")
+
+
+class Run(BaseModel):
+    status: str = Field(description="How it ended")
+    branch: str = Field(description="The branch it ran on")
+
+
 def input_shape(s: dict[str, Any]) -> dict[str, Any]:
     """What the golden file keeps of a tool's input schema: each property's
     type, description and enum, and what's required (the rest is each MCP SDK's
@@ -77,6 +90,13 @@ async def test_events_list_tools_and_manifest_match_the_other_sdks() -> None:
         text=lambda t, a: f"Your move at {a.table}",
         personal=True,
     )
+    run = wake.define_event(
+        "ci.run",
+        description="A CI run on a pull request finished.",
+        args=RunArgs,
+        payload=Run,
+        text=lambda r, a: f"CI {r.status}",
+    )
     server = MCPServer("sample")
     wake.attach(server)
     async with served(server) as (_, rpc):
@@ -89,7 +109,7 @@ async def test_events_list_tools_and_manifest_match_the_other_sdks() -> None:
         tools = (await rpc("tools/list", {}))["result"]["tools"]
     got = {
         "events": events,
-        "manifest": [chat.manifest, turn.manifest],
+        "manifest": [chat.manifest, turn.manifest, run.manifest],
         "tools": sorted(
             ({"name": t["name"], "description": t["description"], "inputSchema": input_shape(t["inputSchema"])} for t in tools),
             key=lambda t: t["name"],

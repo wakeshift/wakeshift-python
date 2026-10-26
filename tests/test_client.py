@@ -343,6 +343,17 @@ def test_call_reads_the_context_and_the_wake_arguments() -> None:
         "only strings, and not empty ones"
     )
 
+    # The tool being called (a connector beacon in its result names it): from
+    # a low-level context's tools/call params, or passed.
+    class ToolCtx(Ctx):
+        method = "tools/call"
+        params = {"name": "watch", "arguments": {}}
+
+    assert wake.call(ToolCtx()).tool == "watch"
+    assert wake.call(ToolCtx(), tool="join").tool == "join"
+    assert wake.call(Ctx(), tool="watch").to_json()["tool"] == "watch"
+    assert wake.call_of(client_name="x", tool=" watch ").to_json() == {"client": "x", "tool": "watch"}
+
 
 def test_wake_args_session_key_harness_and_conversation_id() -> None:
     assert list(WAKE_ARGS_SCHEMA) == ["session_key", "harness", "conversation_id"]
@@ -366,3 +377,12 @@ async def test_addition_warns_once_when_the_core_recognised_nothing() -> None:
     a2 = await wake2.addition(wake2.call_of(client_name="claude-code"))
     assert a2.agent is not None and (a2.agent.harness, a2.agent.via) == ("claude-code", "client")
     assert quiet == []
+
+
+def test_the_package_no_longer_exports_guest_sign_in() -> None:
+    import wakeshift
+
+    for name in ("GuestAuth", "Guest", "guest_of"):
+        assert not hasattr(wakeshift, name), name
+        assert name not in wakeshift.__all__, name
+    assert not hasattr(wakeshift.Wakeshift, "secret_seed")

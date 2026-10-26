@@ -45,13 +45,12 @@ from .events import (
     WakeEvent,
     speaks_events,
 )
-from .guest import Guest, GuestAuth, guest_of
 from .harness import harness_agent
 from .key import AppKey, parse_key, sign_assertion
 from .spec import EXTENSION_KEY, LEGACY_KEY, TEXT_META
 from .spec import REVISION as EVENTS_REVISION
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "CONVERSATION_ARG",
@@ -75,8 +74,6 @@ __all__ = [
     "Call",
     "CallerSubscription",
     "ConversationId",
-    "Guest",
-    "GuestAuth",
     "Harness",
     "Identity",
     "PublishUrl",
@@ -91,7 +88,6 @@ __all__ = [
     "Wakeshift",
     "WakeshiftError",
     "apply_addition",
-    "guest_of",
     "harness_agent",
     "is_code",
     "parse_key",

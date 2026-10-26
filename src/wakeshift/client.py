@@ -97,10 +97,13 @@ class Call:
     conversation: str | None = None
     #: The program the agent says it runs in (harness): a hint, never a credential.
     harness: str | None = None
+    #: The tool being called: a connector beacon in its result names it, and
+    #: Wakeshift's hooks act on the beacon only from that tool's result.
+    tool: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {"client": self.client}
-        for k in ("user", "meta", "session", "user_agent", "conversation", "harness"):
+        for k in ("user", "meta", "session", "user_agent", "conversation", "harness", "tool"):
             v = getattr(self, k)
             if v:
                 out[k] = v
@@ -261,6 +264,17 @@ def request_info(ctx: Any) -> tuple[str, dict[str, Any], Mapping[str, str]]:
     return client, meta, headers
 
 
+def tool_of(ctx: Any) -> str:
+    """The name of the tool being called, from an MCP tool's Context or a
+    low-level ServerRequestContext (its tools/call params); empty if unknown."""
+    rc = getattr(ctx, "request_context", ctx)
+    if getattr(rc, "method", None) not in (None, "tools/call"):
+        return ""
+    params = getattr(rc, "params", None)
+    name = params.get("name") if isinstance(params, Mapping) else getattr(params, "name", None)
+    return name if isinstance(name, str) else ""
+
+
 def client_capabilities(ctx: Any) -> dict[str, Any]:
     """The capabilities the client declared, as a dict (empty if unknown)."""
     rc = getattr(ctx, "request_context", ctx)
@@ -393,10 +407,14 @@ class Wakeshift:
         session: str | None = None,
         harness: str | None = None,
         conversation: str | None = None,
+        tool: str | None = None,
     ) -> Call:
         """Packs the tool call from an MCP tool's Context: its _meta and
         User-Agent, the client's name, the user, and session_key, harness and
-        conversation_id from args (the tool's arguments)."""
+        conversation_id from args (the tool's arguments). tool is the name of
+        the tool being called (read from the Context where it says, else pass
+        it): Wakeshift's hooks act on a connector beacon only from the result
+        of the tool it names."""
         name, meta, headers = request_info(ctx)
         return self.call_of(
             client_name=name if client is None else client,
@@ -406,6 +424,7 @@ class Wakeshift:
             user_agent=headers.get("user-agent", "") if headers else "",
             harness=harness if harness is not None else _arg(args, HARNESS_ARG),
             conversation=conversation if conversation is not None else _arg(args, CONVERSATION_ARG),
+            tool=tool if tool is not None else tool_of(ctx),
         )
 
     def call_of(
@@ -418,8 +437,10 @@ class Wakeshift:
         user_agent: str | None = None,
         harness: str | None = None,
         conversation: str | None = None,
+        tool: str | None = None,
     ) -> Call:
-        """Packs a tool call without an MCP framework."""
+        """Packs a tool call without an MCP framework. tool is the name of the
+        tool being called."""
         return Call(
             client=client_name or "",
             user=user or None,
@@ -428,6 +449,7 @@ class Wakeshift:
             user_agent=user_agent or None,
             harness=(harness or "").strip() or None,
             conversation=(conversation or "").strip() or None,
+            tool=(tool or "").strip() or None,
         )
 
     # ── Topics ─────────────────────────────────────────────────────────────
@@ -603,7 +625,9 @@ class Wakeshift:
         else; plus unsubscribe_events and list_subscriptions for every client.
 
         identify tells who is behind a request (it gets the request context) as
-        an Identity; default: the guest GuestAuth signed in::
+        an Identity, from the app's own sign-in. Without it, requests have no
+        user: native subscriptions, personal events and list_subscriptions
+        need one::
 
             wake.attach(server, identify=lambda ctx: Identity(user=my_user(ctx)))"""
         from .events import attach_events
@@ -632,10 +656,11 @@ class Wakeshift:
         await self.ensure_events()
         return await self._request(method, path, body)
 
-    # ── Guests' workspaces (GuestAuth) ─────────────────────────────────────
+    # ── Users' workspaces ──────────────────────────────────────────────────
 
     async def workspace(self, user: str, name: str) -> str:
-        """The workspace Wakeshift keeps for one of the app's users, creating it on first use."""
+        """The workspace Wakeshift keeps for one of the app's users, created on
+        first use. Topics keep that user's conversations there."""
         return (await self._request("POST", "/workspaces", {"external_id": user, "name": name}))["workspace"]
 
     async def add_agent(self, workspace: str, agent: str, display_name: str) -> str:
@@ -649,10 +674,6 @@ class Wakeshift:
         """Checks that one of the app's agents still has a live grant. Raises
         WakeshiftError no_grant once revoked, unknown_workspace once forgotten."""
         await self._request("POST", f"/workspaces/{quote(workspace, safe='')}/agents/{quote(agent, safe='')}/token")
-
-    def secret_seed(self) -> bytes:
-        """The app key's seed: what GuestAuth keys its signed values from. Never send or log it."""
-        return self._key.seed
 
     # ── HTTP ───────────────────────────────────────────────────────────────
 

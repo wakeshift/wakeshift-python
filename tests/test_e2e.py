@@ -19,15 +19,13 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
 import pytest
 from mcp.server.mcpserver import Context, MCPServer
 from pydantic import BaseModel
 
-from wakeshift import GuestAuth, Identity, Wakeshift, WakeshiftError, guest_of, is_code
-from wakeshift.key import b64url
+from wakeshift import Identity, Wakeshift, WakeshiftError, harness_agent, is_code
 
 from .helpers import Rpc, initialize, served
 
@@ -308,95 +306,49 @@ async def test_events_defined_served_emitted_bridged_and_native() -> None:
             ln.stop()
 
 
-async def test_guest_sign_in_against_a_real_core() -> None:
+async def test_an_apps_own_users_against_a_real_core() -> None:
+    """The app signs its users in itself (a bearer token per user here) and
+    keeps a workspace and agent for each: topics keep the user's
+    conversations in that workspace, and forget_user removes it."""
     core, key = harness()
     wake = Wakeshift(key, core=core)
     server = MCPServer("ci-bot")
+    # The app's own sign-in: a bearer token names one of its users.
+    users: dict[str, str] = {}
+
+    def user_of(ctx: Context) -> str:
+        req = ctx.request_context.request
+        assert req is not None
+        user = users.get(req.headers.get("authorization", "").removeprefix("Bearer "))
+        assert user is not None
+        return user
 
     @server.tool()
     async def watch(repo: str, ctx: Context) -> Any:
-        who = guest_of(ctx)
-        assert who is not None
-        sub = await wake.subscribe(wake.call(ctx, client=who.client, user=who.user), f"guests/{repo}")
-        return sub.result(f"Watching {repo} for {who.agent}.")
+        sub = await wake.subscribe(wake.call(ctx, user=user_of(ctx)), f"users/{repo}")
+        return sub.result(f"Watching {repo}.")
 
-    guest = GuestAuth(wake, "http://127.0.0.1:8000/mcp")
-    guest_granted = GuestAuth(wake, "http://127.0.0.1:8000/mcp", grants=True)
-    # Which GuestAuth serves: the plain one, then the one with grants.
-    current = [guest]
+    async with served(server) as (client, rpc):
+        token = secrets.token_urlsafe(16)
+        users[token] = "user-" + secrets.token_hex(6)
+        user = users[token]
+        workspace = await wake.workspace(user, "Ada")
+        assert await wake.workspace(user, "Ada") == workspace, "the same user gets the same workspace"
+        assert await wake.workspace(user + "-other", "Bob") != workspace
 
-    def wrap(app: Any) -> Any:
-        plain, granted = guest.wrap(app), guest_granted.wrap(app)
-        return lambda scope, receive, send: (plain if current[0] is guest else granted)(scope, receive, send)
-
-    async with served(server, wrap=wrap) as (client, rpc):
-        redirect = "http://127.0.0.1:9/cb"
-
-        async def sign_in(client_name: str) -> tuple[dict[str, Any], dict[str, Any]]:
-            reg = (await client.post("/oauth/register", json={"client_name": client_name, "redirect_uris": [redirect]})).json()
-            verifier = b64url(secrets.token_bytes(32))
-            challenge = b64url(hashlib.sha256(verifier.encode()).digest())
-            q = {
-                "response_type": "code",
-                "client_id": reg["client_id"],
-                "redirect_uri": redirect,
-                "code_challenge": challenge,
-                "code_challenge_method": "S256",
-            }
-            auth = await client.get("/oauth/authorize?" + urlencode(q))
-            assert auth.status_code == 302, auth.text
-            code = parse_qs(urlsplit(auth.headers["location"]).query)["code"][0]
-            r = await client.post(
-                "/oauth/token",
-                data={
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "code_verifier": verifier,
-                    "redirect_uri": redirect,
-                    "client_id": reg["client_id"],
-                    "client_secret": reg["client_secret"],
-                },
-            )
-            assert r.status_code == 200, r.text
-            return reg, r.json()
-
-        async def refresh(reg: dict[str, Any], rt: str) -> httpx.Response:
-            return await client.post(
-                "/oauth/token",
-                data={
-                    "grant_type": "refresh_token",
-                    "refresh_token": rt,
-                    "client_id": reg["client_id"],
-                    "client_secret": reg["client_secret"],
-                },
-            )
-
-        reg, out = await sign_in("Claude Code")
-        g = guest.verify(out["access_token"])
-        assert g is not None and g.agent == "claude-code"
-
-        # Without the token, /mcp asks for one; with it, the guest's tool call subscribes in the guest's own workspace.
-        assert (await client.post("/mcp", json={})).status_code == 401
-        client.headers["Authorization"] = "Bearer " + out["access_token"]
+        client.headers["Authorization"] = "Bearer " + token
         await initialize(rpc, "claude-code")
         res = await rpc("tools/call", {"name": "watch", "arguments": {"repo": "acme"}})
-        assert "Watching acme for claude-code." in text_of(res)
-        assert await wake.workspace(g.user, "x") == g.workspace, "topics used another workspace"
-        assert (await wake.topic_status("guests/acme")).subscriptions == 1
+        assert "Watching acme." in text_of(res)
+        assert await wake.workspace(user, "x") == workspace, "topics used another workspace"
+        assert (await wake.topic_status("users/acme")).subscriptions == 1
 
-        # A refresh works, and rotates; after forget_user it's refused, and leaves no workspace behind.
-        again = await refresh(reg, out["refresh_token"])
-        assert again.status_code == 200, again.text
-        assert again.json()["refresh_token"] != out["refresh_token"]
-        assert await wake.forget_user(g.user) is True
-        gone = await refresh(reg, again.json()["refresh_token"])
-        assert gone.status_code == 400
-        assert gone.json()["error"] == "invalid_grant"
-        assert await wake.forget_user(g.user) is False, "the refused refresh left a workspace"
+        assert await wake.forget_user(user) is True
+        assert await wake.forget_user(user) is False
+        assert await wake.forget_user(user + "-other") is True
 
-        # With an agent scope in the manifest, grants: a grant per guest, checked at each refresh.
-        scope = [{"pattern": "app.ci-bot.ci.*", "description": "CI runs it watches"}]
         # Wakeshift refuses a manifest that asks for Wakeshift accounts or redirect_uris: apps sign their own users in.
+        scope = [{"pattern": "app.ci-bot.ci.*", "description": "CI runs it watches"}]
         for refused in (
             {"accounts": "wakeshift"},
             {"agent": {"wake": scope, "post": scope, "ttl_days": 30, "redirect_uris": ["http://127.0.0.1:8000/cb"]}},
@@ -404,15 +356,14 @@ async def test_guest_sign_in_against_a_real_core() -> None:
             with pytest.raises(WakeshiftError) as e:
                 await wake.publish_manifest(refused)
             assert is_code(e.value, "bad_manifest")
+        # With an agent scope in the manifest, the app adds its users' agents, each with a grant.
         m = await wake.publish_manifest({"agent": {"wake": scope, "post": scope, "ttl_days": 30}})
         assert m["agent"]["ttl_days"] == 30
-        current[0] = guest_granted
-        del client.headers["Authorization"]
-        reg2, first = await sign_in("codex-mcp-client")
-        g2 = guest_granted.verify(first["access_token"])
-        assert g2 is not None and g2.agent == "codex"
-        await wake.check_agent(g2.workspace, g2.agent)  # the grant is live
-        assert (await refresh(reg2, first["refresh_token"])).status_code == 200
+        agent = harness_agent("codex-mcp-client")
+        assert agent == "codex"
+        ws2 = await wake.workspace("user-" + secrets.token_hex(6), "Grace")
+        assert await wake.add_agent(ws2, agent, "Codex")
+        await wake.check_agent(ws2, agent)  # the grant is live
 
 
 async def test_a_current_key_asks_wakeshift_which_app_it_is() -> None:

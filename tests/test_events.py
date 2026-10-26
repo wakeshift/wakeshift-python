@@ -147,9 +147,9 @@ async def test_a_personal_event_is_emitted_to_one_subscriber() -> None:
     turn = turn_event(wake)
     with pytest.raises(WakeshiftError, match="personal: pass to="):
         await turn.emit({"table": "juniper"}, {"hole": ["As", "Kd"], "toCall": 2})
-    await turn.emit({"table": "juniper"}, {"hole": ["As", "Kd"], "toCall": 2}, to="guest:abc")
+    await turn.emit({"table": "juniper"}, {"hole": ["As", "Kd"], "toCall": 2}, to="ada")
     body = core.bodies("/events/emit")[-1]
-    assert body["to"] == "guest:abc"
+    assert body["to"] == "ada"
     assert body["payload"] == {"hole": ["As", "Kd"], "toCall": 2}
 
 
@@ -219,6 +219,7 @@ async def test_bridged_clients_get_subscribe_events_every_client_gets_unsubscrib
         assert call["arguments"] == {"channel": "eng"}
         assert call["call"]["user"] == "u1"
         assert call["call"]["client"] == "claude-code"
+        assert call["call"]["tool"] == "subscribe_events"
         assert call["call"]["harness"] == "claude-code"
 
         # authorize refuses, bad arguments are explained, nothing reaches the core.
@@ -245,6 +246,38 @@ async def test_bridged_clients_get_subscribe_events_every_client_gets_unsubscrib
             "tools/call", {"name": "unsubscribe_events", "arguments": {"event": "chat.message", "arguments": {"channel": "eng"}}}
         )
         assert "Stopped chat.message" in text_of(un)
+
+
+class RunArgs(BaseModel):
+    repo: str
+    pr: int
+    branch: str | None = None
+
+
+class Run(BaseModel):
+    status: str
+    branch: str
+
+
+async def test_the_tools_echo_arguments_in_name_order() -> None:
+    # As the other SDKs echo them (as Wakeshift keeps them), whatever order
+    # the event defines them in.
+    core = FakeCore(default_ok=True)
+    core.on(
+        "POST", "/event-subscriptions", lambda b: (200, {"event_subscription": {"id": "es1", "created": False}, "addition": {}})
+    )
+    core.on("POST", "/event-subscriptions/unsubscribe", lambda b: (200, {"ended": True}))
+    wake, _ = fake_wake(core)
+    wake.define_event("ci.run", description="A CI run finished.", args=RunArgs, payload=Run, text=lambda r, a: r.status)
+    server = MCPServer("ci")
+    wake.attach(server, identify=lambda ctx: Identity(user="u1"))
+    args = {"pr": 5, "repo": "web", "branch": "main"}
+    async with served(server, stateless=False) as (_, rpc):
+        await initialize(rpc, "claude-code")
+        r = await rpc("tools/call", {"name": "subscribe_events", "arguments": {"event": "ci.run", "arguments": args}})
+        assert text_of(r) == 'Already subscribed to ci.run {"branch":"main","pr":5,"repo":"web"}: renewed.'
+        un = await rpc("tools/call", {"name": "unsubscribe_events", "arguments": {"event": "ci.run", "arguments": args}})
+        assert text_of(un) == 'Stopped ci.run {"branch":"main","pr":5,"repo":"web"}.'
 
 
 async def test_a_client_declaring_the_older_events_key_isnt_offered_subscribe_events() -> None:
@@ -373,6 +406,25 @@ async def test_draft_clients_get_the_drafts_codes() -> None:
         # A client that declared the extension isn't offered subscribe_events either.
         names = sorted(t["name"] for t in (await rpc("tools/list", {}))["result"]["tools"])
         assert names == ["list_subscriptions", "unsubscribe_events"]
+
+
+async def test_subscription_limit_is_resource_exhausted() -> None:
+    message = "this user already has 20 live webhook subscriptions to this app"
+    core = FakeCore(default_ok=True)
+    core.on("POST", "/events/subscribe", lambda b: (403, {"error": {"code": "subscription_limit", "message": message}}))
+    wake, _ = fake_wake(core)
+    chat_event(wake)
+    server = MCPServer("chat")
+    wake.attach(server, identify=lambda ctx: Identity(user="u1"))
+    async with served(server, stateless=False) as (_, rpc):
+        await initialize(rpc, "some-draft-client", capabilities={"extensions": {EXTENSION_KEY: {}}})
+        delivery = {"mode": "webhook", "url": "https://x.example/cb", "secret": "whsec_x"}
+        err = (await rpc("events/subscribe", {"name": "chat.message", "arguments": {"channel": "eng"}, "delivery": delivery}))[
+            "error"
+        ]
+        assert err["code"] == -32025
+        assert "20 live webhook subscriptions" in err["message"]
+        assert err["data"] == {"kind": "subscriptions"}
 
 
 def test_spec_constants_match_the_cores() -> None:

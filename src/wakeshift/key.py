@@ -67,7 +67,7 @@ class AppKey:
     #: The app's ID for an older key, which names it; None for a current one
     #: (Wakeshift says: ``await wake.app()``).
     app_id: str | None
-    #: The 32-byte seed: what the SDK's own signed values (guest sign-in) are keyed from. Never send or log it.
+    #: The 32-byte seed the signing key is made from. Never send or log it.
     seed: bytes = field(repr=False)
     private_key: Ed25519PrivateKey = field(repr=False)
     #: The key's ID, which every assertion names it by.

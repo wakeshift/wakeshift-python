@@ -35,10 +35,10 @@ async def test_the_readmes_examples_run(monkeypatch: pytest.MonkeyPatch) -> None
     core.on("POST", "/topics/publish", lambda b: (200, {"matched": 1}))
     ns["wake"]._http = httpx.AsyncClient(transport=httpx.MockTransport(core.handler))
     await ns["on_message"]("eng", "ada", "shipped it")
-    await ns["on_turn"]("juniper", "guest:abc", ["As", "Kd"], 2)
+    await ns["on_turn"]("juniper", "ada", ["As", "Kd"], 2)
     await ns["on_ci"]("Acme", "failure", "https://ci.example/1")
     emits = core.bodies("/events/emit")
     assert emits[0]["text"] == "ada in #eng: shipped it"
-    assert emits[1]["to"] == "guest:abc"
+    assert emits[1]["to"] == "ada"
     assert emits[1]["text"] == "Your move at juniper: 2 to call"
     assert core.bodies("/topics/publish")[0]["topics"] == ["ci/acme"]

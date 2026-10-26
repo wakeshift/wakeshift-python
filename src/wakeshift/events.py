@@ -142,6 +142,12 @@ def _compact(v: Any) -> str:
     return json.dumps(v, separators=(",", ":"), ensure_ascii=False)
 
 
+def _canonical(v: Any) -> str:
+    """JSON with every object's keys in name order, as Wakeshift keeps a
+    subscription's arguments: how the tools' results echo them."""
+    return json.dumps(v, separators=(",", ":"), ensure_ascii=False, sort_keys=True)
+
+
 # ── Schemas ─────────────────────────────────────────────────────────────────
 # A pydantic model's JSON Schema, written the way zod's is (and the Go SDK's):
 # no titles or defaults, an optional field as its plain type, nested models
@@ -191,16 +197,29 @@ def _tidy(node: Any, root: bool = False) -> Any:
     return out
 
 
+def _sort_required(node: Any) -> Any:
+    """node with every required list in name order, whatever order the fields
+    were defined in, as the other SDKs list them."""
+    if isinstance(node, list):
+        return [_sort_required(x) for x in node]
+    if not isinstance(node, Mapping):
+        return node
+    out = {k: _sort_required(v) for k, v in node.items()}
+    if isinstance(out.get("required"), list) and all(isinstance(r, str) for r in out["required"]):
+        out["required"] = sorted(out["required"])
+    return out
+
+
 def json_schema(schema: Schema) -> dict[str, Any]:
     """A pydantic model, or a JSON Schema object, as the JSON Schema Wakeshift
     keeps (2020-12, without $schema)."""
     if isinstance(schema, type) and issubclass(schema, BaseModel):
         raw = schema.model_json_schema(by_alias=True)
-        return _tidy(_deref(raw, raw.get("$defs", {})), root=True)
+        return _sort_required(_tidy(_deref(raw, raw.get("$defs", {})), root=True))
     if isinstance(schema, Mapping):
         out = dict(schema)
         out.pop("$schema", None)
-        return out
+        return _sort_required(out)
     raise TypeError("wakeshift: a schema is a pydantic model class or a JSON Schema dict")
 
 
@@ -445,6 +464,7 @@ class WakeEvent:
         user: str | None = None,
         client: str | None = None,
         wake_args: Mapping[str, Any] | None = None,
+        tool: str | None = None,
     ) -> "CallerSubscription":
         """Subscribes the conversation calling your tool, the way
         subscribe_events would, so a tool like "join" can set up its own wakes in
@@ -452,11 +472,13 @@ class WakeEvent:
         clients subscribe themselves. Your tool decides who may: authorize isn't
         consulted here. user is the app's ID for the person (required for a
         personal event); wake_args are your tool's session_key, harness and
-        conversation_id."""
+        conversation_id; tool is your tool's name, if the Context doesn't say
+        it (Wakeshift's hooks act on a connector beacon only from the result of
+        the tool it names)."""
         _, a_json = self.parse_args(args)
         if self.personal and not user:
             raise WakeshiftError(400, "bad_arguments", f"{self.name} is personal: pass user, who the subscription belongs to")
-        call = self._wake.call(ctx, user=user, client=client, args=wake_args or {})
+        call = self._wake.call(ctx, user=user, client=client, args=wake_args or {}, tool=tool)
         out = await self._wake.request_app(
             "POST", "/event-subscriptions", {"call": call.to_json(), "name": self.name, "arguments": a_json}
         )
@@ -478,12 +500,13 @@ class WakeEvent:
         user: str | None = None,
         client: str | None = None,
         wake_args: Mapping[str, Any] | None = None,
+        tool: str | None = None,
     ) -> bool:
         """Ends the calling conversation's subscription with these arguments, the
         way unsubscribe_events would: for a tool like "unwatch". False if it
         wasn't subscribed."""
         _, a_json = self.parse_args(args)
-        call = self._wake.call(ctx, user=user, client=client, args=wake_args or {})
+        call = self._wake.call(ctx, user=user, client=client, args=wake_args or {}, tool=tool)
         out = await self._wake.request_app(
             "POST", "/event-subscriptions/unsubscribe", {"call": call.to_json(), "name": self.name, "arguments": a_json}
         )
@@ -568,18 +591,13 @@ def _rpc_error_of(err: BaseException, codes: Codes) -> Exception:
         return MCPError(codes.not_found, err.detail, {"kind": "event"})
     if c == "unsupported":
         return MCPError(codes.unsupported, err.detail, {"feature": "deliveryMode"})
+    if c == "subscription_limit":
+        return MCPError(codes.resource_exhausted, err.detail, {"kind": "subscriptions"})
     if c in ("bad_request", "bad_arguments"):
         return MCPError(INVALID_PARAMS, err.detail)
     if c in ("unknown_session", "other_client", "unknown_conversation"):
         return MCPError(codes.forbidden, "another client of yours holds that subscription")
     return MCPError(INTERNAL_ERROR, "Wakeshift refused the subscription: " + err.detail)
-
-
-def _default_identify(ctx: Any) -> Identity:
-    from .guest import guest_of
-
-    g = guest_of(ctx)
-    return Identity(user=g.user if g else None)
 
 
 def attach_events(
@@ -600,10 +618,10 @@ def attach_events(
     low = getattr(server, "_lowlevel_server", None)
     if low is None or not hasattr(server, "add_tool"):
         raise TypeError("wakeshift: attach takes an MCPServer (mcp.server.mcpserver.MCPServer)")
-    identify_of = identify or _default_identify
 
     def user_of(ctx: Any) -> str | None:
-        who = identify_of(ctx)
+        # Without identify, requests have no user.
+        who = identify(ctx) if identify else None
         return who.user if who else None
 
     by_name = {e.name: e for e in events}
@@ -722,7 +740,7 @@ def attach_events(
         fill(
             "event_line",
             name=e.name,
-            arguments=", ".join((e.manifest["arguments"].get("properties") or {}).keys()),
+            arguments=", ".join(sorted((e.manifest["arguments"].get("properties") or {}).keys())),
             description=e.description,
         )
         for e in events[:_MAX_LISTED_EVENTS]
@@ -758,13 +776,17 @@ def attach_events(
             out = await wake.request_app(
                 "POST",
                 "/event-subscriptions",
-                {"call": wake.call(rc, user=who, args=wake_args).to_json(), "name": ev.name, "arguments": a_json},
+                {
+                    "call": wake.call(rc, user=who, args=wake_args, tool="subscribe_events").to_json(),
+                    "name": ev.name,
+                    "arguments": a_json,
+                },
             )
         except Exception as err:
             return _fail(fill("subscribe_failed", detail=_detail(err)))
         created = bool((out.get("event_subscription") or {}).get("created"))
         return _ok(
-            fill("subscribed" if created else "renewed", event=ev.name, arguments=_compact(a_json)),
+            fill("subscribed" if created else "renewed", event=ev.name, arguments=_canonical(a_json)),
             Addition.from_json(out.get("addition")),
         )
 
@@ -793,9 +815,15 @@ def attach_events(
             out = await wake.request_app(
                 "POST",
                 "/event-subscriptions/unsubscribe",
-                {"call": wake.call(rc, user=who, args=wake_args).to_json(), "name": ev.name, "arguments": a_json},
+                {
+                    "call": wake.call(rc, user=who, args=wake_args, tool="unsubscribe_events").to_json(),
+                    "name": ev.name,
+                    "arguments": a_json,
+                },
             )
-            return _ok(fill("unsubscribed" if out.get("ended") else "not_subscribed", event=ev.name, arguments=_compact(a_json)))
+            return _ok(
+                fill("unsubscribed" if out.get("ended") else "not_subscribed", event=ev.name, arguments=_canonical(a_json))
+            )
         except ArgsError as err:
             return _fail(str(err))
         except Exception as err:
