@@ -22,10 +22,10 @@ from typing import Any
 
 import httpx
 import pytest
-from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel
 
-from wakeshift import Identity, Wakeshift, WakeshiftError, harness_agent, is_code
+from wakeshift import Identity, Recipient, Subscription, ToolCall, Wakeshift, WakeshiftError, harness_agent, is_code
 
 from .helpers import Rpc, initialize, served
 
@@ -171,7 +171,6 @@ class Turn(BaseModel):
 async def test_events_defined_served_emitted_bridged_and_native() -> None:
     core, key = harness()
     wake = Wakeshift(key, core=core)
-    assert wake.mode == "test"
     build = wake.define_event(
         "ci.build",
         description="A CI run on a repo finished",
@@ -308,25 +307,33 @@ async def test_events_defined_served_emitted_bridged_and_native() -> None:
 
 async def test_an_apps_own_users_against_a_real_core() -> None:
     """The app signs its users in itself (a bearer token per user here) and
-    keeps a workspace and agent for each: topics keep the user's
-    conversations in that workspace, and forget_user removes it."""
+    keeps a workspace and agent for each: a wrapped tool's subscription keeps
+    the user's conversation in that workspace, and forget_user removes it."""
     core, key = harness()
     wake = Wakeshift(key, core=core)
+    builds = wake.define_event(
+        "users.build",
+        description="A build of one of your repos finished",
+        args=Repo,
+        payload=Build,
+        text=lambda b, a: f"CI {b.conclusion} on {a.repo}",
+        personal=True,
+    )
     server = MCPServer("ci-bot")
     # The app's own sign-in: a bearer token names one of its users.
     users: dict[str, str] = {}
 
-    def user_of(ctx: Context) -> str:
-        req = ctx.request_context.request
-        assert req is not None
-        user = users.get(req.headers.get("authorization", "").removeprefix("Bearer "))
-        assert user is not None
-        return user
+    def user_of(ctx: Any) -> str | None:
+        req = ctx.request
+        return users.get(req.headers.get("authorization", "").removeprefix("Bearer ")) if req is not None else None
 
-    @server.tool()
-    async def watch(repo: str, ctx: Context) -> Any:
-        sub = await wake.subscribe(wake.call(ctx, user=user_of(ctx)), f"users/{repo}")
-        return sub.result(f"Watching {repo}.")
+    attached = wake.attach(server, identify=lambda ctx: Identity(user=user_of(ctx)))
+
+    @attached.tool()
+    async def watch(repo: str, call: ToolCall) -> str:
+        """Wake me when a build of a repo finishes."""
+        await call.subscribe(builds, {"repo": repo})
+        return f"Watching {repo}."
 
     async with served(server) as (client, rpc):
         token = secrets.token_urlsafe(16)
@@ -337,11 +344,14 @@ async def test_an_apps_own_users_against_a_real_core() -> None:
         assert await wake.workspace(user + "-other", "Bob") != workspace
 
         client.headers["Authorization"] = "Bearer " + token
+        client.headers["User-Agent"] = "claude-code/2.1.280"
         await initialize(rpc, "claude-code")
         res = await rpc("tools/call", {"name": "watch", "arguments": {"repo": "acme"}})
         assert "Watching acme." in text_of(res)
-        assert await wake.workspace(user, "x") == workspace, "topics used another workspace"
-        assert (await wake.topic_status("users/acme")).subscriptions == 1
+        assert await wake.workspace(user, "x") == workspace, "the subscription used another workspace"
+        assert (await builds.status({"repo": "acme"}, to=user)).subscriptions == 1
+        got = await builds.emit({"repo": "acme"}, {"conclusion": "success", "url": "https://ci.example/3"}, to=user)
+        assert got.matched == 1, got
 
         assert await wake.forget_user(user) is True
         assert await wake.forget_user(user) is False
@@ -374,7 +384,6 @@ async def test_a_current_key_asks_wakeshift_which_app_it_is() -> None:
     with open(HARNESS) as f:
         new_key = json.load(f)["new_key"]
     wake = Wakeshift(new_key, core=core)
-    assert wake.mode is None
     with pytest.raises(RuntimeError, match="call await wake.app"):
         _ = wake.app_id
     before = await wake.workspace("new-key", "New key")
@@ -382,3 +391,113 @@ async def test_a_current_key_asks_wakeshift_which_app_it_is() -> None:
     assert (info.id, info.name) == ("ci-bot", "CI bot")
     assert wake.app_id == "ci-bot"
     assert await wake.workspace("new-key", "New key") == before
+
+
+class Hand(BaseModel):
+    to_call: str
+
+
+async def test_wrapped_tools_against_a_real_core() -> None:
+    """@attached.tool() end to end (internal/coretest/sdkwrapped_test.go, in
+    Python): a tool that subscribes twice gets one block with one beacon,
+    then the short form; a failed call is rolled back; a native caller is
+    told what to subscribe to; and the app reaches the conversations it
+    stored with one multi-recipient emit."""
+    core, key = harness()
+    wake = Wakeshift(key, core=core)
+    turn = wake.define_event(
+        "game.turn",
+        description="It's your move.",
+        args=Table,
+        payload=Hand,
+        text=lambda h, a: f"Your move at {a.table}: {h.to_call} to call",
+        personal=True,
+    )
+    server = MCPServer("cards")
+    attached = wake.attach(
+        server, identify=lambda ctx: Identity(user=ctx.request.headers.get("x-user") if ctx.request is not None else None)
+    )
+    subs: dict[str, list[Subscription]] = {}
+
+    @attached.tool()
+    async def join(table: str, call: ToolCall) -> str:
+        """Join a table (and the lobby): two subscribes, one block."""
+        got = [await call.subscribe(turn, {"table": t}, reason=f"Playing at {t}") for t in (table, "lobby")]
+        subs[call.user or ""] = got
+        return f"Seated at {table}."
+
+    @attached.tool()
+    async def fails(table: str, call: ToolCall) -> str:
+        await call.subscribe(turn, {"table": table})
+        raise ValueError("that table is full")
+
+    async def listed(user: str) -> list[dict[str, Any]]:
+        return (await wake._request_app("POST", "/event-subscriptions/list", {"user": user}))["subscriptions"]
+
+    async with served(server) as (_, rpc):
+
+        async def tool(user: str, ua: str, name: str, args: dict[str, Any], meta: dict[str, Any] | None = None) -> dict[str, Any]:
+            params: dict[str, Any] = {"name": name, "arguments": args}
+            if meta is not None:
+                params["_meta"] = meta
+            r = await rpc("tools/call", params, headers={"X-User": user, "User-Agent": ua})
+            assert "result" in r, r
+            return r["result"]
+
+        def text(r: dict[str, Any]) -> str:
+            return "\n\n".join(c.get("text", "") for c in r["content"])
+
+        codex = {
+            "io.modelcontextprotocol/clientInfo": {"name": "codex-mcp-client", "version": "0.50.0"},
+            "x-codex-turn-metadata": {"thread_id": "thread-py-1"},
+        }
+        # One block, one beacon; both subscriptions the conversation's.
+        res = await tool("ada", "codex_exec/0.50.0", "join", {"table": "oak"}, codex)
+        assert not res.get("isError") and text(res).startswith("Seated at oak.\n\n"), res
+        assert (res.get("_meta") or {}).get("wakeshift/connector"), res
+        assert text(res).count("wakeshift-beacon") <= 1
+        first = subs["ada"]
+        assert len(first) == 2 and all(s.created for s in first) and first[0].session == first[1].session != ""
+        assert first[0].user == "ada" and first[0].recognised.harness == "codex"
+        assert len(await listed("ada")) == 2
+        # The next call in the thread: renewals, and the short form.
+        again = await tool("ada", "codex_exec/0.50.0", "join", {"table": "oak"}, codex)
+        assert len(text(again)) < len(text(res)), (text(res), text(again))
+        assert not subs["ada"][0].created and subs["ada"][0].id == first[0].id
+
+        # A failed call ends what it made, and its reply has no block.
+        failed = await tool("bo", "claude-code/2.1.280", "fails", {"table": "oak"})
+        assert failed["isError"] and "Wakeshift" not in text(failed)
+        assert await listed("bo") == []
+
+        # A native caller isn't subscribed: the block names what to subscribe to.
+        native = await tool("cy", "openai-mcp/1.0.0", "join", {"table": "oak"}, {"openai/session": "chat-1"})
+        for t in ("oak", "lobby"):
+            assert f'To be woken by game.turn with {{"table":"{t}"}}, subscribe to it (MCP Events).' in text(native), text(native)
+        assert subs["cy"][0].native and subs["cy"][0].id == ""
+        assert await listed("cy") == []
+
+        # One emit to the stored conversations: by subscription, a user with
+        # nothing (unmatched), and natively.
+        await tool("dee", "claude-code/2.1.280", "join", {"table": "oak"})
+        ada, dee = subs["ada"][0], subs["dee"][0]
+        got = await turn.emit(
+            {"table": "oak"},
+            {"to_call": "5"},
+            to=[
+                Recipient(user=ada.user, subscription=ada.id),
+                Recipient(user=dee.user, subscription=dee.id),
+                "nobody",
+                Recipient(native="ada"),
+            ],
+            id="py-hand-1",
+        )
+        assert got.matched == 2 and got.ended == [], got
+        assert got.unmatched == [Recipient(user="nobody"), Recipient(native="ada")], got
+        # dee's subscription ends; an emit naming it hears so, and a retry keeps it.
+        assert await turn.end(dee.user, dee.id)
+        to = [Recipient(user=dee.user, subscription=dee.id), Recipient(user=ada.user, subscription=ada.id)]
+        got = await turn.emit({"table": "oak"}, {"to_call": "10"}, to=to, id="py-hand-2")
+        assert got.matched == 1 and got.ended == [Recipient(user="dee", subscription=dee.id)], got
+        got = await turn.emit({"table": "oak"}, {"to_call": "10"}, to=to, id="py-hand-2")
+        assert got.duplicate and len(got.ended) == 1, got

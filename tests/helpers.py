@@ -80,6 +80,8 @@ class FakeCore:
         if fn is None:
             if (request.method, path) == ("PUT", "/manifest"):
                 return httpx.Response(200, json=body)
+            if (request.method, path) == ("GET", "/manifest"):
+                return httpx.Response(200, json={"description": ""})  # nothing published yet
             if self.default_ok:
                 return httpx.Response(200, json={})
             return httpx.Response(404, json={"error": {"code": "not_found", "message": f"no route {request.method} {path}"}})

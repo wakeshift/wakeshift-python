@@ -5,25 +5,25 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 import pytest
 from cryptography.exceptions import InvalidSignature
-from mcp.types import CallToolResult, TextContent
+from pydantic import BaseModel
 
 from wakeshift import (
     CONVERSATION_ARG,
     HARNESS_ARG,
     SESSION_ARG,
-    WAKE_ARGS_SCHEMA,
     Wakeshift,
     WakeshiftError,
     is_code,
     parse_key,
     sign_assertion,
 )
+from wakeshift.client import WAKE_ARGS_SCHEMA, _call, _call_of
 from wakeshift.key import b64url, b64url_decode, public_key_of
 
 # RFC 8032, test 1: this seed's public key.
@@ -33,13 +33,13 @@ SEED = b64url(bytes.fromhex(SEED_HEX))
 KEY = f"wst_test_ci-bot_{SEED}"
 
 
-def test_parse_key_reads_the_mode_app_id_and_key() -> None:
+def test_parse_key_reads_the_app_id_and_key() -> None:
     k = parse_key(KEY)
-    assert (k.mode, k.app_id) == ("test", "ci-bot")
+    assert k.app_id == "ci-bot" and not hasattr(k, "mode")
     assert b64url_decode(public_key_of(k)).hex() == PUB_HEX
     # A seed with "_" and "-" in it: split on the first two underscores only.
     odd = parse_key("wst_live_my-app_3q2-7__7AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-    assert (odd.mode, odd.app_id) == ("live", "my-app")
+    assert odd.app_id == "my-app"
     assert SEED not in repr(k), "the seed stays out of reprs"
 
 
@@ -65,7 +65,7 @@ def test_parse_key_refuses_anything_else(bad: str) -> None:
 
 def test_sign_assertion_signs_a_short_lived_eddsa_assertion_for_the_core() -> None:
     k = parse_key(KEY)
-    now = datetime(2026, 10, 18, 12, tzinfo=timezone.utc).timestamp()
+    now = datetime(2026, 10, 18, 12, tzinfo=UTC).timestamp()
     tok = sign_assertion(k, "https://app.wakeshift.ai", now)
     h, c, s = tok.split(".")
     assert json.loads(b64url_decode(h)) == {"alg": "EdDSA", "typ": "app+jwt", "kid": k.kid}
@@ -102,19 +102,6 @@ class Core:
         return Wakeshift(KEY, core="http://core.test", http=httpx.AsyncClient(transport=httpx.MockTransport(self)), **kw)
 
 
-SUBSCRIBE_REPLY = {
-    "subscription": {
-        "id": "ts_AAAAAAAAAAAAAAAAAAAAAA",
-        "topic": "ci/acme/api",
-        "filter": {"branch": "main"},
-        "once": False,
-        "expires_at": "2026-11-17T12:00:00Z",
-    },
-    "session": "claude-code#1",
-    "addition": {"text": "You're claude-code#1. Start the Monitor tool now.", "meta": {"wakeshift/x": "y"}},
-}
-
-
 def test_the_core_url_given_else_wakeshift_core_else_production_except_for_a_test_key(monkeypatch: pytest.MonkeyPatch) -> None:
     assert Wakeshift(KEY, core="http://127.0.0.1:9/").core == "http://127.0.0.1:9"
     monkeypatch.setenv("WAKESHIFT_CORE", "https://app.staging.wakeshift.ai")
@@ -130,56 +117,57 @@ def test_the_core_url_given_else_wakeshift_core_else_production_except_for_a_tes
         Wakeshift("")
 
 
-async def test_subscribe_sends_the_call_and_options_and_builds_the_tool_result() -> None:
-    core = Core(lambda path, body: (200, SUBSCRIBE_REPLY))
+class Hole(BaseModel):
+    table: str
+
+
+class Note(BaseModel):
+    text: str
+
+
+async def test_emit_publishes_the_manifest_then_sends_a_signed_request() -> None:
+    core = Core(
+        lambda path, body: (
+            200,
+            (body or {"description": ""}) if path.endswith("/manifest") else {"matched": 3, "duplicate": False},
+        )
+    )
     wake = core.wake()
-    call = wake.call_of(client_name="claude-code", user="ada", meta={})
-    sub = await wake.subscribe(call, "ci/acme/api", filter={"branch": "main"}, replay="5m", ttl=3600)
-    r = core.sent[0]
-    assert r["method"] == "POST"
-    assert r["url"] == "http://core.test/api/apps/v1/topics/subscribe"
+    news = wake.define_event("table.news", description="News at a table", args=Hole, payload=Note, text=lambda n, a: n.text)
+    out = await news.emit({"table": "oak"}, {"text": "dealt"}, id="d1")
+    assert (out.matched, out.duplicate, out.unmatched, out.ended) == (3, False, [], [])
+    assert [(r["method"], r["url"]) for r in core.sent] == [
+        ("GET", "http://core.test/api/apps/v1/manifest"),
+        ("PUT", "http://core.test/api/apps/v1/manifest"),
+        ("POST", "http://core.test/api/apps/v1/events/emit"),
+    ]
+    r = core.sent[2]
     assert re.fullmatch(r"Bearer [\w-]+\.[\w-]+\.[\w-]+", r["auth"])
     assert SEED not in r["auth"], "the key never goes over the wire"
     assert r["body"] == {
-        "call": {"client": "claude-code", "user": "ada"},
-        "topic": "ci/acme/api",
-        "once": False,
-        "filter": {"branch": "main"},
-        "replay": "5m",
-        "ttl": 3600,
+        "name": "table.news",
+        "arguments": {"table": "oak"},
+        "payload": {"text": "dealt"},
+        "text": "dealt",
+        "id": "d1",
     }
-    assert sub.id == "ts_AAAAAAAAAAAAAAAAAAAAAA"
-    assert sub.session == "claude-code#1"
-    assert "session=" not in repr(sub), "the session key stays out of reprs"
-    assert sub.expires_at == datetime(2026, 11, 17, 12, tzinfo=timezone.utc)
-
-    out = sub.result("Watching CI on acme/api.")
-    dumped = out.model_dump(by_alias=True, exclude_none=True)
-    assert dumped["content"] == [
-        {"type": "text", "text": "Watching CI on acme/api.\n\nYou're claude-code#1. Start the Monitor tool now."}
-    ]
-    assert dumped["_meta"] == {"wakeshift/x": "y"}
-    base = CallToolResult(content=[TextContent(type="text", text="mine")], _meta={"mine": 1}, structuredContent={"ok": True})
-    merged = sub.result(base).model_dump(by_alias=True, exclude_none=True)
-    assert merged["content"] == [
-        {"type": "text", "text": "mine"},
-        {"type": "text", "text": "You're claude-code#1. Start the Monitor tool now."},
-    ]
-    assert merged["_meta"] == {"mine": 1, "wakeshift/x": "y"}
-    assert merged["structuredContent"] == {"ok": True}
-    assert len(base.content) == 1, "the app's result isn't changed"
+    # Sent once: the next emit goes straight out.
+    await news.emit({"table": "oak"}, {"text": "again"})
+    assert [r["method"] for r in core.sent] == ["GET", "PUT", "POST", "POST"]
 
 
 async def test_errors_carry_the_apis_code() -> None:
-    wake = Core(lambda p, b: (403, {"error": {"code": "private_topic", "message": "that topic is another user's"}})).wake()
+    wake = Core(
+        lambda p, b: (403, {"error": {"code": "other_client", "message": "that conversation is another client's"}})
+    ).wake()
     with pytest.raises(WakeshiftError) as e:
-        await wake.subscribe(wake.call_of(client_name="x"), "u/ada/inbox")
-    assert (e.value.status, e.value.code, e.value.detail) == (403, "private_topic", "that topic is another user's")
-    assert is_code(e.value, "private_topic")
+        await wake.forget_user("ada")
+    assert (e.value.status, e.value.code, e.value.detail) == (403, "other_client", "that conversation is another client's")
+    assert is_code(e.value, "other_client")
     assert not is_code(e.value, "bad_request")
     bare = Core(lambda p, b: (502, "bad gateway")).wake()
     with pytest.raises(WakeshiftError) as e2:
-        await bare.publish("a", text="x")
+        await bare.forget_user("ada")
     assert (e2.value.status, e2.value.code) == (502, "")
 
 
@@ -190,7 +178,7 @@ async def test_a_2xx_without_a_json_object_is_a_wakeshift_error(body: str) -> No
     )
     wake = Wakeshift(KEY, core="http://core.test", http=http)
     with pytest.raises(WakeshiftError) as e:
-        await wake.subscribe(wake.call_of(client_name="claude-code"), "ci/x")
+        await wake.workspace("ada", "Ada")
     assert (e.value.code, e.value.status) == ("bad_response", 200)
     assert "http://core.test answered 200 without a JSON object" in str(e.value)
 
@@ -201,7 +189,7 @@ async def test_a_core_that_doesnt_answer_the_error_names_it() -> None:
 
     wake = Wakeshift(KEY, core="http://127.0.0.1:9", http=httpx.AsyncClient(transport=httpx.MockTransport(refused)))
     with pytest.raises(WakeshiftError) as e:
-        await wake.publish("ci/x", text="x")
+        await wake.forget_user("ada")
     assert (e.value.code, e.value.status) == ("unreachable", 0)
     assert str(e.value).startswith(
         "wakeshift: can't reach Wakeshift at http://127.0.0.1:9 (connection refused). Check that WAKESHIFT_CORE"
@@ -213,86 +201,35 @@ async def test_a_core_that_doesnt_answer_the_error_names_it() -> None:
 
     wake2 = Wakeshift(KEY, core="http://core.test", http=httpx.AsyncClient(transport=httpx.MockTransport(slow)), timeout=0.02)
     with pytest.raises(WakeshiftError, match=r"can't reach Wakeshift at http://core\.test \(no answer within 0\.02s\)"):
-        await wake2.topic_status("ci/x")
+        await wake2.workspace("ada", "Ada")
 
 
 async def test_the_other_calls_paths_bodies_and_results() -> None:
     replies: dict[str, Any] = {
-        "/api/apps/v1/topics/unsubscribe": {"unsubscribed": 2},
-        "/api/apps/v1/topics/publish": {"matched": 3, "duplicate": False},
-        "/api/apps/v1/subscriptions/ts_a%2Fb/send": {"status": "queued"},
-        "/api/apps/v1/topics/publish-urls": {"id": "u1", "topic": "hooks/x", "url": "http://core.test/v1/publish/wsp_x"},
-        "/api/apps/v1/events/publish-urls/u1": {"revoked": True},
-        "/api/apps/v1/topics/annotate": {"text": "waiting: 1", "meta": {"wakeshift/connector": "beacon"}},
-        "/api/apps/v1/topics/close": {"closed": 4},
+        "/api/apps/v1/events/publish-urls/u%2F1": {"revoked": True},
         "/api/apps/v1/users/forget": {"forgotten": True},
-        "/api/apps/v1/topics/status": {"topic": "ci/x", "subscriptions": 3, "connected": 2, "via": {"stream": 1, "hooks": 1}},
-        "/api/apps/v1/subscriptions/ts_a%2Fb": {
-            "id": "ts_a/b",
-            "topic": "ci/x",
-            "status": "active",
-            "connected": True,
-            "via": "hooks",
-            "expires_at": "2026-11-17T12:00:00Z",
-        },
-        "/api/apps/v1/subscriptions/ts_a%2Fb/end": {"ended": True},
+        "/api/apps/v1/workspaces": {"workspace": "ws_1"},
+        "/api/apps/v1/workspaces/ws_1/agents": {"grant": "gr_1"},
+        "/api/apps/v1/workspaces/ws_1/agents/codex/token": {"ok": True},
     }
     core = Core(lambda path, body: (200, replies[path]) if path in replies else (404, {"error": {"code": "not_found"}}))
     wake = core.wake()
-    call = wake.call_of(client_name="codex-mcp-client", meta={"threadId": "t1"})
 
-    assert await wake.unsubscribe(call) == 2
-    assert core.sent[-1]["body"] == {"call": {"client": "codex-mcp-client", "meta": {"threadId": "t1"}}}
-    await wake.unsubscribe(call, "ci/x")
-    assert core.sent[-1]["body"]["topic"] == "ci/x"
-
-    p = await wake.publish("ci/x", id="d1", text="CI failed", data={"branch": "main"})
-    assert (p.matched, p.duplicate) == (3, False)
-    assert core.sent[-1]["body"] == {"topics": ["ci/x"], "event": {"id": "d1", "text": "CI failed", "data": {"branch": "main"}}}
-    await wake.publish(["a", "b"], text="x")
-    assert core.sent[-1]["body"]["topics"] == ["a", "b"]
-
-    assert await wake.send("ts_a/b", text="just you") == "queued"
-    assert core.sent[-1]["body"] == {"event": {"text": "just you"}}
-
-    u = await wake.publish_url("hooks/x")
-    assert (u.id, u.topic, u.url) == ("u1", "hooks/x", "http://core.test/v1/publish/wsp_x")
-    await wake.revoke_publish_url("u1")
+    await wake.revoke_publish_url("u/1")
     assert core.sent[-1]["method"] == "DELETE"
     assert core.sent[-1]["body"] is None
-
-    annotated = await wake.annotate(call, CallToolResult(content=[TextContent(type="text", text="3 builds")]))
-    dumped = annotated.model_dump(by_alias=True, exclude_none=True)
-    assert dumped["content"] == [{"type": "text", "text": "3 builds"}, {"type": "text", "text": "waiting: 1"}]
-    assert dumped["_meta"] == {"wakeshift/connector": "beacon"}
-
-    st = await wake.topic_status("ci/x")
-    assert (st.topic, st.subscriptions, st.connected, st.via) == (
-        "ci/x",
-        3,
-        2,
-        {"stream": 1, "poll": 0, "hooks": 1, "webhook": 0},
-    )
-    assert core.sent[-1]["method"] == "GET"
-    assert core.sent[-1]["url"] == "http://core.test/api/apps/v1/topics/status?topic=ci%2Fx"
-    ss = await wake.subscription_status("ts_a/b")
-    assert (ss.id, ss.status, ss.connected, ss.via) == ("ts_a/b", "active", True, "hooks")
-    assert ss.expires_at == datetime(2026, 11, 17, 12, tzinfo=timezone.utc)
-
-    assert await wake.close_topic("ci/x") == 4
-    assert await wake.end_subscription("ts_a/b") is True
-    assert core.sent[-1]["url"] == "http://core.test/api/apps/v1/subscriptions/ts_a%2Fb/end"
-    assert await wake.unsubscribe_user("bob", "org/org1/deploys") == 2
-    assert core.sent[-1]["body"] == {"user": "bob", "topic": "org/org1/deploys"}
-    await wake.unsubscribe_user("bob")
-    assert core.sent[-1]["body"] == {"user": "bob"}
     assert await wake.forget_user("ada") is True
     assert core.sent[-1]["body"] == {"user": "ada"}
+    assert await wake.workspace("ada", "Ada") == "ws_1"
+    assert core.sent[-1]["body"] == {"external_id": "ada", "name": "Ada"}
+    assert await wake.add_agent("ws_1", "codex", "Codex") == "gr_1"
+    assert core.sent[-1]["body"] == {"agent": "codex", "display_name": "Codex"}
+    await wake.check_agent("ws_1", "codex")
+    assert core.sent[-1]["url"] == "http://core.test/api/apps/v1/workspaces/ws_1/agents/codex/token"
 
 
-def test_call_of_packs_only_what_was_given() -> None:
-    wake = Wakeshift(KEY, core="http://core.test")
-    call = wake.call_of(
+def test_a_call_packs_only_what_was_given() -> None:
+    call = _call_of(
         client_name="Cursor",
         user="ada",
         meta={"x": 1},
@@ -310,10 +247,11 @@ def test_call_of_packs_only_what_was_given() -> None:
         "conversation": "bc-1",
         "harness": "grok-bot",
     }
-    assert wake.call_of(client_name="x", harness="", conversation="  ").to_json() == {"client": "x"}
+    assert _call_of(client_name="x", harness="", conversation="  ").to_json() == {"client": "x"}
+    assert _call_of(client_name="x", tool=" watch ").to_json() == {"client": "x", "tool": "watch"}
 
 
-def test_call_reads_the_context_and_the_wake_arguments() -> None:
+def test_a_call_reads_the_context_and_the_wake_arguments() -> None:
     class Info:
         name = "Cursor"
 
@@ -328,55 +266,32 @@ def test_call_reads_the_context_and_the_wake_arguments() -> None:
         meta = {"x-codex-turn-metadata": {"thread_id": "t1"}}
         request = None
 
-    wake = Wakeshift(KEY, core="http://core.test")
     args = {"repo": "x", SESSION_ARG: "wsc_2", HARNESS_ARG: " grok-bot ", CONVERSATION_ARG: " bc-1 "}
-    assert wake.call(Ctx(), user="ada", args=args).to_json() == {
+    assert _call(Ctx(), user="ada", args=args, tool="subscribe_events").to_json() == {
         "client": "Cursor",
         "user": "ada",
         "meta": {"x-codex-turn-metadata": {"thread_id": "t1"}},
         "session": "wsc_2",
         "conversation": "bc-1",
         "harness": "grok-bot",
+        "tool": "subscribe_events",
     }
-    assert wake.call(Ctx(), client="cursor-nightly", args={SESSION_ARG: 7, HARNESS_ARG: ""}).client == "cursor-nightly"
-    assert wake.call(Ctx(), args={SESSION_ARG: 7, HARNESS_ARG: ""}).to_json().keys() == {"client", "meta"}, (
+    assert _call(Ctx(), user=None, args={SESSION_ARG: 7, HARNESS_ARG: ""}, tool="").to_json().keys() == {"client", "meta"}, (
         "only strings, and not empty ones"
     )
-
-    # The tool being called (a connector beacon in its result names it): from
-    # a low-level context's tools/call params, or passed.
-    class ToolCtx(Ctx):
-        method = "tools/call"
-        params = {"name": "watch", "arguments": {}}
-
-    assert wake.call(ToolCtx()).tool == "watch"
-    assert wake.call(ToolCtx(), tool="join").tool == "join"
-    assert wake.call(Ctx(), tool="watch").to_json()["tool"] == "watch"
-    assert wake.call_of(client_name="x", tool=" watch ").to_json() == {"client": "x", "tool": "watch"}
 
 
 def test_wake_args_session_key_harness_and_conversation_id() -> None:
     assert list(WAKE_ARGS_SCHEMA) == ["session_key", "harness", "conversation_id"]
-    assert "secret: keep it to this conversation; don't share or log it" in WAKE_ARGS_SCHEMA[SESSION_ARG]["description"]
+    assert re.fullmatch(
+        r"This conversation's session_key, from an earlier result .*Keep it to this conversation; don't share or log it\.",
+        WAKE_ARGS_SCHEMA[SESSION_ARG]["description"],
+    )
     assert re.fullmatch(
         r"The program you're running in: .*cursor \(local CLI or IDE\), cursor-cloud \(Cursor cloud agent\), grok-bot, .*or your program's name if it isn't listed",
         WAKE_ARGS_SCHEMA[HARNESS_ARG]["description"],
     )
     assert "printenv CURSOR_CONVERSATION_ID" in WAKE_ARGS_SCHEMA[CONVERSATION_ARG]["description"]
-
-
-async def test_addition_warns_once_when_the_core_recognised_nothing() -> None:
-    warnings: list[str] = []
-    wake = Core(lambda p, b: (200, {"text": "t", "agent": {}})).wake(on_warning=warnings.append)
-    a = await wake.addition(wake.call_of(client_name=""))
-    assert a.agent is not None and a.agent.harness is None
-    await wake.addition(wake.call_of(client_name=""))
-    assert len(warnings) == 1 and "couldn't tell which agent" in warnings[0]
-    quiet: list[str] = []
-    wake2 = Core(lambda p, b: (200, {"agent": {"harness": "claude-code", "via": "client"}})).wake(on_warning=quiet.append)
-    a2 = await wake2.addition(wake2.call_of(client_name="claude-code"))
-    assert a2.agent is not None and (a2.agent.harness, a2.agent.via) == ("claude-code", "client")
-    assert quiet == []
 
 
 def test_the_package_no_longer_exports_guest_sign_in() -> None:
@@ -386,3 +301,47 @@ def test_the_package_no_longer_exports_guest_sign_in() -> None:
         assert not hasattr(wakeshift, name), name
         assert name not in wakeshift.__all__, name
     assert not hasattr(wakeshift.Wakeshift, "secret_seed")
+
+
+def test_the_package_no_longer_exports_topics_or_the_old_subscribe() -> None:
+    """0.4.0: one way to subscribe from your own tools (@attached.tool() and
+    call.subscribe); topics are gone."""
+    import wakeshift
+
+    for name in (
+        "Call",
+        "CallerSubscription",
+        "Addition",
+        "apply_addition",
+        "TopicSubscription",
+        "TopicStatus",
+        "SubscriptionStatus",
+        "Published",
+        "UNKNOWN_CLIENT_WARNING",
+    ):
+        assert not hasattr(wakeshift, name), name
+        assert name not in wakeshift.__all__, name
+    for name in (
+        "call",
+        "call_of",
+        "subscribe",
+        "unsubscribe",
+        "publish",
+        "send",
+        "topic_status",
+        "subscription_status",
+        "publish_url",
+        "addition",
+        "annotate",
+        "close_topic",
+        "end_subscription",
+        "unsubscribe_user",
+    ):
+        assert not hasattr(wakeshift.Wakeshift, name), name
+    for name in ("subscribe", "unsubscribe"):
+        assert not hasattr(wakeshift.WakeEvent, name), name
+    for name in ("emit", "publish_url", "status", "status_of", "end"):
+        assert hasattr(wakeshift.WakeEvent, name), name
+    for name in ("revoke_publish_url", "forget_user", "workspace", "add_agent", "check_agent", "attach", "define_event"):
+        assert hasattr(wakeshift.Wakeshift, name), name
+    assert wakeshift.__version__ == "0.4.0"

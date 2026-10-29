@@ -25,6 +25,6 @@ jobs:
       - run: uv run ruff format --check
       - run: uv run pyright
       # The oldest Python it supports, and the newest.
-      - run: uv run --locked --python 3.10 --isolated pytest -q
-      - run: uv run --locked --python 3.13 --isolated pytest -q
+      - run: uv run --locked --python 3.11 --isolated pytest -q
+      - run: uv run --locked --python 3.14 --isolated pytest -q
       - run: uv build

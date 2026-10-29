@@ -14,7 +14,7 @@ REVISION = "SEP-3415 (2026-10-16)"
 
 #: Capability keys: the draft's extension, and the top-level key ChatGPT reads. A server advertises both.
 EXTENSION_KEY = "io.modelcontextprotocol/events"
-LEGACY_KEY = "events"
+TOP_LEVEL_KEY = "events"
 
 #: On every events/* result.
 RESULT_TYPE = "complete"

@@ -1,23 +1,26 @@
 [project]
 name = "wakeshift"
-version = "0.3.0"
+version = "0.4.0"
 description = "Wake AI agents when your app's events happen: Wakeshift's SDK for MCP servers in Python"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "Clawvisor Inc.", email = "support@wakeshift.ai" }]
-keywords = ["mcp", "agents", "events", "wakeshift"]
+keywords = ["mcp", "model-context-protocol", "ai-agents", "agents", "events", "webhooks", "wakeshift"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
   "Framework :: AsyncIO",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
 ]
 dependencies = [
   "mcp>=2.3,<3",
@@ -54,7 +57,7 @@ addopts = "-m 'not e2e'"
 
 [tool.ruff]
 line-length = 130
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
@@ -62,7 +65,7 @@ ignore = ["E501"]
 
 [tool.pyright]
 include = ["src"]
-pythonVersion = "3.10"
+pythonVersion = "3.11"
 typeCheckingMode = "basic"
 venvPath = "."
 venv = ".venv"

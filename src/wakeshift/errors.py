@@ -6,8 +6,8 @@ from __future__ import annotations
 class WakeshiftError(Exception):
     """An error response from Wakeshift.
 
-    ``code`` is the API's error code (``private_topic``, ``other_client``,
-    ``unknown_subscription``, ``bad_request``…), ``status`` the HTTP status.
+    ``code`` is the API's error code (``bad_arguments``, ``other_client``,
+    ``unknown_event``, ``bad_request``…), ``status`` the HTTP status.
     A request that got no answer has code ``unreachable`` and status 0.
     """
 

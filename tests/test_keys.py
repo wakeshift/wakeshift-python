@@ -32,7 +32,7 @@ def test_every_accepted_key_parses_to_its_seed_public_key_and_kid(v: dict[str, A
     assert public_key_of(k) == seed["public_key"]
     assert k.kid == seed["kid"]
     assert k.kid.startswith(seed["key_id"])
-    assert (k.mode, k.app_id) == (v["mode"], v["app_id"])
+    assert k.app_id == v["app_id"]
     assert seed["seed"] not in repr(k), "the seed stays out of reprs"
 
 
@@ -109,7 +109,6 @@ class Core:
 async def test_a_current_keys_app_id_is_wakeshifts_to_say() -> None:
     core = Core()
     wake = core.wake()
-    assert wake.mode is None
     with pytest.raises(RuntimeError, match=r"^wakeshift: call await wake.app\(\) first: this key doesn't name its app"):
         _ = wake.app_id
     # Concurrent first calls ask once.
@@ -142,6 +141,6 @@ async def test_a_failed_app_call_isnt_cached() -> None:
 async def test_an_older_keys_app_id_is_its_own() -> None:
     core = Core(app=(200, {**APP, "name": "CI"}))
     wake = core.wake(OLD_KEY)
-    assert (wake.app_id, wake.mode) == ("ci-bot", "test")
+    assert wake.app_id == "ci-bot"
     assert core.sent == []
     assert (await wake.app()).name == "CI"

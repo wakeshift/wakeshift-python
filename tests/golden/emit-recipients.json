@@ -1,0 +1,291 @@
+{
+  "comment": "A multi-recipient emit (docs/subscribe-from-tools.md, \"Emitting to many\"): each case's to (a user, {user, subscription} or {native}) and the body's to it becomes (one plain user as a string, else a list), each name trimmed of the whitespace around it; response is /events/emit's answer and emitted what each SDK reads from it (unmatched and ended in to's forms, empty lists when the answer has none); refused are recipient lists a personal event refuses before asking Wakeshift, with refused_code, as Wakeshift would: a name that's empty once trimmed is refused. one_user is a personal event's status and publish URL to, trimmed the same way (refused: empty once trimmed, with refused_code). status_of is subscriptions to read by ID, each {user, subscription}, and the body's subscriptions they become, trimmed; refused ones, with its own refused_code. Every SDK's tests read it.",
+  "cases": [
+    {
+      "name": "one user",
+      "to": [
+        "u1"
+      ],
+      "wire": "u1"
+    },
+    {
+      "name": "several users",
+      "to": [
+        "u1",
+        "u3"
+      ],
+      "wire": [
+        "u1",
+        "u3"
+      ]
+    },
+    {
+      "name": "one subscription goes as a list",
+      "to": [
+        {
+          "user": "u2",
+          "subscription": "s2"
+        }
+      ],
+      "wire": [
+        {
+          "user": "u2",
+          "subscription": "s2"
+        }
+      ]
+    },
+    {
+      "name": "one native recipient goes as a list",
+      "to": [
+        {
+          "native": "u4"
+        }
+      ],
+      "wire": [
+        {
+          "native": "u4"
+        }
+      ]
+    },
+    {
+      "name": "mixed",
+      "to": [
+        "u1",
+        "u3",
+        {
+          "user": "u2",
+          "subscription": "s2"
+        },
+        {
+          "native": "u4"
+        }
+      ],
+      "wire": [
+        "u1",
+        "u3",
+        {
+          "user": "u2",
+          "subscription": "s2"
+        },
+        {
+          "native": "u4"
+        }
+      ]
+    },
+    {
+      "name": "whitespace around each name is trimmed",
+      "to": [
+        " u1 ",
+        {
+          "user": "\tu2 ",
+          "subscription": " s2\n"
+        },
+        {
+          "native": " u4 "
+        }
+      ],
+      "wire": [
+        "u1",
+        {
+          "user": "u2",
+          "subscription": "s2"
+        },
+        {
+          "native": "u4"
+        }
+      ]
+    },
+    {
+      "name": "one user, trimmed, still goes as a string",
+      "to": [
+        "  u1\n"
+      ],
+      "wire": "u1"
+    }
+  ],
+  "responses": [
+    {
+      "name": "unmatched and ended",
+      "response": {
+        "matched": 2,
+        "duplicate": false,
+        "unmatched": [
+          "u3",
+          {
+            "native": "u4"
+          }
+        ],
+        "ended": [
+          {
+            "user": "u2",
+            "subscription": "s2"
+          }
+        ]
+      },
+      "emitted": {
+        "matched": 2,
+        "duplicate": false,
+        "unmatched": [
+          "u3",
+          {
+            "native": "u4"
+          }
+        ],
+        "ended": [
+          {
+            "user": "u2",
+            "subscription": "s2"
+          }
+        ]
+      }
+    },
+    {
+      "name": "a duplicate",
+      "response": {
+        "matched": 1,
+        "duplicate": true,
+        "ended": [
+          {
+            "user": "u2",
+            "subscription": "s2"
+          }
+        ]
+      },
+      "emitted": {
+        "matched": 1,
+        "duplicate": true,
+        "unmatched": [],
+        "ended": [
+          {
+            "user": "u2",
+            "subscription": "s2"
+          }
+        ]
+      }
+    },
+    {
+      "name": "a single user's answer has neither",
+      "response": {
+        "matched": 0,
+        "duplicate": false
+      },
+      "emitted": {
+        "matched": 0,
+        "duplicate": false,
+        "unmatched": [],
+        "ended": []
+      }
+    }
+  ],
+  "refused": [
+    {
+      "name": "no recipient",
+      "to": []
+    },
+    {
+      "name": "an empty user",
+      "to": [
+        ""
+      ]
+    },
+    {
+      "name": "a subscription without its user",
+      "to": [
+        {
+          "user": "",
+          "subscription": "s2"
+        }
+      ]
+    },
+    {
+      "name": "an empty native user",
+      "to": [
+        {
+          "native": ""
+        }
+      ]
+    },
+    {
+      "name": "a user that's only whitespace",
+      "to": [
+        "  "
+      ]
+    },
+    {
+      "name": "a subscription that's only whitespace",
+      "to": [
+        {
+          "user": "u2",
+          "subscription": " \t"
+        }
+      ]
+    },
+    {
+      "name": "a native user that's only whitespace",
+      "to": [
+        {
+          "native": " "
+        }
+      ]
+    }
+  ],
+  "refused_code": "bad_arguments",
+  "one_user": {
+    "to": " u1 ",
+    "wire": "u1",
+    "refused": [
+      "",
+      "  "
+    ],
+    "refused_code": "bad_arguments"
+  },
+  "status_of": {
+    "subscriptions": [
+      {
+        "user": " u1 ",
+        "subscription": " s1 "
+      },
+      {
+        "user": "u2",
+        "subscription": "s2"
+      }
+    ],
+    "wire": [
+      {
+        "user": "u1",
+        "id": "s1"
+      },
+      {
+        "user": "u2",
+        "id": "s2"
+      }
+    ],
+    "refused": [
+      [
+        {
+          "user": " ",
+          "subscription": "s1"
+        }
+      ],
+      [
+        {
+          "user": "u1",
+          "subscription": " "
+        }
+      ],
+      [
+        {
+          "user": "",
+          "subscription": "s1"
+        }
+      ],
+      [
+        {
+          "user": "u1",
+          "subscription": ""
+        }
+      ]
+    ],
+    "refused_code": "bad_request"
+  }
+}

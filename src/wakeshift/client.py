@@ -6,22 +6,22 @@ import asyncio
 import json
 import os
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Optional
-from urllib.parse import quote, urlencode
+from typing import TYPE_CHECKING, Any, TypedDict, cast
+from urllib.parse import quote
 
 import httpx
 from mcp_types import CallToolResult, TextContent
-from pydantic import Field
 
 from .errors import WakeshiftError
-from .key import AppKey, parse_key, sign_assertion
+from .key import AppKey, is_test_key, parse_key, sign_assertion
 from .retry import RETRY_PAUSES, refused
 
 if TYPE_CHECKING:
     from .events import Identity, WakeEvent
+    from .toolcall import Attached, EventsOptions
 
 #: Wakeshift's production core, the default for every key but a wst_test_ one. Override with ``core`` or WAKESHIFT_CORE.
 DEFAULT_CORE = "https://app.wakeshift.ai"
@@ -33,10 +33,12 @@ HARNESS_ARG = "harness"
 #: The tool argument an agent passes its own ID for the conversation in, when its program gives it one.
 CONVERSATION_ARG = "conversation_id"
 
-# What the agent is told each argument is (the core's own words:
-# internal/harnesses, whose tests check these match).
+# What the agent is told each argument is, in a wrapped tool's schema and
+# attach's own tools' alike (the other SDKs use the same words, and the
+# shared golden file events-list.json pins them).
 SESSION_DESCRIPTION = (
-    "The session key an earlier result gave you, if it did. It's a secret: keep it to this conversation; don't share or log it"
+    "This conversation's session_key, from an earlier result (a secret token, or a handle such as claude-code#2). "
+    "Keep it to this conversation; don't share or log it."
 )
 HARNESS_DESCRIPTION = (
     "The program you're running in: codex, claude-code, cursor (local CLI or IDE), cursor-cloud (Cursor cloud agent), "
@@ -48,40 +50,87 @@ CONVERSATION_DESCRIPTION = (
     "`printenv CURSOR_CONVERSATION_ID`. Codex and Antigravity send it automatically; others leave it empty"
 )
 
-# Annotated types for a tool function's parameters, so the agent can pass
-# Wakeshift's part of the call (the Python form of the Node SDK's wake.args):
-#
-#   @server.tool()
-#   async def watch(repo: str, ctx: Context, session_key: SessionKey = None,
-#                   harness: Harness = None, conversation_id: ConversationId = None): ...
-SessionKey = Annotated[Optional[str], Field(description=SESSION_DESCRIPTION)]  # noqa: UP045 (evaluated at runtime)
-Harness = Annotated[Optional[str], Field(description=HARNESS_DESCRIPTION)]  # noqa: UP045
-ConversationId = Annotated[Optional[str], Field(description=CONVERSATION_DESCRIPTION)]  # noqa: UP045
-
-#: The JSON Schema properties of Wakeshift's tool arguments (for tools whose schema you write yourself).
+#: The JSON Schema properties of Wakeshift's tool arguments: what
+#: @attached.tool() and attach's own tools add to their schemas.
 WAKE_ARGS_SCHEMA: dict[str, dict[str, str]] = {
     SESSION_ARG: {"type": "string", "description": SESSION_DESCRIPTION},
     HARNESS_ARG: {"type": "string", "description": HARNESS_DESCRIPTION},
     CONVERSATION_ARG: {"type": "string", "description": CONVERSATION_DESCRIPTION},
 }
 
-#: What the SDK says, once, when Wakeshift recognised no harness in a tool call.
-UNKNOWN_CLIENT_WARNING = (
-    "wakeshift: Wakeshift couldn't tell which agent made a tool call (no MCP client name, nothing it knows in the "
-    "call's _meta or User-Agent, and no harness argument), so it treats the agent as one it can't wake (its messages "
-    "are held for its next call to the tool). The name comes from the client's initialize request, which a stateless "
-    "server never sees; Claude Code, Codex, Antigravity, Copilot CLI, opencode and Cursor are recognised without it. "
-    "Add the harness argument (wakeshift.Harness) to the tool and pass args to wake.call, so the agent can say; or pass "
-    "the name yourself: wake.call(ctx, client=...) or wake.call_of(client_name=...)."
-)
 
-Via = Literal["stream", "poll", "hooks", "webhook"]
+class ScopeEvent(TypedDict):
+    """An event pattern a manifest's agent scope asks for, and what the person is told it's for."""
+
+    pattern: str
+    description: str
+
+
+class WakeLimit(TypedDict):
+    """At most max wake-ups in any seconds."""
+
+    seconds: int
+    max: int
+
+
+class _AgentScopeRequired(TypedDict):
+    wake: list[ScopeEvent]
+    post: list[ScopeEvent]
+    #: Days the person's consent lasts.
+    ttl_days: int
+
+
+class AgentScope(_AgentScopeRequired, total=False):
+    """What the app may do with the agents in the workspaces it keeps (Manifest's agent)."""
+
+    #: Limits on how often the app may wake the agent, on top of Wakeshift's own.
+    wake_limits: list[WakeLimit]
+    #: What the person should say to their agent once it's connected; at most 120 characters.
+    start_prompt: str
+
+
+class _EventTypeManifestRequired(TypedDict):
+    name: str
+    description: str
+    arguments: dict[str, Any]
+    payload: dict[str, Any]
+    topic: str
+
+
+class EventTypeManifest(_EventTypeManifestRequired, total=False):
+    """An event type as the manifest lists it (what define_event makes)."""
+
+    filter: dict[str, str]
+    personal: bool
+    delete_on_delivery: bool
+
+
+class Manifest(TypedDict, total=False):
+    """What the app tells Wakeshift it may do (publish_manifest)."""
+
+    description: str
+    agent: AgentScope
+    #: Event types defined elsewhere, not with define_event: Wakeshift gets
+    #: these, then the defined ones. Listing a defined one is an error.
+    events: list[EventTypeManifest]
+    #: Your app wakes its users' agents with what other people and their agents
+    #: do there (messages, moves): the consent screen says agents of people they
+    #: don't know can wake theirs.
+    others_can_wake: bool
+    #: Your MCP tools (as your server lists them) that agents' programs can run
+    #: without asking each time: tools that only read, and routine ones the
+    #: agent calls on every wake that reach only what it already joined. Never
+    #: one that deletes, spends, or reaches people the user hasn't chosen. When
+    #: a user connects Claude Code or Cursor CLI, Wakeshift offers to allow
+    #: exactly these, by name, in the same question as its install. Letters,
+    #: digits, _ and -; at most 20.
+    preapprove_tools: list[str]
 
 
 @dataclass
-class Call:
-    """Who called one of the app's tools, as Wakeshift needs it. Make one with
-    ``wake.call(ctx, ...)`` inside a tool, or ``wake.call_of(...)``."""
+class _Call:
+    """Who called one of the app's tools, as Wakeshift needs it (the call
+    body of a subscribe, an unsubscribe and an addition)."""
 
     #: The MCP client's name (initialize's clientInfo.name); empty when unknown.
     client: str
@@ -121,21 +170,20 @@ class Recognised:
 
 
 @dataclass
-class Addition:
-    """What Wakeshift adds to a tool result: text for the agent, _meta for its harness."""
+class _Addition:
+    """What Wakeshift adds to a tool result of attach's own tools: text for
+    the agent, _meta for its harness."""
 
     text: str | None = None
     meta: dict[str, Any] | None = None
-    #: What Wakeshift recognised the caller's harness as (not added to the result).
-    agent: Recognised | None = None
 
     @classmethod
-    def from_json(cls, v: Mapping[str, Any] | None) -> Addition:
+    def from_json(cls, v: Mapping[str, Any] | None) -> _Addition:
         v = v or {}
         return cls(text=v.get("text") or None, meta=v.get("meta") or None)
 
 
-def apply_addition(a: Addition, base: str | CallToolResult) -> CallToolResult:
+def _apply_addition(a: _Addition, base: str | CallToolResult) -> CallToolResult:
     """Adds Wakeshift's text and _meta to a tool result (a copy)."""
     if isinstance(base, str):
         text = (base.strip() + "\n\n" + (a.text or "")).strip()
@@ -151,56 +199,60 @@ def apply_addition(a: Addition, base: str | CallToolResult) -> CallToolResult:
     return out
 
 
-@dataclass
-class Subscription:
-    id: str
-    topic: str
-    once: bool
-    expires_at: datetime
-    #: The conversation's session key: a secret that acts as the conversation. Don't show, store or log it.
-    session: str = field(repr=False)
-    addition: Addition = field(default_factory=Addition)
-    agent: Recognised = field(default_factory=Recognised)
-    filter: dict[str, Any] | None = None
+@dataclass(frozen=True)
+class Recipient:
+    """One recipient of a personal event's occurrence: ``Recipient(user=u)``,
+    every subscription that user has to the event with the emit's arguments;
+    ``Recipient(user=u, subscription=id)``, exactly that subscription of the
+    user's (the id ``call.subscribe`` returned, for the user it returned);
+    ``Recipient(native=u)``, only that user's native (MCP Events) subscriptions."""
 
-    def result(self, text: str | CallToolResult) -> CallToolResult:
-        """The tool result to return: your text (or result) followed by Wakeshift's, with its _meta."""
-        return apply_addition(self.addition, text)
+    user: str | None = None
+    subscription: str | None = None
+    native: str | None = None
 
 
 @dataclass(frozen=True)
-class Published:
+class Emitted:
+    """What an emit reached."""
+
     #: Conversations it woke (or will).
     matched: int
-    #: An earlier publish had this event's id.
+    #: An earlier emit had this occurrence's id.
     duplicate: bool = False
+    #: The user and native recipients with no live subscription it reached.
+    unmatched: list[Recipient] = field(default_factory=list)
+    #: The subscription recipients no longer live (or not that user's, or
+    #: this event's): forget them. A duplicate reports the first emit's.
+    ended: list[Recipient] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
-class TopicStatus:
-    topic: str
-    subscriptions: int
-    connected: int
-    via: dict[str, int]
+def _recipient_wire(r: Recipient) -> str | dict[str, str]:
+    if r.native is not None:
+        return {"native": r.native}
+    if r.subscription is not None:
+        return {"user": r.user or "", "subscription": r.subscription}
+    return r.user or ""
 
 
-@dataclass(frozen=True)
-class SubscriptionStatus:
-    id: str
-    topic: str
-    status: str
-    connected: bool
-    via: str | None = None
-    expires_at: datetime | None = None
+def _recipients_of(raw: Any) -> list[Recipient]:
+    out: list[Recipient] = []
+    for r in raw or []:
+        if isinstance(r, str):
+            out.append(Recipient(user=r))
+        elif isinstance(r, Mapping):
+            if isinstance(r.get("native"), str):
+                out.append(Recipient(native=r["native"]))
+            else:
+                out.append(Recipient(user=r.get("user"), subscription=r.get("subscription")))
+    return out
 
 
 @dataclass(frozen=True)
 class PublishUrl:
-    """A publish URL: topic for a topic's (wake.publish_url), event for an
-    event's (event.publish_url)."""
+    """An event's publish URL (event.publish_url)."""
 
     id: str
-    topic: str = ""
     url: str = ""
     event: str = ""
 
@@ -234,7 +286,7 @@ def _parse_time(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
-def request_info(ctx: Any) -> tuple[str, dict[str, Any], Mapping[str, str]]:
+def _request_info(ctx: Any) -> tuple[str, dict[str, Any], Mapping[str, str]]:
     """The client's name, the request's _meta and its HTTP headers, from an MCP
     tool's Context (mcp.server.mcpserver.Context) or a low-level
     ServerRequestContext. Empty where the transport has none."""
@@ -264,7 +316,7 @@ def request_info(ctx: Any) -> tuple[str, dict[str, Any], Mapping[str, str]]:
     return client, meta, headers
 
 
-def tool_of(ctx: Any) -> str:
+def _tool_of(ctx: Any) -> str:
     """The name of the tool being called, from an MCP tool's Context or a
     low-level ServerRequestContext (its tools/call params); empty if unknown."""
     rc = getattr(ctx, "request_context", ctx)
@@ -275,7 +327,7 @@ def tool_of(ctx: Any) -> str:
     return name if isinstance(name, str) else ""
 
 
-def client_capabilities(ctx: Any) -> dict[str, Any]:
+def _client_capabilities(ctx: Any) -> dict[str, Any]:
     """The capabilities the client declared, as a dict (empty if unknown)."""
     rc = getattr(ctx, "request_context", ctx)
     session = getattr(rc, "session", None)
@@ -294,9 +346,53 @@ def _arg(args: Mapping[str, Any] | None, name: str) -> str | None:
     return v if isinstance(v, str) else None
 
 
+def _call_of(
+    *,
+    client_name: str,
+    meta: Mapping[str, Any] | None = None,
+    user: str | None = None,
+    session: str | None = None,
+    user_agent: str | None = None,
+    harness: str | None = None,
+    conversation: str | None = None,
+    tool: str | None = None,
+) -> _Call:
+    """Packs a tool call: tool is the name of the tool being called
+    (Wakeshift's hooks act on a connector beacon only from that tool's result)."""
+    return _Call(
+        client=client_name or "",
+        user=user or None,
+        meta=dict(meta) if meta else None,
+        session=session or None,
+        user_agent=user_agent or None,
+        harness=(harness or "").strip() or None,
+        conversation=(conversation or "").strip() or None,
+        tool=(tool or "").strip() or None,
+    )
+
+
+def _call(ctx: Any, *, user: str | None, args: Mapping[str, Any] | None, tool: str, client: str | None = None) -> _Call:
+    """Packs the tool call from an MCP request context: its _meta and
+    User-Agent, the client's name (the request's, else client: identify's),
+    the user, and session_key, harness and conversation_id from args (the
+    tool's arguments)."""
+    name, meta, headers = _request_info(ctx)
+    return _call_of(
+        client_name=name or client or "",
+        meta=meta,
+        user=user,
+        session=_arg(args, SESSION_ARG),
+        user_agent=headers.get("user-agent", "") if headers else "",
+        harness=_arg(args, HARNESS_ARG),
+        conversation=_arg(args, CONVERSATION_ARG),
+        tool=tool,
+    )
+
+
 class Wakeshift:
-    """The Wakeshift client for an app: define events and emit them, subscribe
-    the conversations that call your tools to topics, and publish to them."""
+    """The Wakeshift client for an app: define events, attach to your MCP
+    server so your tools can subscribe the conversations calling them, and
+    emit."""
 
     def __init__(
         self,
@@ -316,7 +412,7 @@ class Wakeshift:
         self._app_lock: asyncio.Lock | None = None
         # Test keys come from staging and local consoles, and one sent to
         # production fails in a way that's hard to read: ask for the core.
-        c = core or os.environ.get("WAKESHIFT_CORE") or ("" if self._key.mode == "test" else DEFAULT_CORE)
+        c = core or os.environ.get("WAKESHIFT_CORE") or ("" if is_test_key(key) else DEFAULT_CORE)
         if not c:
             raise ValueError(
                 "wakeshift: no core URL for this test key: set WAKESHIFT_CORE, or pass core=, to the address of the "
@@ -327,10 +423,14 @@ class Wakeshift:
         self._http = http
         self._retry_pauses = RETRY_PAUSES
         self._warn_fn = on_warning or (lambda m: print(m, file=sys.stderr))
-        self._warned: set[str] = set()
         self._events: dict[str, WakeEvent] = {}
-        self._manifest_base: dict[str, Any] = {}
+        # What publish_manifest was last given (None: nothing yet); whether
+        # Wakeshift has the manifest for the events defined now; how many
+        # define_events there were; and one automatic send at a time.
+        self._manifest_base: dict[str, Any] | None = None
         self._published = False
+        self._manifest_version = 0
+        self._manifest_lock: asyncio.Lock | None = None
 
     # ── The app ────────────────────────────────────────────────────────────
 
@@ -341,12 +441,6 @@ class Wakeshift:
         if self._app_id is None:
             raise RuntimeError("wakeshift: call await wake.app() first: this key doesn't name its app")
         return self._app_id
-
-    @property
-    def mode(self) -> str | None:
-        """The mode of an older key (test or live); None for a current one.
-        Deprecated: the mode means nothing now."""
-        return self._key.mode
 
     async def app(self) -> AppInfo:
         """Which app the key is, as Wakeshift says (GET /api/apps/v1/app):
@@ -379,213 +473,81 @@ class Wakeshift:
 
     # ── Warnings ───────────────────────────────────────────────────────────
 
-    def warn(self, message: str) -> None:
+    def _warn(self, message: str) -> None:
         """Reports a problem through on_warning, every time."""
         self._warn_fn(message)
 
-    def _warn_once(self, kind: str, message: str) -> None:
-        if kind in self._warned:
-            return
-        self._warned.add(kind)
-        self._warn_fn(message)
-
-    def _recognised(self, agent: Mapping[str, Any] | None) -> Recognised:
-        if agent is not None and not agent.get("harness") and not agent.get("claimed"):
-            self._warn_once("unknown_client", UNKNOWN_CLIENT_WARNING)
-        agent = agent or {}
-        return Recognised(harness=agent.get("harness"), via=agent.get("via"), claimed=agent.get("claimed"))
-
-    # ── Calls ──────────────────────────────────────────────────────────────
-
-    def call(
-        self,
-        ctx: Any,
-        *,
-        user: str | None = None,
-        args: Mapping[str, Any] | None = None,
-        client: str | None = None,
-        session: str | None = None,
-        harness: str | None = None,
-        conversation: str | None = None,
-        tool: str | None = None,
-    ) -> Call:
-        """Packs the tool call from an MCP tool's Context: its _meta and
-        User-Agent, the client's name, the user, and session_key, harness and
-        conversation_id from args (the tool's arguments). tool is the name of
-        the tool being called (read from the Context where it says, else pass
-        it): Wakeshift's hooks act on a connector beacon only from the result
-        of the tool it names."""
-        name, meta, headers = request_info(ctx)
-        return self.call_of(
-            client_name=name if client is None else client,
-            meta=meta,
-            user=user,
-            session=session if session is not None else _arg(args, SESSION_ARG),
-            user_agent=headers.get("user-agent", "") if headers else "",
-            harness=harness if harness is not None else _arg(args, HARNESS_ARG),
-            conversation=conversation if conversation is not None else _arg(args, CONVERSATION_ARG),
-            tool=tool if tool is not None else tool_of(ctx),
-        )
-
-    def call_of(
-        self,
-        *,
-        client_name: str,
-        meta: Mapping[str, Any] | None = None,
-        user: str | None = None,
-        session: str | None = None,
-        user_agent: str | None = None,
-        harness: str | None = None,
-        conversation: str | None = None,
-        tool: str | None = None,
-    ) -> Call:
-        """Packs a tool call without an MCP framework. tool is the name of the
-        tool being called."""
-        return Call(
-            client=client_name or "",
-            user=user or None,
-            meta=dict(meta) if meta else None,
-            session=session or None,
-            user_agent=user_agent or None,
-            harness=(harness or "").strip() or None,
-            conversation=(conversation or "").strip() or None,
-            tool=(tool or "").strip() or None,
-        )
-
-    # ── Topics ─────────────────────────────────────────────────────────────
-
-    async def subscribe(
-        self,
-        call: Call,
-        topic: str,
-        *,
-        filter: Mapping[str, Any] | None = None,
-        once: bool = False,
-        replay: int | str | None = None,
-        ttl: int | str | None = None,
-    ) -> Subscription:
-        """Subscribes the calling conversation to topic (again: refreshes it).
-        Check the caller may see the topic first: Wakeshift only refuses another
-        user's u/<user>/… topics."""
-        body: dict[str, Any] = {"call": call.to_json(), "topic": topic, "once": bool(once)}
-        if filter:
-            body["filter"] = dict(filter)
-        if replay is not None:
-            body["replay"] = replay
-        if ttl is not None:
-            body["ttl"] = ttl
-        out = await self._request("POST", "/topics/subscribe", body)
-        s = out["subscription"]
-        return Subscription(
-            id=s["id"],
-            topic=s["topic"],
-            filter=s.get("filter"),
-            once=bool(s.get("once")),
-            expires_at=_parse_time(s["expires_at"]),
-            session=out.get("session", ""),
-            addition=Addition.from_json(out.get("addition")),
-            agent=self._recognised(out.get("agent")),
-        )
-
-    async def unsubscribe(self, call: Call, topic: str | None = None) -> int:
-        """Ends the conversation's subscription to topic, or to all the app's topics. Returns how many ended."""
-        body: dict[str, Any] = {"call": call.to_json()}
-        if topic:
-            body["topic"] = topic
-        return int((await self._request("POST", "/topics/unsubscribe", body))["unsubscribed"])
-
-    async def publish(
-        self, topics: str | list[str], *, text: str, data: Mapping[str, Any] | None = None, id: str | None = None
-    ) -> Published:
-        """Wakes every conversation subscribed to one of topics whose filter the event passes (each once)."""
-        event: dict[str, Any] = {"text": text}
-        if data is not None:
-            event["data"] = dict(data)
-        if id:
-            event["id"] = id
-        out = await self._request(
-            "POST", "/topics/publish", {"topics": [topics] if isinstance(topics, str) else list(topics), "event": event}
-        )
-        return Published(matched=int(out["matched"]), duplicate=bool(out.get("duplicate")))
-
-    async def send(self, subscription_id: str, *, text: str, data: Mapping[str, Any] | None = None, id: str | None = None) -> str:
-        """Wakes exactly one subscription's conversation, whatever its filter: delivered, queued or closed."""
-        event: dict[str, Any] = {"text": text}
-        if data is not None:
-            event["data"] = dict(data)
-        if id:
-            event["id"] = id
-        return (await self._request("POST", f"/subscriptions/{quote(subscription_id, safe='')}/send", {"event": event}))["status"]
-
-    async def topic_status(self, topic: str) -> TopicStatus:
-        """How many conversations are subscribed to topic, and how many are connected now, and how. Only reads."""
-        out = await self._request("GET", "/topics/status?" + urlencode({"topic": topic}))
-        via = {"stream": 0, "poll": 0, "hooks": 0, "webhook": 0}
-        via.update(out.get("via") or {})
-        return TopicStatus(topic=out["topic"], subscriptions=int(out["subscriptions"]), connected=int(out["connected"]), via=via)
-
-    async def subscription_status(self, subscription_id: str) -> SubscriptionStatus:
-        """Whether a subscription is active and its conversation connected now, and how. Only reads."""
-        out = await self._request("GET", f"/subscriptions/{quote(subscription_id, safe='')}")
-        return SubscriptionStatus(
-            id=out["id"],
-            topic=out["topic"],
-            status=out["status"],
-            connected=bool(out["connected"]),
-            via=out.get("via"),
-            expires_at=_parse_time(out["expires_at"]) if out.get("expires_at") else None,
-        )
-
-    async def publish_url(self, topic: str) -> PublishUrl:
-        """A capability URL that publishes to topic: a POST's body becomes an event."""
-        out = await self._request("POST", "/topics/publish-urls", {"topic": topic})
-        return PublishUrl(id=out["id"], topic=out["topic"], url=out["url"])
+    # ── Publish URLs, users and the manifest ───────────────────────────────
 
     async def revoke_publish_url(self, id: str) -> None:
-        """Stops a publish URL working, a topic's or an event's (410 from then on)."""
+        """Stops an event's publish URL working (410 from then on)."""
         await self._request("DELETE", f"/events/publish-urls/{quote(id, safe='')}")
-
-    async def addition(self, call: Call) -> Addition:
-        """What Wakeshift would add to any other tool result for this conversation (creates nothing)."""
-        out = await self._request("POST", "/topics/annotate", {"call": call.to_json()})
-        a = Addition.from_json(out)
-        a.agent = self._recognised(out.get("agent"))
-        return a
-
-    async def annotate(self, call: Call, result: CallToolResult) -> CallToolResult:
-        """Adds what Wakeshift has for the calling conversation to a tool result of yours (a copy)."""
-        return apply_addition(await self.addition(call), result)
-
-    async def close_topic(self, topic: str) -> int:
-        """Ends every subscription to topic; each conversation is told. Returns how many ended."""
-        return int((await self._request("POST", "/topics/close", {"topic": topic}))["closed"])
-
-    async def end_subscription(self, subscription_id: str) -> bool:
-        """Ends one subscription by its id, telling its conversation. False if it had already ended."""
-        return bool((await self._request("POST", f"/subscriptions/{quote(subscription_id, safe='')}/end", {}))["ended"])
-
-    async def unsubscribe_user(self, user: str, topic: str | None = None) -> int:
-        """Ends one user's subscriptions to topic, or to all the app's topics. Returns how many ended."""
-        body: dict[str, Any] = {"user": user}
-        if topic:
-            body["topic"] = topic
-        return int((await self._request("POST", "/topics/unsubscribe", body))["unsubscribed"])
 
     async def forget_user(self, user: str) -> bool:
         """Deletes everything Wakeshift keeps for one of the app's users. False if there was nothing to forget."""
         return bool((await self._request("POST", "/users/forget", {"user": user}))["forgotten"])
 
-    async def publish_manifest(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
-        """Tells Wakeshift what the app may do, replacing what it said before.
-        The events you defined (define_event) are added unless manifest has
-        events of its own. Returns the manifest as Wakeshift keeps it."""
-        body = dict(manifest)
-        if "events" not in body and self._events:
-            body["events"] = [e.manifest for e in self._events.values()]
-        out = await self._request("PUT", "/manifest", body)
+    async def publish_manifest(self, manifest: Manifest) -> Manifest:
+        """Tells Wakeshift what the app may do, replacing what it said before:
+        manifest, with the events you defined (define_event) after its own
+        events. An event both defined and listed in manifest's events is an
+        error (ValueError), and nothing is sent. You needn't call it: Wakeshift
+        gets the manifest automatically when the app first needs it. Once
+        called, manifest is what every automatic send carries (even if this one
+        failed), with the events defined by then. Returns the manifest as
+        Wakeshift keeps it."""
+        version = self._manifest_version  # before the body: a later define_event is sent again
+        body = self._manifest_body(manifest)
         self._manifest_base = dict(manifest)
-        self._published = True
-        return out
+        # One send at a time, explicit or automatic: the last manifest
+        # Wakeshift gets is the newest.
+        async with self._manifest_send_lock():
+            try:
+                out = await self._request("PUT", "/manifest", body)
+            except BaseException:
+                self._published = False  # the next automatic send tries again
+                raise
+            self._published = self._manifest_version == version
+        return cast(Manifest, out)
+
+    def _manifest_send_lock(self) -> asyncio.Lock:
+        if self._manifest_lock is None:
+            self._manifest_lock = asyncio.Lock()
+        return self._manifest_lock
+
+    def _manifest_body(self, manifest: Mapping[str, Any]) -> dict[str, Any]:
+        """The manifest as Wakeshift gets it: its events, then the defined ones,
+        refusing a name in both."""
+        listed = list(manifest.get("events") or [])
+        for name in self._events:
+            if any(isinstance(e, Mapping) and e.get("name") == name for e in listed):
+                raise ValueError(
+                    f"wakeshift: event {name} is defined with define_event and listed in the manifest's events: keep one"
+                )
+        events = listed + [e.manifest for e in self._events.values()]
+        body = {k: v for k, v in manifest.items() if k != "events"}
+        if events:
+            body["events"] = events
+        return body
+
+    async def _send_manifest(self) -> None:
+        """The automatic send: the manifest the app last published, or else the
+        settings Wakeshift has (asked for first, so the send never wipes what
+        was published separately), with the defined events."""
+        if self._manifest_base is not None:
+            await self._request("PUT", "/manifest", self._manifest_body(self._manifest_base))
+            return
+        stored = await self._request("GET", "/manifest")
+        description = stored.get("description")
+        kept: dict[str, Any] = {"description": description if isinstance(description, str) else ""}
+        if isinstance(stored.get("agent"), dict):
+            kept["agent"] = stored["agent"]
+        if stored.get("others_can_wake") is True:
+            kept["others_can_wake"] = True
+        tools = stored.get("preapprove_tools")
+        if isinstance(tools, list) and tools:
+            kept["preapprove_tools"] = tools
+        await self._request("PUT", "/manifest", self._manifest_body(kept))
 
     # ── Events (MCP Events, natively or bridged) ───────────────────────────
 
@@ -609,7 +571,8 @@ class Wakeshift:
             raise ValueError(f"wakeshift: event {name} is defined twice")
         ev = WakeEvent(self, name, **opts)
         self._events[name] = ev
-        self._published = False  # the manifest changed
+        self._published = False  # the manifest changed: sent again when next needed
+        self._manifest_version += 1
         return ev
 
     def attach(
@@ -617,12 +580,24 @@ class Wakeshift:
         server: Any,
         *,
         identify: Callable[[Any], Identity | None] | None = None,
-    ) -> None:
+        tools: Sequence[str] | None = None,
+        events: EventsOptions | None = None,
+    ) -> Attached:
         """Attaches Wakeshift to an MCPServer, before you run it: the one call
         that connects the two. Today it serves the defined events: MCP Events
         (events/list, events/subscribe, events/unsubscribe) for clients that
         speak it, such as ChatGPT, and the subscribe_events tool for everyone
         else; plus unsubscribe_events and list_subscriptions for every client.
+        It returns the handle your own tools register with
+        (``@attached.tool()``), so they can subscribe the calling conversation
+        (``call.subscribe``). ``events`` configures the event features
+        (EventsOptions: native, an override of native detection).
+
+        ``tools`` names which of its own tools attach adds (BUILTIN_TOOLS:
+        subscribe_events, unsubscribe_events, list_subscriptions); None, the
+        default, adds all three, and ``[]`` none. Leave out
+        unsubscribe_events or list_subscriptions only if your own tools let a
+        person see and stop their subscriptions.
 
         identify tells who is behind a request (it gets the request context) as
         an Identity, from the app's own sign-in. Without it, requests have no
@@ -632,35 +607,60 @@ class Wakeshift:
             wake.attach(server, identify=lambda ctx: Identity(user=my_user(ctx)))"""
         from .events import attach_events
 
-        attach_events(self, server, list(self._events.values()), identify=identify)
+        return attach_events(self, server, list(self._events.values()), identify=identify, tools=tools, events_options=events)
 
-    async def ensure_events(self) -> None:
-        """Publishes the manifest with the defined events, once (again after a define_event)."""
-        if not self._published:
-            await self.publish_manifest(self._manifest_base)
+    async def _ensure_events(self) -> None:
+        """Sends the manifest with the defined events, once (again after a define_event)."""
+        if self._published:
+            return
+        async with self._manifest_send_lock():
+            if self._published:
+                return  # sent while this one waited
+            version = self._manifest_version
+            await self._send_manifest()
+            if self._manifest_version == version:
+                self._published = True
 
-    async def emit_event(
-        self, *, name: str, arguments: Any, payload: Any, text: str, id: str | None = None, to: str | None = None
-    ) -> Published:
-        await self.ensure_events()
+    async def _emit_event(
+        self,
+        *,
+        name: str,
+        arguments: Any,
+        payload: Any,
+        text: str,
+        id: str | None = None,
+        to: str | list[Recipient] | None = None,
+    ) -> Emitted:
+        await self._ensure_events()
         body: dict[str, Any] = {"name": name, "arguments": arguments, "payload": payload, "text": text}
         if id:
             body["id"] = id
-        if to:
+        if isinstance(to, str):
             body["to"] = to
+        elif to:
+            # One plain user goes as a string (the single-user path), else a list.
+            if len(to) == 1 and to[0].subscription is None and to[0].native is None:
+                body["to"] = to[0].user
+            else:
+                body["to"] = [_recipient_wire(r) for r in to]
         out = await self._request("POST", "/events/emit", body)
-        return Published(matched=int(out["matched"]), duplicate=bool(out.get("duplicate")))
+        return Emitted(
+            matched=int(out["matched"]),
+            duplicate=bool(out.get("duplicate")),
+            unmatched=_recipients_of(out.get("unmatched")),
+            ended=_recipients_of(out.get("ended")),
+        )
 
-    async def request_app(self, method: str, path: str, body: Any = None) -> dict[str, Any]:
+    async def _request_app(self, method: str, path: str, body: Any = None) -> dict[str, Any]:
         """A call to the app API, after the manifest with the defined events is published."""
-        await self.ensure_events()
+        await self._ensure_events()
         return await self._request(method, path, body)
 
     # ── Users' workspaces ──────────────────────────────────────────────────
 
     async def workspace(self, user: str, name: str) -> str:
         """The workspace Wakeshift keeps for one of the app's users, created on
-        first use. Topics keep that user's conversations there."""
+        first use. That user's conversations are kept there."""
         return (await self._request("POST", "/workspaces", {"external_id": user, "name": name}))["workspace"]
 
     async def add_agent(self, workspace: str, agent: str, display_name: str) -> str:
@@ -710,13 +710,22 @@ class Wakeshift:
             data = json.loads(text) if text else None
         except ValueError:
             data = None
-        if resp.status_code >= 400:
+        if resp.status_code >= 300:
+            # Wakeshift's code, message and reason where it sent them as strings, else the
+            # body's start, else the status's text, as every SDK reads it (errors.json).
             e = data.get("error", {}) if isinstance(data, dict) else {}
             if not isinstance(e, dict):
                 e = {}
-            reason = e.get("reason") if isinstance(e.get("reason"), str) else None
+
+            def string(k: str) -> str:
+                v = e.get(k)
+                return v if isinstance(v, str) else ""
+
             raise WakeshiftError(
-                resp.status_code, e.get("code", ""), e.get("message") or text[:200] or resp.reason_phrase, reason=reason
+                resp.status_code,
+                string("code"),
+                string("message") or text[:200] or resp.reason_phrase,
+                reason=string("reason") or None,
             )
         # A 2xx that isn't Wakeshift's JSON: a proxy's page, or a wrong core.
         if not isinstance(data, dict):

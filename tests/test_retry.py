@@ -45,10 +45,9 @@ def scripted(answers: list[Callable[[], httpx.Response]]) -> tuple[list[bytes], 
     return bodies, wake
 
 
-async def test_a_publish_the_load_balancer_refused_is_sent_again_body_and_all() -> None:
-    bodies, wake = scripted([gfe500, as_json(200, {"matched": 1})])
-    r = await wake.publish("ci/x", text="hi")
-    assert r.matched == 1
+async def test_a_post_the_load_balancer_refused_is_sent_again_body_and_all() -> None:
+    bodies, wake = scripted([gfe500, as_json(200, {"forgotten": True})])
+    assert await wake.forget_user("ada") is True
     assert len(bodies) == 2
     assert bodies[0] == bodies[1]
 
@@ -56,13 +55,13 @@ async def test_a_publish_the_load_balancer_refused_is_sent_again_body_and_all() 
 async def test_wakeshifts_own_errors_arent_retried_and_a_refusal_that_keeps_coming_is_the_error() -> None:
     bodies, wake = scripted([as_json(500, {"error": {"code": "internal", "message": "x"}})])
     with pytest.raises(WakeshiftError) as e:
-        await wake.publish("ci/x", text="x")
+        await wake.forget_user("ada")
     assert e.value.status == 500
     assert len(bodies) == 1
 
     bodies, wake = scripted([gfe500])
     with pytest.raises(WakeshiftError) as e:
-        await wake.publish("ci/x", text="x")
+        await wake.forget_user("ada")
     assert e.value.status == 500
     assert len(bodies) == 3
     assert "Server Error" in e.value.detail

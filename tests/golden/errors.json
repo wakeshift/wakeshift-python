@@ -1,0 +1,699 @@
+{
+  "_about": "How every SDK (pkg/appkit, sdk/typescript, sdk/python) reads Wakeshift's answers: which refusals it retries, the error each answer becomes, the JSON-RPC error each becomes for an MCP Events client, and the error for each mistake the SDK catches before asking Wakeshift (client_checks). {core} stands for the core's address.",
+  "retry": {
+    "pauses_ms": [
+      250,
+      1000
+    ],
+    "cases": [
+      {
+        "name": "the load balancer's 500, POST",
+        "method": "POST",
+        "status": 500,
+        "content_type": "text/html; charset=UTF-8",
+        "body": "<html><head>\n<meta http-equiv=\"content-type\" content=\"text/html;charset=utf-8\">\n<title>500 Server Error</title>\n</head>\n<body text=#000000 bgcolor=#ffffff>\n<h1>Error: Server Error</h1>\n<h2>The server encountered an error and could not complete your request.<p>Please try again in 30 seconds.</h2>\n<h2></h2>\n</body></html>",
+        "retried": true
+      },
+      {
+        "name": "the load balancer's 500, GET",
+        "method": "GET",
+        "status": 500,
+        "content_type": "text/html; charset=UTF-8",
+        "body": "<html><head>\n<meta http-equiv=\"content-type\" content=\"text/html;charset=utf-8\">\n<title>500 Server Error</title>\n</head>\n<body text=#000000 bgcolor=#ffffff>\n<h1>Error: Server Error</h1>\n<h2>The server encountered an error and could not complete your request.<p>Please try again in 30 seconds.</h2>\n<h2></h2>\n</body></html>",
+        "retried": true
+      },
+      {
+        "name": "the load balancer's 500, media type in capitals",
+        "method": "PUT",
+        "status": 500,
+        "content_type": "TEXT/HTML",
+        "body": "<html><head>\n<meta http-equiv=\"content-type\" content=\"text/html;charset=utf-8\">\n<title>500 Server Error</title>\n</head>\n<body text=#000000 bgcolor=#ffffff>\n<h1>Error: Server Error</h1>\n<h2>The server encountered an error and could not complete your request.<p>Please try again in 30 seconds.</h2>\n<h2></h2>\n</body></html>",
+        "retried": true
+      },
+      {
+        "name": "an HTML 500 that isn't the load balancer's",
+        "method": "POST",
+        "status": 500,
+        "content_type": "text/html",
+        "body": "<p>oops</p>",
+        "retried": false
+      },
+      {
+        "name": "an HTML 500 whose Server Error is past the first 4 KB",
+        "method": "GET",
+        "status": 500,
+        "content_type": "text/html",
+        "body": "<html>                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        Server Error</html>",
+        "retried": false
+      },
+      {
+        "name": "a plain-text 500 saying Server Error",
+        "method": "GET",
+        "status": 500,
+        "content_type": "text/plain",
+        "body": "Server Error",
+        "retried": false
+      },
+      {
+        "name": "Wakeshift's own 500",
+        "method": "POST",
+        "status": 500,
+        "content_type": "application/json",
+        "body": "{\"error\":{\"code\":\"internal\",\"message\":\"Server Error\"}}",
+        "retried": false
+      },
+      {
+        "name": "Wakeshift's own 500, GET",
+        "method": "GET",
+        "status": 500,
+        "content_type": "application/json",
+        "body": "{\"error\":{\"code\":\"internal\",\"message\":\"x\"}}",
+        "retried": false
+      },
+      {
+        "name": "Cloud Run's 503, GET",
+        "method": "GET",
+        "status": 503,
+        "content_type": "text/html",
+        "body": "Service Unavailable",
+        "retried": true
+      },
+      {
+        "name": "a 503 without a content type, HEAD",
+        "method": "HEAD",
+        "status": 503,
+        "content_type": "",
+        "body": "",
+        "retried": true
+      },
+      {
+        "name": "Cloud Run's 503, POST",
+        "method": "POST",
+        "status": 503,
+        "content_type": "text/html",
+        "body": "Service Unavailable",
+        "retried": false
+      },
+      {
+        "name": "a 503, DELETE",
+        "method": "DELETE",
+        "status": 503,
+        "content_type": "text/html",
+        "body": "Service Unavailable",
+        "retried": false
+      },
+      {
+        "name": "Wakeshift's own 503, GET",
+        "method": "GET",
+        "status": 503,
+        "content_type": "application/json",
+        "body": "{\"error\":{\"code\":\"unavailable\",\"message\":\"x\"}}",
+        "retried": false
+      },
+      {
+        "name": "Wakeshift's own 502 with a charset, GET",
+        "method": "GET",
+        "status": 502,
+        "content_type": "application/json; charset=utf-8",
+        "body": "{\"error\":{\"code\":\"x\",\"message\":\"x\"}}",
+        "retried": false
+      },
+      {
+        "name": "a 502, GET",
+        "method": "GET",
+        "status": 502,
+        "content_type": "text/html",
+        "body": "Bad Gateway",
+        "retried": true
+      },
+      {
+        "name": "a 502, PUT",
+        "method": "PUT",
+        "status": 502,
+        "content_type": "text/html",
+        "body": "Bad Gateway",
+        "retried": false
+      },
+      {
+        "name": "a 504, GET",
+        "method": "GET",
+        "status": 504,
+        "content_type": "text/plain",
+        "body": "upstream request timeout",
+        "retried": true
+      },
+      {
+        "name": "a problem+json 503 isn't Wakeshift's, GET",
+        "method": "GET",
+        "status": 503,
+        "content_type": "application/problem+json",
+        "body": "{\"title\":\"x\"}",
+        "retried": true
+      },
+      {
+        "name": "a 501, GET",
+        "method": "GET",
+        "status": 501,
+        "content_type": "text/html",
+        "body": "Not Implemented",
+        "retried": false
+      },
+      {
+        "name": "a 429, GET",
+        "method": "GET",
+        "status": 429,
+        "content_type": "text/html",
+        "body": "Too Many Requests",
+        "retried": false
+      },
+      {
+        "name": "a 200 saying Server Error",
+        "method": "GET",
+        "status": 200,
+        "content_type": "text/html",
+        "body": "<html><head>\n<meta http-equiv=\"content-type\" content=\"text/html;charset=utf-8\">\n<title>500 Server Error</title>\n</head>\n<body text=#000000 bgcolor=#ffffff>\n<h1>Error: Server Error</h1>\n<h2>The server encountered an error and could not complete your request.<p>Please try again in 30 seconds.</h2>\n<h2></h2>\n</body></html>",
+        "retried": false
+      }
+    ]
+  },
+  "responses": [
+    {
+      "name": "Wakeshift's error",
+      "status": 403,
+      "content_type": "application/json",
+      "body": "{\"error\":{\"code\":\"private_topic\",\"message\":\"That topic is private.\"}}",
+      "reason_phrase": "Forbidden",
+      "want": {
+        "status": 403,
+        "code": "private_topic",
+        "message": "That topic is private.",
+        "text": "wakeshift: private_topic (403): That topic is private."
+      }
+    },
+    {
+      "name": "Wakeshift's error with a reason",
+      "status": 422,
+      "content_type": "application/json",
+      "body": "{\"error\":{\"code\":\"callback_failed\",\"message\":\"The callback answered 404.\",\"reason\":\"http_4xx\"}}",
+      "reason_phrase": "Unprocessable Entity",
+      "want": {
+        "status": 422,
+        "code": "callback_failed",
+        "message": "The callback answered 404.",
+        "text": "wakeshift: callback_failed (422): The callback answered 404.",
+        "reason": "http_4xx"
+      }
+    },
+    {
+      "name": "a reason that isn't a string is left out",
+      "status": 422,
+      "content_type": "application/json",
+      "body": "{\"error\":{\"code\":\"callback_failed\",\"message\":\"x\",\"reason\":5}}",
+      "reason_phrase": "Unprocessable Entity",
+      "want": {
+        "status": 422,
+        "code": "callback_failed",
+        "message": "x",
+        "text": "wakeshift: callback_failed (422): x"
+      }
+    },
+    {
+      "name": "a code that isn't a string is empty",
+      "status": 400,
+      "content_type": "application/json",
+      "body": "{\"error\":{\"code\":5,\"message\":\"x\"}}",
+      "reason_phrase": "Bad Request",
+      "want": {
+        "status": 400,
+        "code": "",
+        "message": "x",
+        "text": "wakeshift: error (400): x"
+      }
+    },
+    {
+      "name": "an error without a message is its body",
+      "status": 400,
+      "content_type": "application/json",
+      "body": "{\"error\":{\"code\":\"bad_request\"}}",
+      "reason_phrase": "Bad Request",
+      "want": {
+        "status": 400,
+        "code": "bad_request",
+        "message": "{\"error\":{\"code\":\"bad_request\"}}",
+        "text": "wakeshift: bad_request (400): {\"error\":{\"code\":\"bad_request\"}}"
+      }
+    },
+    {
+      "name": "an error with an empty message is its body",
+      "status": 400,
+      "content_type": "application/json",
+      "body": "{\"error\":{\"code\":\"bad_request\",\"message\":\"\"}}",
+      "reason_phrase": "Bad Request",
+      "want": {
+        "status": 400,
+        "code": "bad_request",
+        "message": "{\"error\":{\"code\":\"bad_request\",\"message\":\"\"}}",
+        "text": "wakeshift: bad_request (400): {\"error\":{\"code\":\"bad_request\",\"message\":\"\"}}"
+      }
+    },
+    {
+      "name": "an error that isn't an object",
+      "status": 500,
+      "content_type": "application/json",
+      "body": "{\"error\":\"boom\"}",
+      "reason_phrase": "Internal Server Error",
+      "want": {
+        "status": 500,
+        "code": "",
+        "message": "{\"error\":\"boom\"}",
+        "text": "wakeshift: error (500): {\"error\":\"boom\"}"
+      }
+    },
+    {
+      "name": "a proxy's page is its first 200 characters",
+      "status": 502,
+      "content_type": "text/html",
+      "body": "<html>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx</html>",
+      "reason_phrase": "Bad Gateway",
+      "want": {
+        "status": 502,
+        "code": "",
+        "message": "<html>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "text": "wakeshift: error (502): <html>xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "name": "an empty answer is its status",
+      "status": 503,
+      "content_type": "",
+      "body": "",
+      "reason_phrase": "Service Unavailable",
+      "want": {
+        "status": 503,
+        "code": "",
+        "message": "Service Unavailable",
+        "text": "wakeshift: error (503): Service Unavailable"
+      }
+    },
+    {
+      "name": "a redirect is an error, not followed",
+      "status": 302,
+      "content_type": "",
+      "body": "",
+      "reason_phrase": "Found",
+      "want": {
+        "status": 302,
+        "code": "",
+        "message": "Found",
+        "text": "wakeshift: error (302): Found"
+      }
+    }
+  ],
+  "bad_response": {
+    "code": "bad_response",
+    "message": "Wakeshift at {core} answered {status} without a JSON object. Check that WAKESHIFT_CORE, or the core option, is the address of the console your key came from",
+    "cases": [
+      {
+        "name": "a proxy's page",
+        "status": 200,
+        "content_type": "text/html",
+        "body": "<html>hello</html>"
+      },
+      {
+        "name": "JSON that isn't an object",
+        "status": 200,
+        "content_type": "application/json",
+        "body": "[1,2]"
+      },
+      {
+        "name": "JSON null",
+        "status": 200,
+        "content_type": "application/json",
+        "body": "null"
+      },
+      {
+        "name": "broken JSON",
+        "status": 201,
+        "content_type": "application/json",
+        "body": "{\"workspace\":"
+      },
+      {
+        "name": "an empty answer",
+        "status": 200,
+        "content_type": "",
+        "body": ""
+      }
+    ]
+  },
+  "unreachable": {
+    "status": 0,
+    "code": "unreachable",
+    "message_prefix": "can't reach Wakeshift at {core} (",
+    "message_suffix": "). Check that WAKESHIFT_CORE, or the core option, is the address of the console your key came from"
+  },
+  "rpc": [
+    {
+      "name": "a callback that failed verification",
+      "error": {
+        "code": "callback_failed",
+        "message": "The callback answered 404.",
+        "reason": "http_4xx"
+      },
+      "want": {
+        "code": {
+          "draft": -32027,
+          "chatgpt": -32015
+        },
+        "message": "The callback answered 404.",
+        "data": {
+          "reason": "http_4xx"
+        }
+      }
+    },
+    {
+      "name": "a callback failure without a reason",
+      "error": {
+        "code": "callback_failed",
+        "message": "x"
+      },
+      "want": {
+        "code": {
+          "draft": -32027,
+          "chatgpt": -32015
+        },
+        "message": "x",
+        "data": {
+          "reason": ""
+        }
+      }
+    },
+    {
+      "name": "an unknown event",
+      "error": {
+        "code": "unknown_event",
+        "message": "No event type x."
+      },
+      "want": {
+        "code": {
+          "draft": -32023,
+          "chatgpt": -32011
+        },
+        "message": "No event type x.",
+        "data": {
+          "kind": "event"
+        }
+      }
+    },
+    {
+      "name": "an unsupported delivery mode",
+      "error": {
+        "code": "unsupported",
+        "message": "No such delivery mode."
+      },
+      "want": {
+        "code": {
+          "draft": -32026,
+          "chatgpt": -32602
+        },
+        "message": "No such delivery mode.",
+        "data": {
+          "feature": "deliveryMode"
+        }
+      }
+    },
+    {
+      "name": "the subscription limit",
+      "error": {
+        "code": "subscription_limit",
+        "message": "Too many."
+      },
+      "want": {
+        "code": {
+          "draft": -32025,
+          "chatgpt": -32602
+        },
+        "message": "Too many.",
+        "data": {
+          "kind": "subscriptions"
+        }
+      }
+    },
+    {
+      "name": "a bad request",
+      "error": {
+        "code": "bad_request",
+        "message": "Bad."
+      },
+      "want": {
+        "code": {
+          "draft": -32602,
+          "chatgpt": -32602
+        },
+        "message": "Bad.",
+        "data": null
+      }
+    },
+    {
+      "name": "bad arguments",
+      "error": {
+        "code": "bad_arguments",
+        "message": "Bad arguments."
+      },
+      "want": {
+        "code": {
+          "draft": -32602,
+          "chatgpt": -32602
+        },
+        "message": "Bad arguments.",
+        "data": null
+      }
+    },
+    {
+      "name": "another session's subscription",
+      "error": {
+        "code": "unknown_session",
+        "message": "x"
+      },
+      "want": {
+        "code": {
+          "draft": -32024,
+          "chatgpt": -32012
+        },
+        "message": "another client of yours holds that subscription",
+        "data": null
+      }
+    },
+    {
+      "name": "another client's subscription",
+      "error": {
+        "code": "other_client",
+        "message": "x"
+      },
+      "want": {
+        "code": {
+          "draft": -32024,
+          "chatgpt": -32012
+        },
+        "message": "another client of yours holds that subscription",
+        "data": null
+      }
+    },
+    {
+      "name": "another conversation's subscription",
+      "error": {
+        "code": "unknown_conversation",
+        "message": "x"
+      },
+      "want": {
+        "code": {
+          "draft": -32024,
+          "chatgpt": -32012
+        },
+        "message": "another client of yours holds that subscription",
+        "data": null
+      }
+    },
+    {
+      "name": "any other refusal",
+      "error": {
+        "code": "internal",
+        "message": "Something broke."
+      },
+      "want": {
+        "code": {
+          "draft": -32603,
+          "chatgpt": -32603
+        },
+        "message": "Wakeshift refused the subscription: Something broke.",
+        "data": null
+      }
+    },
+    {
+      "name": "Wakeshift unreachable",
+      "error": {
+        "code": "unreachable",
+        "message": "can't reach Wakeshift at https://core.example (connection refused). Check that WAKESHIFT_CORE, or the core option, is the address of the console your key came from"
+      },
+      "want": {
+        "code": {
+          "draft": -32603,
+          "chatgpt": -32603
+        },
+        "message": "Wakeshift couldn't be reached",
+        "data": null
+      }
+    },
+    {
+      "name": "an error that isn't Wakeshift's",
+      "error": null,
+      "want": {
+        "code": {
+          "draft": -32603,
+          "chatgpt": -32603
+        },
+        "message": "Wakeshift couldn't be reached",
+        "data": null
+      }
+    }
+  ],
+  "client_checks": {
+    "_about": "Mistakes each SDK refuses before asking Wakeshift. Each is the SDK's API error (Go's *APIError, WakeshiftError in TypeScript and Python) with the status and code Wakeshift answers the same mistake with, and a message containing says; Wakeshift isn't asked. The events are game.turn (personal) and table.news (shared), both with a required string argument table and a payload with a required string text, as in the toolcall tests. Each SDK runs every op its tests know, and fails on an op it doesn't, unless skip names it, with why.",
+    "cases": [
+      {
+        "op": "emit_personal_without_recipient",
+        "name": "emit: a personal event without a recipient",
+        "status": 400,
+        "code": "bad_arguments",
+        "says": "is personal"
+      },
+      {
+        "op": "emit_shared_with_recipient",
+        "name": "emit: a shared event with a recipient",
+        "status": 400,
+        "code": "bad_arguments",
+        "says": "isn't personal"
+      },
+      {
+        "op": "emit_recipient_without_user",
+        "name": "emit: a recipient whose user is empty",
+        "status": 400,
+        "code": "bad_arguments",
+        "says": "a recipient's user is empty"
+      },
+      {
+        "op": "emit_recipient_without_subscription",
+        "name": "emit: a subscription recipient whose subscription is empty",
+        "status": 400,
+        "code": "bad_arguments",
+        "says": "a recipient's subscription is empty"
+      },
+      {
+        "op": "emit_bad_arguments",
+        "name": "emit: arguments that don't match the event's",
+        "status": 400,
+        "code": "bad_arguments",
+        "says": "arguments for game.turn",
+        "skip": {
+          "go": "Go's types make the mistake impossible: the arguments and payload are structs"
+        }
+      },
+      {
+        "op": "emit_bad_payload",
+        "name": "emit: a payload that doesn't match the event's",
+        "status": 400,
+        "code": "bad_arguments",
+        "says": "payload for game.turn",
+        "skip": {
+          "go": "Go's types make the mistake impossible: the arguments and payload are structs"
+        }
+      },
+      {
+        "op": "publish_url_personal_without_to",
+        "name": "publish URL: a personal event without to",
+        "status": 400,
+        "code": "bad_arguments",
+        "says": "is personal"
+      },
+      {
+        "op": "publish_url_shared_with_to",
+        "name": "publish URL: a shared event with to",
+        "status": 400,
+        "code": "bad_arguments",
+        "says": "isn't personal"
+      },
+      {
+        "op": "publish_url_two_users",
+        "name": "publish URL: to with two users",
+        "status": 400,
+        "code": "bad_arguments",
+        "says": "exactly one user"
+      },
+      {
+        "op": "status_personal_without_to",
+        "name": "status: a personal event without to",
+        "status": 400,
+        "code": "bad_arguments",
+        "says": "is personal"
+      },
+      {
+        "op": "status_shared_with_to",
+        "name": "status: a shared event with to",
+        "status": 400,
+        "code": "bad_arguments",
+        "says": "isn't personal"
+      },
+      {
+        "op": "status_two_users",
+        "name": "status: to with two users",
+        "status": 400,
+        "code": "bad_arguments",
+        "says": "exactly one user"
+      },
+      {
+        "op": "status_of_too_many",
+        "name": "status of: 1,001 subscriptions",
+        "status": 400,
+        "code": "bad_request",
+        "says": "at most 1000 subscriptions"
+      },
+      {
+        "op": "status_of_without_user",
+        "name": "status of: a subscription without its user",
+        "status": 400,
+        "code": "bad_request",
+        "says": "each subscription's user"
+      },
+      {
+        "op": "subscribe_another_apps_event",
+        "name": "subscribe: another app's event",
+        "status": 404,
+        "code": "unknown_event",
+        "says": "is another app's event"
+      },
+      {
+        "op": "unsubscribe_another_apps_event",
+        "name": "unsubscribe: another app's event",
+        "status": 404,
+        "code": "unknown_event",
+        "says": "is another app's event"
+      },
+      {
+        "op": "subscribe_personal_without_user",
+        "name": "subscribe: a personal event, the caller unidentified",
+        "status": 400,
+        "code": "bad_arguments",
+        "says": "is personal"
+      },
+      {
+        "op": "subscribe_bad_arguments",
+        "name": "subscribe: arguments that don't match the event's",
+        "status": 400,
+        "code": "bad_arguments",
+        "says": "arguments for game.turn",
+        "skip": {
+          "go": "Go's types make the mistake impossible: the arguments and payload are structs"
+        }
+      }
+    ]
+  }
+}

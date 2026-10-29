@@ -17,10 +17,11 @@ from wakeshift import (
     SUBSCRIBE_TOOL_DESCRIPTION,
     UNSUBSCRIBE_TOOL_DESCRIPTION,
     Identity,
+    ToolCall,
     WakeshiftError,
-    speaks_events,
 )
 from wakeshift import spec as wspec
+from wakeshift.events import _speaks_events
 
 from .helpers import FakeCore, fake_wake, initialize, served
 
@@ -79,7 +80,63 @@ def test_define_event_makes_the_manifests_event_type() -> None:
     turn = turn_event(wake)
     assert turn.manifest["topic"] == "ev/game.turn/{table}"
     assert turn.manifest["personal"] is True
-    assert turn.definition()["delivery"] == ["webhook"]
+    assert turn._definition()["delivery"] == ["webhook"]
+
+
+def test_a_filter_given_without_a_topic_gets_the_defaults_added_and_the_callers_stays_as_it_was() -> None:
+    wake, _ = fake_wake()
+
+    class RoomArgs(BaseModel):
+        channel: str
+        sender: str | None = Field(None, alias="from")
+
+    class RoomMessage(BaseModel):
+        sender: str = Field(alias="from")
+        room: str
+
+    flt = {"room": "{channel}"}
+    ev = wake.define_event(
+        "chat.room", description="A message in a room", args=RoomArgs, payload=RoomMessage, text=lambda m, a: m.sender, filter=flt
+    )
+    assert ev.manifest["filter"] == {"room": "{channel}", "from": "{from}"}
+    assert flt == {"room": "{channel}"}
+
+
+def test_a_filter_on_the_field_an_optional_argument_already_filters_is_refused_naming_the_field() -> None:
+    wake, _ = fake_wake()
+
+    class RoomArgs(BaseModel):
+        channel: str
+        sender: str | None = Field(None, alias="from")
+
+    class RoomMessage(BaseModel):
+        sender: str = Field(alias="from")
+        room: str
+
+    def text(m: Any, a: Any) -> str:
+        return str(m.sender)
+
+    for tmpl in ("{channel}", "{from}"):
+        with pytest.raises(ValueError, match="filter on from conflicts with optional argument from"):
+            wake.define_event(
+                "chat.room",
+                description="A message in a room",
+                args=RoomArgs,
+                payload=RoomMessage,
+                text=text,
+                filter={"from": tmpl},
+            )
+    # With a topic there's no default filter, so the same filter is the app's own.
+    own = wake.define_event(
+        "chat.room",
+        description="A message in a room",
+        args=RoomArgs,
+        payload=RoomMessage,
+        text=text,
+        topic="rooms/{channel}",
+        filter={"from": "{from}"},
+    )
+    assert own.manifest["filter"] == {"from": "{from}"}
 
 
 def test_define_event_refuses_what_wakeshift_would() -> None:
@@ -121,23 +178,23 @@ async def test_emit_checks_the_payload_publishes_the_manifest_first_and_sends_th
     chat = chat_event(wake)
     with pytest.raises(WakeshiftError) as e:
         await chat.emit({"channel": "eng"}, {"from": "ada"})
-    assert e.value.code == "bad_payload"
+    assert e.value.code == "bad_arguments" and "payload for" in e.value.detail
     with pytest.raises(WakeshiftError, match="isn't personal"):
         await chat.emit({"channel": "eng"}, {"from": "ada", "text": "hi"}, to="u1")
     out = await chat.emit({"channel": "eng"}, {"from": "ada", "text": "shipped"}, id="m1")
     assert (out.matched, out.duplicate) == (2, False)
-    assert [f"{m} {p}" for m, p, _ in core.requests] == ["PUT /manifest", "POST /events/emit"]
-    assert core.requests[0][2]["events"][0]["name"] == "chat.message"
-    assert core.requests[1][2] == {
+    assert [f"{m} {p}" for m, p, _ in core.requests] == ["GET /manifest", "PUT /manifest", "POST /events/emit"]
+    assert core.requests[1][2]["events"][0]["name"] == "chat.message"
+    assert core.requests[2][2] == {
         "name": "chat.message",
         "arguments": {"channel": "eng"},
         "payload": {"from": "ada", "text": "shipped"},
         "text": "ada: shipped",
         "id": "m1",
     }
-    # Published once: the next emit goes straight out.
+    # Sent once: the next emit goes straight out.
     await chat.emit({"channel": "eng"}, {"from": "bob", "text": "ok"})
-    assert len(core.bodies("/manifest")) == 1
+    assert len(core.bodies("/manifest")) == 2
 
 
 async def test_a_personal_event_is_emitted_to_one_subscriber() -> None:
@@ -153,11 +210,11 @@ async def test_a_personal_event_is_emitted_to_one_subscriber() -> None:
     assert body["payload"] == {"hole": ["As", "Kd"], "toCall": 2}
 
 
-def test_speaks_events_the_extension_the_older_key_or_chatgpt() -> None:
-    assert speaks_events({"extensions": {EXTENSION_KEY: {}}}, "x")
-    assert speaks_events({"events": {}}, "x")
-    assert speaks_events({}, "openai-mcp")
-    assert not speaks_events({}, "claude-code")
+def test_speaks_events_the_extension_or_chatgpt_not_the_older_key() -> None:
+    assert _speaks_events({"extensions": {EXTENSION_KEY: {}}}, "x")
+    assert not _speaks_events({"events": {}}, "x")
+    assert _speaks_events({}, "openai-mcp")
+    assert not _speaks_events({}, "claude-code")
 
 
 async def test_bridged_clients_get_subscribe_events_every_client_gets_unsubscribe_and_list() -> None:
@@ -205,6 +262,10 @@ async def test_bridged_clients_get_subscribe_events_every_client_gets_unsubscrib
         assert "session_key" in sub["inputSchema"]["properties"]
         assert tools["unsubscribe_events"]["description"] == UNSUBSCRIBE_TOOL_DESCRIPTION
         assert tools["list_subscriptions"]["description"] == LIST_TOOL_DESCRIPTION
+        # Only list_subscriptions only reads, and says so.
+        assert tools["list_subscriptions"]["annotations"]["readOnlyHint"] is True
+        assert not (tools["subscribe_events"].get("annotations") or {}).get("readOnlyHint")
+        assert not (tools["unsubscribe_events"].get("annotations") or {}).get("readOnlyHint")
 
         r = await rpc(
             "tools/call",
@@ -280,7 +341,7 @@ async def test_the_tools_echo_arguments_in_name_order() -> None:
         assert text_of(un) == 'Stopped ci.run {"branch":"main","pr":5,"repo":"web"}.'
 
 
-async def test_a_client_declaring_the_older_events_key_isnt_offered_subscribe_events() -> None:
+async def test_a_client_declaring_only_the_older_events_key_is_offered_subscribe_events() -> None:
     wake, _ = fake_wake()
     chat_event(wake)
     server = MCPServer("chat")
@@ -288,7 +349,7 @@ async def test_a_client_declaring_the_older_events_key_isnt_offered_subscribe_ev
     async with served(server, stateless=False) as (_, rpc):
         await initialize(rpc, "some-client", {"events": {}})
         tools = sorted(t["name"] for t in (await rpc("tools/list", {}))["result"]["tools"])
-        assert tools == ["list_subscriptions", "unsubscribe_events"]
+        assert tools == ["list_subscriptions", "subscribe_events", "unsubscribe_events"]
 
 
 async def test_a_personal_event_needs_a_known_subscriber() -> None:
@@ -439,7 +500,7 @@ def test_spec_constants_match_the_cores() -> None:
 
     assert wspec.REVISION == s("Revision")
     assert wspec.EXTENSION_KEY == s("ExtensionKey")
-    assert wspec.LEGACY_KEY == s("LegacyKey")
+    assert wspec.TOP_LEVEL_KEY == s("TopLevelKey")
     assert wspec.RESULT_TYPE == s("ResultType")
     assert wspec.TEXT_META == s("TextMeta")
     assert wspec.NAME_HEADER == (s("NameHeader") or "").lower()
@@ -506,57 +567,43 @@ def test_attach_needs_events_and_an_mcpserver() -> None:
         wake.attach(object())
 
 
-async def test_an_events_subscribe_and_end_a_tool_subscribes_its_own_caller_and_ends_a_subscription_by_id() -> None:
+async def test_end_ends_one_of_a_users_subscriptions_by_id() -> None:
     core = FakeCore(default_ok=True)
-    core.on(
-        "POST",
-        "/event-subscriptions",
-        lambda b: (
-            200,
-            {
-                "event_subscription": {"id": "es_1", "event": "game.turn", "arguments": {"table": "t1"}, "created": True},
-                "session": "wsc_abc",
-                "addition": {"text": "Watch with the Monitor tool."},
-                "agent": {"harness": "claude-code", "via": "client", "claimed": None},
-            },
-        ),
-    )
     core.on("POST", "/event-subscriptions/end", lambda b: (200, {"ended": b["id"] == "es_1"}))
     wake, _ = fake_wake(core)
     turn = turn_event(wake)
-    with pytest.raises(WakeshiftError, match="personal: pass user"):
-        await turn.subscribe(None, {"table": "t1"}, client="claude-code")
-    with pytest.raises(ValueError, match="arguments for game.turn"):
-        await turn.subscribe(None, {}, client="claude-code", user="u1")
-    sub = await turn.subscribe(None, {"table": "t1"}, client="claude-code", user="u1", wake_args={"session_key": "wsc_abc"})
-    assert (sub.id, sub.created, sub.session, sub.agent.harness) == ("es_1", True, "wsc_abc", "claude-code")
-    res = sub.result("Seated.")
-    texts = [c.text for c in res.content]
-    assert texts[0] == "Seated.\n\nWatch with the Monitor tool."
-    req = core.bodies("/event-subscriptions")[0]
-    assert req["name"] == "game.turn"
-    assert req["arguments"] == {"table": "t1"}
-    assert req["call"]["user"] == "u1"
-    assert req["call"]["session"] == "wsc_abc"
     assert await turn.end("u1", "es_1") is True
     assert await turn.end("u1", "es_other") is False
     assert core.bodies("/event-subscriptions/end") == [{"user": "u1", "id": "es_1"}, {"user": "u1", "id": "es_other"}]
 
 
-async def test_an_events_unsubscribe_ends_the_callers_own_subscription_with_those_arguments() -> None:
+async def test_a_wrapped_leave_tool_ends_the_callers_own_subscription_with_those_arguments() -> None:
     core = FakeCore(default_ok=True)
     core.on("POST", "/event-subscriptions/unsubscribe", lambda b: (200, {"ended": b["arguments"] == {"table": "t1"}}))
     wake, _ = fake_wake(core)
     turn = turn_event(wake)
-    with pytest.raises(ValueError, match="arguments for game.turn"):
-        await turn.unsubscribe(None, {}, client="claude-code", user="u1")
-    assert core.bodies("/event-subscriptions/unsubscribe") == []
-    assert (
-        await turn.unsubscribe(None, {"table": "t1"}, client="claude-code", user="u1", wake_args={"session_key": "wsc_abc"})
-        is True
-    )
-    assert await turn.unsubscribe(None, {"table": "t2"}, client="claude-code", user="u1") is False
-    req = core.bodies("/event-subscriptions/unsubscribe")[0]
-    assert req["name"] == "game.turn"
-    assert req["arguments"] == {"table": "t1"}
-    assert req["call"] == {"client": "claude-code", "user": "u1", "session": "wsc_abc"}
+    server = MCPServer("cards")
+    attached = wake.attach(server, identify=lambda ctx: Identity(user="u1"))
+    got: list[Any] = []
+
+    @attached.tool()
+    async def leave(table: str, call: ToolCall) -> str:
+        """Leave a table."""
+        try:
+            got.append(await call.unsubscribe(turn, {"table": table} if table else {}))
+        except WakeshiftError as err:
+            got.append(err)
+        return "Left."
+
+    async with served(server) as (_, rpc):
+        for args in ({"table": ""}, {"table": "t1", "session_key": "wsc_abc"}, {"table": "t2"}):
+            res = await rpc("tools/call", {"name": "leave", "arguments": args}, headers={"User-Agent": "claude-code/2.1.280"})
+            assert "result" in res and not res["result"].get("isError"), res
+    assert isinstance(got[0], WakeshiftError) and got[0].code == "bad_arguments" and "arguments for game.turn" in str(got[0])
+    assert got[1:] == [True, False]
+    reqs = core.bodies("/event-subscriptions/unsubscribe")
+    assert len(reqs) == 2
+    assert reqs[0]["name"] == "game.turn"
+    assert reqs[0]["arguments"] == {"table": "t1"}
+    assert (reqs[0]["call"]["user"], reqs[0]["call"]["session"], reqs[0]["call"]["tool"]) == ("u1", "wsc_abc", "leave")
+    assert "session" not in reqs[1]["call"]

@@ -14,24 +14,24 @@ shared golden files."""
 import inspect
 import json
 import re
-import weakref
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import timezone
+from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
-from mcp_types import CallToolResult, TextContent
+from mcp_types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .client import (
     WAKE_ARGS_SCHEMA,
-    Addition,
-    Published,
+    Emitted,
     PublishUrl,
-    Recognised,
-    apply_addition,
-    client_capabilities,
-    request_info,
+    Recipient,
+    _Addition,
+    _apply_addition,
+    _call,
+    _client_capabilities,
+    _request_info,
 )
 from .errors import WakeshiftError
 from .spec import (
@@ -39,9 +39,9 @@ from .spec import (
     HEADER_MISMATCH,
     INTERNAL_ERROR,
     INVALID_PARAMS,
-    LEGACY_KEY,
     NAME_HEADER,
     RESULT_TYPE,
+    TOP_LEVEL_KEY,
     Codes,
     codes_for,
     dialect_of,
@@ -50,6 +50,7 @@ from .spec import (
 
 if TYPE_CHECKING:
     from .client import Wakeshift
+    from .toolcall import Attached, EventsOptions
 
 Schema = type[BaseModel] | Mapping[str, Any]
 
@@ -62,6 +63,14 @@ class Identity:
     #: The app's ID for the person: what personal events and
     #: list_subscriptions need, and native subscriptions belong to.
     user: str | None = None
+    #: The MCP client's name, for a request that doesn't carry one: a
+    #: stateless server never sees initialize, so the app passes the name it
+    #: knows from its own sign-in (an OAuth registration's client_name, say).
+    #: Wakeshift reads it to tell which program the agent runs in, and
+    #: whether the client subscribes to events itself. A name the request
+    #: carries (initialize's, or its _meta's) wins. Leave it None for a
+    #: caller that must have no name.
+    client: str | None = None
 
 
 @dataclass(frozen=True)
@@ -116,6 +125,9 @@ EVENT_TOOL_TEXT: dict[str, str] = {
     "webhook": "delivered to {host}",
 }
 
+#: The tools attach adds, unless its ``tools`` names fewer.
+BUILTIN_TOOLS: tuple[str, ...] = ("subscribe_events", "unsubscribe_events", "list_subscriptions")
+
 SUBSCRIBE_TOOL_DESCRIPTION = EVENT_TOOL_TEXT["subscribe_description"]
 UNSUBSCRIBE_TOOL_DESCRIPTION = EVENT_TOOL_TEXT["unsubscribe_description"]
 LIST_TOOL_DESCRIPTION = EVENT_TOOL_TEXT["list_description"]
@@ -133,8 +145,13 @@ _ARG_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _MAX_LISTED_EVENTS = 20
 
 
-class ArgsError(ValueError):
-    """A subscriber's arguments don't match the event's schema."""
+class ArgsError(WakeshiftError):
+    """An event's arguments or payload don't match its schema: a
+    WakeshiftError with code ``bad_arguments`` (status 400), as Wakeshift
+    answers the same mistake, raised before asking it."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(400, "bad_arguments", message)
 
 
 def _compact(v: Any) -> str:
@@ -293,6 +310,34 @@ class _Shape:
 
 # ── Events ──────────────────────────────────────────────────────────────────
 
+#: The most subscriptions one status_of reads.
+MAX_STATUS_SUBSCRIPTIONS = 1000
+
+
+@dataclass(frozen=True)
+class EventStatus:
+    """Who is subscribed to an event with some arguments right now (event.status)."""
+
+    #: Conversations subscribed (ended or expired subscriptions don't count).
+    subscriptions: int
+    #: Of those, connected now.
+    connected: int
+    #: How many are connected each way: stream, poll, hooks, webhook.
+    via: dict[str, int]
+
+
+@dataclass(frozen=True)
+class EventSubscriptionStatus:
+    """One subscription right now (event.status_of)."""
+
+    id: str
+    user: str
+    #: The subscription is the user's, to this event, and hasn't ended. One that names nothing is False too.
+    live: bool
+    #: Its conversation is reachable now, and via says how.
+    connected: bool
+    via: str | None = None
+
 
 class WakeEvent:
     """One of the app's event types (wake.define_event)."""
@@ -359,6 +404,12 @@ class WakeEvent:
                         )
                     segs.append("{" + arg + "}")
                 elif scalar and arg in payload_props:
+                    # Both on the same field is refused: neither can quietly win.
+                    if filter is not None and arg in filter:
+                        raise ValueError(
+                            f"wakeshift: event {name}: filter on {arg} conflicts with optional argument {arg}, "
+                            "which already filters that payload field (remove it from filter, or pass topic and filter)"
+                        )
                     flt[arg] = "{" + arg + "}"
                 else:
                     raise ValueError(
@@ -378,14 +429,14 @@ class WakeEvent:
             # it's delivered, keeping only what shows it happened.
             self.manifest["delete_on_delivery"] = True
 
-    def parse_args(self, args: Any) -> tuple[Any, dict[str, Any]]:
+    def _parse_args(self, args: Any) -> tuple[Any, dict[str, Any]]:
         """A subscriber's arguments, checked."""
         try:
             return self._args.parse(args)
         except ArgsError as err:
-            raise ArgsError(f"arguments for {self.name}: {err}") from err
+            raise ArgsError(f"arguments for {self.name}: {err.detail}") from err
 
-    async def allows(self, subscriber: Subscriber, args: Any) -> bool:
+    async def _allows(self, subscriber: Subscriber, args: Any) -> bool:
         """Whether this subscriber may subscribe with these arguments."""
         if self._authorize is None:
             return True
@@ -396,10 +447,10 @@ class WakeEvent:
             return bool(r)
         except Exception as err:
             # An authorize that fails refuses, the same way on both paths; the app hears why.
-            self._wake.warn(f"wakeshift: authorize for {self.name} raised, so the subscription was refused: {err}")
+            self._wake._warn(f"wakeshift: authorize for {self.name} raised, so the subscription was refused: {err}")
             return False
 
-    def definition(self) -> dict[str, Any]:
+    def _definition(self) -> dict[str, Any]:
         """The events/list entry."""
         d: dict[str, Any] = {
             "name": self.name,
@@ -412,26 +463,40 @@ class WakeEvent:
             d["title"] = self.title
         return d
 
-    async def emit(self, args: Any, payload: Any, *, to: str | None = None, id: str | None = None) -> Published:
-        """Sends one occurrence: to everyone subscribed with these arguments, or,
-        for a personal event, to the one subscriber `to` names. The payload is
-        checked against the event's schema first."""
-        a_obj, a_json = self.parse_args(args)
+    async def emit(
+        self,
+        args: Any,
+        payload: Any,
+        *,
+        to: str | Recipient | Sequence[str | Recipient] | None = None,
+        id: str | None = None,
+    ) -> Emitted:
+        """Sends one occurrence: to everyone subscribed with these arguments,
+        or, for a personal event, to its recipients (``to``): a user (every
+        subscription they have to it with these arguments),
+        ``Recipient(user=u, subscription=id)`` (exactly that conversation's,
+        the id call.subscribe returned) or ``Recipient(native=u)`` (only the
+        user's own MCP Events subscriptions), one or a list, at most 1,000.
+        The payload is checked against the event's schema first. A retry with
+        the same id must name the same recipients: Wakeshift uses the first's."""
+        a_obj, a_json = self._parse_args(args)
         try:
             p_obj, p_json = self._payload.parse(payload)
         except ArgsError as err:
-            raise WakeshiftError(400, "bad_payload", f"payload for {self.name}: {err}") from err
-        who = (to or "").strip()
-        if self.personal and not who:
-            raise WakeshiftError(400, "bad_arguments", f"{self.name} is personal: pass to=, the one subscriber it's for")
-        if not self.personal and who:
+            raise ArgsError(f"payload for {self.name}: {err.detail}") from err
+        recipients = _recipients(self.name, to)
+        if self.personal and not recipients:
+            raise WakeshiftError(400, "bad_arguments", f"{self.name} is personal: pass to=, the subscribers it's for")
+        if not self.personal and recipients:
             raise WakeshiftError(
                 400,
                 "bad_arguments",
                 f"{self.name} isn't personal: it goes to everyone subscribed with these arguments, so it takes no to",
             )
         text = self._text(p_obj, a_obj)
-        return await self._wake.emit_event(name=self.name, arguments=a_json, payload=p_json, text=text, id=id, to=who or None)
+        return await self._wake._emit_event(
+            name=self.name, arguments=a_json, payload=p_json, text=text, id=id, to=recipients or None
+        )
 
     async def publish_url(self, args: Any, *, to: str | None = None) -> PublishUrl:
         """A capability URL that emits this event with these arguments (a
@@ -440,7 +505,9 @@ class WakeEvent:
         checked against the event's schema; the agent reads the event's name
         and the start of the payload, since `text` doesn't run. Anyone with the
         URL can emit until wake.revoke_publish_url(id)."""
-        _, a_json = self.parse_args(args)
+        _, a_json = self._parse_args(args)
+        if to is not None and not isinstance(to, str):
+            raise WakeshiftError(400, "bad_arguments", f"{self.name}: a publish URL's to is exactly one user")
         who = (to or "").strip()
         if self.personal and not who:
             raise WakeshiftError(400, "bad_arguments", f"{self.name} is personal: pass to=, the one subscriber it's for")
@@ -453,103 +520,115 @@ class WakeEvent:
         body: dict[str, Any] = {"name": self.name, "arguments": a_json}
         if who:
             body["to"] = who
-        out = await self._wake.request_app("POST", "/events/publish-urls", body)
+        out = await self._wake._request_app("POST", "/events/publish-urls", body)
         return PublishUrl(id=out["id"], url=out["url"], event=out.get("event", ""))
 
-    async def subscribe(
-        self,
-        ctx: Any,
-        args: Any,
-        *,
-        user: str | None = None,
-        client: str | None = None,
-        wake_args: Mapping[str, Any] | None = None,
-        tool: str | None = None,
-    ) -> "CallerSubscription":
-        """Subscribes the conversation calling your tool, the way
-        subscribe_events would, so a tool like "join" can set up its own wakes in
-        one step. For clients Wakeshift wakes its own ways; native MCP Events
-        clients subscribe themselves. Your tool decides who may: authorize isn't
-        consulted here. user is the app's ID for the person (required for a
-        personal event); wake_args are your tool's session_key, harness and
-        conversation_id; tool is your tool's name, if the Context doesn't say
-        it (Wakeshift's hooks act on a connector beacon only from the result of
-        the tool it names)."""
-        _, a_json = self.parse_args(args)
-        if self.personal and not user:
-            raise WakeshiftError(400, "bad_arguments", f"{self.name} is personal: pass user, who the subscription belongs to")
-        call = self._wake.call(ctx, user=user, client=client, args=wake_args or {}, tool=tool)
-        out = await self._wake.request_app(
-            "POST", "/event-subscriptions", {"call": call.to_json(), "name": self.name, "arguments": a_json}
-        )
-        es = out.get("event_subscription") or {}
-        rec = out.get("agent") or {}
-        return CallerSubscription(
-            id=es.get("id", ""),
-            created=bool(es.get("created")),
-            session=out.get("session", ""),
-            agent=Recognised(harness=rec.get("harness"), via=rec.get("via"), claimed=rec.get("claimed")),
-            addition=Addition.from_json(out.get("addition")),
-        )
+    async def status(self, args: Any, *, to: str | None = None) -> EventStatus:
+        """How many conversations are subscribed to this event with these
+        arguments (a personal event: those of the one user ``to`` names), how
+        many are connected now, and how. Only reads."""
+        _, a_json = self._parse_args(args)
+        if to is not None and not isinstance(to, str):
+            raise WakeshiftError(400, "bad_arguments", f"{self.name}: status's to is exactly one user")
+        who = (to or "").strip()
+        if self.personal and not who:
+            raise WakeshiftError(400, "bad_arguments", f"{self.name} is personal: pass to=, the one user to count for")
+        if not self.personal and who:
+            raise WakeshiftError(400, "bad_arguments", f"{self.name} isn't personal: status takes no to")
+        body: dict[str, Any] = {"name": self.name, "arguments": a_json}
+        if who:
+            body["to"] = who
+        out = await self._wake._request_app("POST", "/events/status", body)
+        via = {"stream": 0, "poll": 0, "hooks": 0, "webhook": 0}
+        via.update(out.get("via") or {})
+        return EventStatus(subscriptions=int(out.get("subscriptions", 0)), connected=int(out.get("connected", 0)), via=via)
 
-    async def unsubscribe(
-        self,
-        ctx: Any,
-        args: Any,
-        *,
-        user: str | None = None,
-        client: str | None = None,
-        wake_args: Mapping[str, Any] | None = None,
-        tool: str | None = None,
-    ) -> bool:
-        """Ends the calling conversation's subscription with these arguments, the
-        way unsubscribe_events would: for a tool like "unwatch". False if it
-        wasn't subscribed."""
-        _, a_json = self.parse_args(args)
-        call = self._wake.call(ctx, user=user, client=client, args=wake_args or {}, tool=tool)
-        out = await self._wake.request_app(
-            "POST", "/event-subscriptions/unsubscribe", {"call": call.to_json(), "name": self.name, "arguments": a_json}
-        )
-        return bool(out.get("ended"))
+    async def status_of(self, subs: Sequence[Recipient]) -> list[EventSubscriptionStatus]:
+        """Reads subscriptions to this event by ID, each a
+        ``Recipient(user=u, subscription=id)`` for the user call.subscribe made
+        it for, up to 1,000 at once: whether each is live and its conversation
+        connected now, and how. Only reads."""
+        if not subs:
+            return []
+        if len(subs) > MAX_STATUS_SUBSCRIPTIONS:
+            raise WakeshiftError(
+                400, "bad_request", f"{self.name}: at most {MAX_STATUS_SUBSCRIPTIONS} subscriptions in one status_of"
+            )
+        refs: list[dict[str, str]] = []
+        for s in subs:
+            user = (s.user or "").strip() if isinstance(s, Recipient) else ""
+            if not user or not isinstance(s.subscription, str) or not s.subscription.strip():
+                raise WakeshiftError(
+                    400, "bad_request", f"{self.name}: status_of needs each subscription's user and subscription"
+                )
+            refs.append({"user": user, "id": s.subscription.strip()})
+        out = await self._wake._request_app("POST", "/events/status", {"name": self.name, "subscriptions": refs})
+        return [
+            EventSubscriptionStatus(
+                id=r.get("id", ""),
+                user=r.get("user", ""),
+                live=bool(r.get("live")),
+                connected=bool(r.get("connected")),
+                via=r.get("via") or None,
+            )
+            for r in out.get("subscriptions") or []
+        ]
 
     async def end(self, user: str, id: str) -> bool:
         """Ends one of user's subscriptions to this app's events, by its ID. False if there was none."""
-        return bool((await self._wake.request_app("POST", "/event-subscriptions/end", {"user": user, "id": id})).get("ended"))
+        return bool((await self._wake._request_app("POST", "/event-subscriptions/end", {"user": user, "id": id})).get("ended"))
 
 
-@dataclass
-class CallerSubscription:
-    """A subscription made from inside an app's own tool (WakeEvent.subscribe)."""
+def _recipients(event: str, to: Any) -> list[Recipient]:
+    """An emit's to as Recipients, checked: each names a user (and a
+    subscription names its user too), with the whitespace around each name
+    trimmed, as every SDK does (emit-recipients.json)."""
+    if to is None:
+        return []
+    kinds = f"{event}: a recipient is a user's ID, Recipient(user=…, subscription=…) or Recipient(native=…)"
+    if isinstance(to, str | Recipient):
+        items = [to]
+    elif isinstance(to, Sequence):
+        items = list(to)
+    else:
+        raise WakeshiftError(400, "bad_arguments", kinds)
 
-    id: str
-    #: False when the conversation was already subscribed with these arguments (renewed).
-    created: bool
-    #: The conversation's session handle: pass it back as session_key. A secret.
-    session: str
-    agent: Recognised
-    addition: Addition
+    def empty(what: str) -> WakeshiftError:
+        return WakeshiftError(400, "bad_arguments", f"{event}: a recipient's {what} is empty")
 
-    def result(self, text: str | CallToolResult) -> CallToolResult:
-        """Your tool's text, with what the agent needs to be woken added."""
-        return apply_addition(self.addition, text)
+    out: list[Recipient] = []
+    for r in items:
+        if isinstance(r, str):
+            r = Recipient(user=r)
+        if not isinstance(r, Recipient):
+            raise WakeshiftError(400, "bad_arguments", kinds)
+        if r.native is not None:
+            if r.user is not None or r.subscription is not None or not isinstance(r.native, str):
+                raise WakeshiftError(400, "bad_arguments", kinds)
+            if not r.native.strip():
+                raise empty("user")
+            r = Recipient(native=r.native.strip())
+        else:
+            if not isinstance(r.user, str | None) or not isinstance(r.subscription, str | None):
+                raise WakeshiftError(400, "bad_arguments", kinds)
+            if not (r.user or "").strip():
+                raise empty("user")
+            if r.subscription is not None and not r.subscription.strip():
+                raise empty("subscription")
+            r = Recipient(user=(r.user or "").strip(), subscription=None if r.subscription is None else r.subscription.strip())
+        out.append(r)
+    return out
 
 
 # ── Serving ─────────────────────────────────────────────────────────────────
 
 
-def _connection_of(ctx: Any) -> Any:
-    """What lasts for the client's connection: each request gets its own
-    ServerSession, all sharing one Connection."""
-    session = getattr(ctx, "session", None)
-    return getattr(session, "_connection", session)
-
-
-def speaks_events(capabilities: Mapping[str, Any] | None, client_name: str) -> bool:
+def _speaks_events(capabilities: Mapping[str, Any] | None, client_name: str) -> bool:
     """A client that speaks MCP Events: it declared the extension, or it's one known to (ChatGPT)."""
     caps = capabilities or {}
     exts = caps.get("extensions")
     ext = exts.get(EXTENSION_KEY) if isinstance(exts, Mapping) else None
-    return ext is not None or caps.get(LEGACY_KEY) is not None or client_name.lower() == "openai-mcp"
+    return ext is not None or client_name.lower() == "openai-mcp"
 
 
 def _detail(err: BaseException) -> str:
@@ -560,8 +639,8 @@ def _fail(text: str) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text=text)], is_error=True)
 
 
-def _ok(text: str, addition: Addition | None = None) -> CallToolResult:
-    return apply_addition(addition or Addition(), text)
+def _ok(text: str, addition: _Addition | None = None) -> CallToolResult:
+    return _apply_addition(addition or _Addition(), text)
 
 
 def _rfc3339(s: str) -> str:
@@ -570,8 +649,8 @@ def _rfc3339(s: str) -> str:
 
     t = _parse_time(s)
     if t.tzinfo is None:
-        t = t.replace(tzinfo=timezone.utc)
-    return t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        t = t.replace(tzinfo=UTC)
+    return t.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _rpc_error_of(err: BaseException, codes: Codes) -> Exception:
@@ -582,11 +661,11 @@ def _rpc_error_of(err: BaseException, codes: Codes) -> Exception:
 
     if isinstance(err, MCPError):
         return err
-    if not isinstance(err, WakeshiftError):
+    if not isinstance(err, WakeshiftError) or err.code == "unreachable":
         return MCPError(INTERNAL_ERROR, "Wakeshift couldn't be reached")
     c = err.code
     if c == "callback_failed":
-        return MCPError(codes.callback_endpoint, err.detail, {"reason": err.reason})
+        return MCPError(codes.callback_endpoint, err.detail, {"reason": err.reason or ""})
     if c == "unknown_event":
         return MCPError(codes.not_found, err.detail, {"kind": "event"})
     if c == "unsupported":
@@ -606,23 +685,38 @@ def attach_events(
     events: list[WakeEvent],
     *,
     identify: Callable[[Any], Identity | None] | None = None,
-) -> None:
+    tools: Sequence[str] | None = None,
+    events_options: "EventsOptions | None" = None,
+) -> "Attached":
     """The events part of Wakeshift.attach, on an MCPServer
-    (mcp.server.mcpserver.MCPServer)."""
+    (mcp.server.mcpserver.MCPServer). Returns the handle wrapped tools
+    register with."""
     from mcp.server.mcpserver import Context
     from mcp.shared.exceptions import MCPError
     from mcp_types import RequestParams
 
+    from .toolcall import Attached
+
     if not events:
         raise ValueError("wakeshift: attach needs at least one event (wake.define_event) defined first")
+    if isinstance(tools, str):
+        raise TypeError("wakeshift: attach's tools is a list of tool names, not one name")
+    for t in tools or ():
+        if t not in BUILTIN_TOOLS:
+            raise ValueError(f"wakeshift: attach's tools names {t!r}: its own tools are {', '.join(BUILTIN_TOOLS)}")
+    wanted = set(BUILTIN_TOOLS if tools is None else tools)
     low = getattr(server, "_lowlevel_server", None)
     if low is None or not hasattr(server, "add_tool"):
         raise TypeError("wakeshift: attach takes an MCPServer (mcp.server.mcpserver.MCPServer)")
 
-    def user_of(ctx: Any) -> str | None:
-        # Without identify, requests have no user.
-        who = identify(ctx) if identify else None
-        return who.user if who else None
+    def identity_of(ctx: Any) -> Identity:
+        # Without identify, requests have no user (and identify's no client).
+        return (identify(ctx) if identify else None) or Identity()
+
+    def caller_of(ctx: Any) -> tuple[str | None, str | None]:
+        # Who's calling: the user, and the client's name identify gave.
+        who = identity_of(ctx)
+        return who.user, who.client
 
     by_name = {e.name: e for e in events}
 
@@ -636,11 +730,11 @@ def attach_events(
         model_config = ConfigDict(extra="allow")
 
     async def events_list(ctx: Any, _params: Any) -> dict[str, Any]:
-        return {"resultType": RESULT_TYPE, "events": [e.definition() for e in events]}
+        return {"resultType": RESULT_TYPE, "events": [e._definition() for e in events]}
 
     def unsupported(method: str) -> Callable[[Any, Any], Awaitable[dict[str, Any]]]:
         async def handler(ctx: Any, _params: Any) -> dict[str, Any]:
-            client, _, headers = request_info(ctx)
+            client, _, headers = _request_info(ctx)
             codes = codes_for(dialect_of(client, headers.get("user-agent", "") if headers else ""))
             raise MCPError(
                 codes.unsupported,
@@ -652,7 +746,9 @@ def attach_events(
 
     async def native(ctx: Any, unsubscribe: bool) -> dict[str, Any]:
         p: Mapping[str, Any] = dict(ctx.params or {})
-        client, meta, headers = request_info(ctx)
+        client, meta, headers = _request_info(ctx)
+        who, identified = caller_of(ctx_of(ctx))
+        client = client or identified or ""
         ua = headers.get("user-agent", "") if headers else ""
         dialect = dialect_of(client, ua)
         codes = codes_for(dialect)
@@ -672,16 +768,15 @@ def attach_events(
                 {"feature": "deliveryMode", "value": delivery.get("mode")},
             )
         try:
-            a_obj, a_json = ev.parse_args(p.get("arguments") or {})
+            a_obj, a_json = ev._parse_args(p.get("arguments") or {})
         except ArgsError as err:
-            raise MCPError(INVALID_PARAMS, str(err)) from err
-        who = user_of(ctx_of(ctx))
+            raise MCPError(INVALID_PARAMS, err.detail) from err
         if not who:
             raise MCPError(codes.forbidden, fill("native_no_user"))
         call: dict[str, Any] = {"user": who, "client": client, "meta": meta}
         if ua:
             call["user_agent"] = ua
-        if not unsubscribe and not await ev.allows(Subscriber(user=who, client=client, native=True), a_obj):
+        if not unsubscribe and not await ev._allows(Subscriber(user=who, client=client, native=True), a_obj):
             raise MCPError(codes.forbidden, fill("native_refused", event=ev.name))
         body: dict[str, Any] = {
             "call": call,
@@ -692,7 +787,7 @@ def attach_events(
         }
         try:
             if unsubscribe:
-                out = await wake.request_app("POST", "/events/unsubscribe", body)
+                out = await wake._request_app("POST", "/events/unsubscribe", body)
                 if not out.get("ended") and dialect != "chatgpt":
                     raise MCPError(
                         codes.not_found,
@@ -706,7 +801,7 @@ def attach_events(
                 body["cursor"] = p["cursor"]
             if "maxAgeMs" in p:
                 body["max_age_ms"] = p["maxAgeMs"]
-            out = await wake.request_app("POST", "/events/subscribe", body)
+            out = await wake._request_app("POST", "/events/subscribe", body)
             res: dict[str, Any] = {
                 "resultType": RESULT_TYPE,
                 "id": out["id"],
@@ -761,23 +856,23 @@ def attach_events(
         if ev is None:
             return _fail(fill("unknown_event", event=event))
         try:
-            a_obj, a_json = ev.parse_args(arguments or {})
+            a_obj, a_json = ev._parse_args(arguments or {})
         except ArgsError as err:
-            return _fail(str(err))
+            return _fail(err.detail)
         rc = ctx_of(ctx)
-        who = user_of(rc)
+        who, identified = caller_of(rc)
         if ev.personal and not who:
             return _fail(fill("personal_no_user", event=ev.name))
-        client, _, _ = request_info(rc)
-        if not await ev.allows(Subscriber(user=who, client=client, native=False), a_obj):
+        client, _, _ = _request_info(rc)
+        if not await ev._allows(Subscriber(user=who, client=client or identified or "", native=False), a_obj):
             return _fail(fill("refused", event=ev.name))
         wake_args = {"session_key": session_key, "harness": harness, "conversation_id": conversation_id}
         try:
-            out = await wake.request_app(
+            out = await wake._request_app(
                 "POST",
                 "/event-subscriptions",
                 {
-                    "call": wake.call(rc, user=who, args=wake_args, tool="subscribe_events").to_json(),
+                    "call": _call(rc, user=who, client=identified, args=wake_args, tool="subscribe_events").to_json(),
                     "name": ev.name,
                     "arguments": a_json,
                 },
@@ -787,7 +882,7 @@ def attach_events(
         created = bool((out.get("event_subscription") or {}).get("created"))
         return _ok(
             fill("subscribed" if created else "renewed", event=ev.name, arguments=_canonical(a_json)),
-            Addition.from_json(out.get("addition")),
+            _Addition.from_json(out.get("addition")),
         )
 
     async def unsubscribe_events(
@@ -800,23 +895,23 @@ def attach_events(
         ctx: Context | None = None,
     ) -> CallToolResult:
         rc = ctx_of(ctx)
-        who = user_of(rc)
+        who, identified = caller_of(rc)
         try:
             if id:
                 if not who:
                     return _fail(fill("end_no_user"))
-                out = await wake.request_app("POST", "/event-subscriptions/end", {"user": who, "id": id})
+                out = await wake._request_app("POST", "/event-subscriptions/end", {"user": who, "id": id})
                 return _ok(fill("ended" if out.get("ended") else "no_such_id", id=id))
             ev = by_name.get(event or "")
             if ev is None:
                 return _fail(fill("need"))
-            _, a_json = ev.parse_args(arguments or {})
+            _, a_json = ev._parse_args(arguments or {})
             wake_args = {"session_key": session_key, "harness": harness, "conversation_id": conversation_id}
-            out = await wake.request_app(
+            out = await wake._request_app(
                 "POST",
                 "/event-subscriptions/unsubscribe",
                 {
-                    "call": wake.call(rc, user=who, args=wake_args, tool="unsubscribe_events").to_json(),
+                    "call": _call(rc, user=who, client=identified, args=wake_args, tool="unsubscribe_events").to_json(),
                     "name": ev.name,
                     "arguments": a_json,
                 },
@@ -825,7 +920,7 @@ def attach_events(
                 fill("unsubscribed" if out.get("ended") else "not_subscribed", event=ev.name, arguments=_canonical(a_json))
             )
         except ArgsError as err:
-            return _fail(str(err))
+            return _fail(err.detail)
         except Exception as err:
             return _fail(fill("unsubscribe_failed", detail=_detail(err)))
 
@@ -835,11 +930,11 @@ def attach_events(
         conversation_id: str | None = None,
         ctx: Context | None = None,
     ) -> CallToolResult:
-        who = user_of(ctx_of(ctx))
+        who = identity_of(ctx_of(ctx)).user
         if not who:
             return _fail(fill("list_no_user"))
         try:
-            out = await wake.request_app("POST", "/event-subscriptions/list", {"user": who})
+            out = await wake._request_app("POST", "/event-subscriptions/list", {"user": who})
         except Exception as err:
             return _fail(fill("list_failed", detail=_detail(err)))
         subs = out.get("subscriptions") or []
@@ -864,7 +959,7 @@ def attach_events(
             )
         return _ok(fill("list", lines="\n".join(lines)))
 
-    tools = (
+    own_tools = (
         (
             "subscribe_events",
             subscribe_events,
@@ -886,8 +981,14 @@ def attach_events(
         ),
         ("list_subscriptions", list_subscriptions, EVENT_TOOL_TEXT["list_description"], dict(WAKE_ARGS_SCHEMA), None),
     )
-    for name, fn, description, properties, required in tools:
-        server.add_tool(fn, name=name, description=description)
+    for name, fn, description, properties, required in own_tools:
+        if name not in wanted:
+            continue
+        # list_subscriptions only reads: marked so (readOnlyHint), clients
+        # that approve read-only tools without asking (Codex, by default)
+        # don't ask; and idempotent, as in every SDK (events-list.json).
+        annotations = ToolAnnotations(read_only_hint=True, idempotent_hint=True) if name == "list_subscriptions" else None
+        server.add_tool(fn, name=name, description=description, annotations=annotations)
         # The advertised input schema is written out: the enum of event names,
         # an object of arguments, and the same descriptions as the other SDKs.
         tool = server._tool_manager.get_tool(name)
@@ -903,36 +1004,29 @@ def attach_events(
     # A client that speaks MCP Events subscribes natively, so it isn't offered
     # subscribe_events.
 
-    # Connections whose client declared the older top-level `events` key, which
-    # the MCP SDK's capability model drops: noted from initialize's raw params.
-    legacy: weakref.WeakSet[Any] = weakref.WeakSet()
+    attached = Attached(wake, server, identify, events_options)
 
     async def middleware(ctx: Any, call_next: Callable[[Any], Awaitable[Any]]) -> Any:
         method = getattr(ctx, "method", "")
-        if method == "initialize":
-            raw = (getattr(ctx, "params", None) or {}).get("capabilities")
-            conn = _connection_of(ctx)
-            if isinstance(raw, Mapping) and raw.get(LEGACY_KEY) is not None and conn is not None:
-                try:
-                    legacy.add(conn)
-                except TypeError:  # pragma: no cover: a session that can't be weakly referenced
-                    pass
+        if method == "tools/call":
+            # A wrapped tool's call (@attached.tool()) gets its block here,
+            # after MCPServer's result conversion, and the subscriptions it
+            # made are rolled back here if the final result failed.
+            return await attached._tools_call(ctx, call_next)
         result = await call_next(ctx)
         if method in ("initialize", "server/discover") and isinstance(result, dict):
             caps = result.setdefault("capabilities", {})
             if isinstance(caps, dict):
-                caps[LEGACY_KEY] = {"listChanged": False}
+                caps[TOP_LEVEL_KEY] = {"listChanged": False}
                 caps.setdefault("extensions", {})[EXTENSION_KEY] = {"listChanged": False}
         elif method == "tools/list" and isinstance(result, dict) and isinstance(result.get("tools"), list):
-            client, _, _ = request_info(ctx)
-            caps = client_capabilities(ctx)
-            conn = _connection_of(ctx)
-            if conn is not None and conn in legacy:
-                caps = {**caps, LEGACY_KEY: {}}
-            if speaks_events(caps, client):
+            client, _, _ = _request_info(ctx)
+            caps = _client_capabilities(ctx)
+            if _speaks_events(caps, client):
                 result["tools"] = [
                     t for t in result["tools"] if not (isinstance(t, Mapping) and t.get("name") == "subscribe_events")
                 ]
         return result
 
     server.middleware.append(middleware)
+    return attached

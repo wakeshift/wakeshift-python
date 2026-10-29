@@ -253,6 +253,10 @@
   ],
   "tools": [
     {
+      "annotations": {
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
       "description": "List the subscriptions to this app's events that you (this app's user) have, with their ids, so you can stop any of them with unsubscribe_events.",
       "inputSchema": {
         "properties": {
@@ -265,7 +269,7 @@
             "type": "string"
           },
           "session_key": {
-            "description": "The session key an earlier result gave you, if it did. It's a secret: keep it to this conversation; don't share or log it",
+            "description": "This conversation's session_key, from an earlier result (a secret token, or a handle such as claude-code#2). Keep it to this conversation; don't share or log it.",
             "type": "string"
           }
         }
@@ -298,7 +302,7 @@
             "type": "string"
           },
           "session_key": {
-            "description": "The session key an earlier result gave you, if it did. It's a secret: keep it to this conversation; don't share or log it",
+            "description": "This conversation's session_key, from an earlier result (a secret token, or a handle such as claude-code#2). Keep it to this conversation; don't share or log it.",
             "type": "string"
           }
         },
@@ -338,7 +342,7 @@
             "type": "string"
           },
           "session_key": {
-            "description": "The session key an earlier result gave you, if it did. It's a secret: keep it to this conversation; don't share or log it",
+            "description": "This conversation's session_key, from an earlier result (a secret token, or a handle such as claude-code#2). Keep it to this conversation; don't share or log it.",
             "type": "string"
           }
         }

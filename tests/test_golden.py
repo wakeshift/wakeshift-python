@@ -111,7 +111,11 @@ async def test_events_list_tools_and_manifest_match_the_other_sdks() -> None:
         "events": events,
         "manifest": [chat.manifest, turn.manifest, run.manifest],
         "tools": sorted(
-            ({"name": t["name"], "description": t["description"], "inputSchema": input_shape(t["inputSchema"])} for t in tools),
+            (
+                {"name": t["name"], "description": t["description"], "inputSchema": input_shape(t["inputSchema"])}
+                | ({"annotations": t["annotations"]} if t.get("annotations") else {})
+                for t in tools
+            ),
             key=lambda t: t["name"],
         ),
     }

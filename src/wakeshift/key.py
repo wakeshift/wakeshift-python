@@ -61,9 +61,6 @@ def key_id(public_key: bytes) -> str:
 
 @dataclass(frozen=True)
 class AppKey:
-    #: "test" or "live" for an older key, None for a current one.
-    #: Deprecated: the mode means nothing now.
-    mode: str | None
     #: The app's ID for an older key, which names it; None for a current one
     #: (Wakeshift says: ``await wake.app()``).
     app_id: str | None
@@ -74,10 +71,16 @@ class AppKey:
     kid: str = ""
 
 
-def _app_key(mode: str | None, app_id: str | None, seed: bytes) -> AppKey:
+def _app_key(app_id: str | None, seed: bytes) -> AppKey:
     priv = Ed25519PrivateKey.from_private_bytes(seed)
     pub = priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    return AppKey(mode=mode, app_id=app_id, seed=seed, private_key=priv, kid=key_id(pub))
+    return AppKey(app_id=app_id, seed=seed, private_key=priv, kid=key_id(pub))
+
+
+def is_test_key(key: str) -> bool:
+    """Whether key is an older test key (wst_test_…), from a staging or local
+    console: it has no default core."""
+    return (key or "").strip().startswith(_PREFIX + "test_")
 
 
 def parse_key(key: str) -> AppKey:
@@ -100,7 +103,7 @@ def parse_key(key: str) -> AppKey:
         raw = b64url_decode(enc) if _SEED_RE.match(enc) else b""
         if len(raw) != 32:
             raise ValueError(_ERR_MISTYPED)
-        return _app_key(mode, app_id, raw)
+        return _app_key(app_id, raw)
     if len(rest) != _LEN:
         raise ValueError(_ERR_MISTYPED)
     n = 0
@@ -115,7 +118,7 @@ def parse_key(key: str) -> AppKey:
     seed = b[:32]
     if zlib.crc32(seed).to_bytes(4, "big") != b[32:]:
         raise ValueError(_ERR_MISTYPED)
-    return _app_key(None, None, seed)
+    return _app_key(None, seed)
 
 
 def public_key_of(k: AppKey) -> str:

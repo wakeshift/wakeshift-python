@@ -4,10 +4,16 @@ the best way its client allows.
 
     from wakeshift import Wakeshift
 
-    wake = Wakeshift(key=os.environ["WAKESHIFT_KEY"])
+    wake = Wakeshift(os.environ["WAKESHIFT_KEY"])
     message = wake.define_event("chat.message", description=..., args=..., payload=..., text=...)
-    wake.attach(server)
-    await message.emit({"channel": "eng"}, {"from": "ada", "text": "shipped it"})
+    attached = wake.attach(server, identify=lambda ctx: Identity(user=user_of(ctx)))
+
+    @attached.tool()
+    async def watch(channel: str, call: ToolCall) -> str:
+        await call.subscribe(message, {"channel": channel})
+        return f"Watching #{channel}."
+
+    await message.emit({"channel": "eng"}, {"sender": "ada", "text": "shipped it"})
 """
 
 from .client import (
@@ -15,82 +21,82 @@ from .client import (
     DEFAULT_CORE,
     HARNESS_ARG,
     SESSION_ARG,
-    UNKNOWN_CLIENT_WARNING,
-    WAKE_ARGS_SCHEMA,
-    Addition,
+    AgentScope,
     AppInfo,
-    Call,
-    ConversationId,
-    Harness,
-    Published,
+    Emitted,
+    EventTypeManifest,
+    Manifest,
     PublishUrl,
+    Recipient,
     Recognised,
-    SessionKey,
-    Subscription,
-    SubscriptionStatus,
-    TopicStatus,
+    ScopeEvent,
+    WakeLimit,
     Wakeshift,
-    apply_addition,
 )
 from .errors import WakeshiftError, is_code
 from .events import (
+    BUILTIN_TOOLS,
     EVENT_TOOL_TEXT,
     LIST_TOOL_DESCRIPTION,
+    MAX_STATUS_SUBSCRIPTIONS,
     SUBSCRIBE_TOOL_DESCRIPTION,
     UNSUBSCRIBE_TOOL_DESCRIPTION,
     ArgsError,
-    CallerSubscription,
+    EventStatus,
+    EventSubscriptionStatus,
     Identity,
     Subscriber,
     WakeEvent,
-    speaks_events,
 )
 from .harness import harness_agent
 from .key import AppKey, parse_key, sign_assertion
-from .spec import EXTENSION_KEY, LEGACY_KEY, TEXT_META
+from .spec import EXTENSION_KEY, TEXT_META
 from .spec import REVISION as EVENTS_REVISION
+from .toolcall import Attached, CallEnded, EventsOptions, Subscription, ToolCall, WakeOutput
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
+    "BUILTIN_TOOLS",
     "CONVERSATION_ARG",
     "DEFAULT_CORE",
     "EVENTS_REVISION",
     "EVENT_TOOL_TEXT",
     "EXTENSION_KEY",
     "HARNESS_ARG",
-    "LEGACY_KEY",
     "LIST_TOOL_DESCRIPTION",
     "SESSION_ARG",
     "SUBSCRIBE_TOOL_DESCRIPTION",
     "TEXT_META",
-    "UNKNOWN_CLIENT_WARNING",
     "UNSUBSCRIBE_TOOL_DESCRIPTION",
-    "WAKE_ARGS_SCHEMA",
-    "Addition",
+    "AgentScope",
     "AppInfo",
+    "Attached",
+    "CallEnded",
     "AppKey",
     "ArgsError",
-    "Call",
-    "CallerSubscription",
-    "ConversationId",
-    "Harness",
+    "EventStatus",
+    "EventTypeManifest",
+    "EventSubscriptionStatus",
+    "MAX_STATUS_SUBSCRIPTIONS",
+    "Emitted",
+    "EventsOptions",
     "Identity",
+    "Manifest",
     "PublishUrl",
-    "Published",
+    "Recipient",
     "Recognised",
-    "SessionKey",
+    "ScopeEvent",
     "Subscriber",
     "Subscription",
-    "SubscriptionStatus",
-    "TopicStatus",
+    "ToolCall",
     "WakeEvent",
+    "WakeLimit",
+    "WakeOutput",
     "Wakeshift",
     "WakeshiftError",
-    "apply_addition",
     "harness_agent",
     "is_code",
     "parse_key",
     "sign_assertion",
-    "speaks_events",
 ]

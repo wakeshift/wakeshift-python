@@ -1,0 +1,9 @@
+{
+  "keys": [
+    "agent-session-id",
+    "antigravity.google/conversation_id",
+    "vscode.conversationId",
+    "wakeshift/conversation",
+    "x-codex-turn-metadata.thread_id"
+  ]
+}

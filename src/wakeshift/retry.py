@@ -26,7 +26,8 @@ def refused(method: str, resp: httpx.Response) -> bool:
     HTML 500 page, for any request (it never ran), and a 502, 503 or 504 not from
     Wakeshift for a GET or HEAD. Wakeshift's own errors (JSON) never are."""
     if resp.status_code == 500:
-        return _media_type(resp) == "text/html" and "Server Error" in resp.text
+        # Within the first 4 KB, as the Go SDK reads it.
+        return _media_type(resp) == "text/html" and "Server Error" in resp.text[:4096]
     if resp.status_code in (502, 503, 504):
         return method.upper() in ("GET", "HEAD") and _media_type(resp) != "application/json"
     return False

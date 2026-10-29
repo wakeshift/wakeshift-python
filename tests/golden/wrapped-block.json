@@ -1,0 +1,341 @@
+{
+  "comment": "What a wrapped tool's reply looks like once Wakeshift's block is added (docs/subscribe-from-tools.md, \"The block, added automatically\"): result is what the handler returned (a string, or a CallToolResult), addition is /calls/addition's answer (the top-level one unless the case has its own), wake_output says the tool opted in to typed output, want is the reply. Every SDK's tests read it; Go's skips the string cases (its handlers return a CallToolResult).",
+  "addition": {
+    "text": "Wakeshift: this conversation is woken by Monitor.",
+    "trailer": "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: aaaaaaaaaa.bbbbbbbbbb.cccccccccc)",
+    "meta": {
+      "wakeshift/connector": "tok",
+      "other": "x"
+    }
+  },
+  "cases": [
+    {
+      "name": "a string: one text block, the app's text, then Wakeshift's, then the beacon",
+      "result": "Seated at oak.",
+      "want": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Seated at oak.\n\nWakeshift: this conversation is woken by Monitor.\n\n(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: aaaaaaaaaa.bbbbbbbbbb.cccccccccc)"
+          }
+        ],
+        "_meta": {
+          "wakeshift/connector": "tok",
+          "other": "x"
+        }
+      }
+    },
+    {
+      "name": "a result: Wakeshift's text as a block after the app's, the beacon last, _meta merged",
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Seated at oak."
+          }
+        ],
+        "_meta": {
+          "app/seat": 3
+        }
+      },
+      "want": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Seated at oak."
+          },
+          {
+            "type": "text",
+            "text": "Wakeshift: this conversation is woken by Monitor."
+          },
+          {
+            "type": "text",
+            "text": "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: aaaaaaaaaa.bbbbbbbbbb.cccccccccc)"
+          }
+        ],
+        "_meta": {
+          "app/seat": 3,
+          "wakeshift/connector": "tok",
+          "other": "x"
+        }
+      }
+    },
+    {
+      "name": "rich content keeps its order",
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Your hand:"
+          },
+          {
+            "type": "image",
+            "data": "aGk=",
+            "mimeType": "image/png"
+          },
+          {
+            "type": "text",
+            "text": "Pot: 40."
+          }
+        ]
+      },
+      "want": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Your hand:"
+          },
+          {
+            "type": "image",
+            "data": "aGk=",
+            "mimeType": "image/png"
+          },
+          {
+            "type": "text",
+            "text": "Pot: 40."
+          },
+          {
+            "type": "text",
+            "text": "Wakeshift: this conversation is woken by Monitor."
+          },
+          {
+            "type": "text",
+            "text": "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: aaaaaaaaaa.bbbbbbbbbb.cccccccccc)"
+          }
+        ],
+        "_meta": {
+          "wakeshift/connector": "tok",
+          "other": "x"
+        }
+      }
+    },
+    {
+      "name": "structuredContent passes through",
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"table\":\"oak\"}"
+          }
+        ],
+        "structuredContent": {
+          "table": "oak"
+        }
+      },
+      "want": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"table\":\"oak\"}"
+          },
+          {
+            "type": "text",
+            "text": "Wakeshift: this conversation is woken by Monitor."
+          },
+          {
+            "type": "text",
+            "text": "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: aaaaaaaaaa.bbbbbbbbbb.cccccccccc)"
+          }
+        ],
+        "structuredContent": {
+          "table": "oak"
+        },
+        "_meta": {
+          "wakeshift/connector": "tok",
+          "other": "x"
+        }
+      }
+    },
+    {
+      "name": "typed output: the block's text, without the beacon, in structuredContent too",
+      "wake_output": true,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"table\":\"oak\"}"
+          }
+        ],
+        "structuredContent": {
+          "table": "oak"
+        }
+      },
+      "want": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"table\":\"oak\"}"
+          },
+          {
+            "type": "text",
+            "text": "Wakeshift: this conversation is woken by Monitor."
+          },
+          {
+            "type": "text",
+            "text": "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: aaaaaaaaaa.bbbbbbbbbb.cccccccccc)"
+          }
+        ],
+        "structuredContent": {
+          "table": "oak",
+          "wakeshift": "Wakeshift: this conversation is woken by Monitor."
+        },
+        "_meta": {
+          "wakeshift/connector": "tok",
+          "other": "x"
+        }
+      }
+    },
+    {
+      "name": "a beacon of the result's own stays last, and there's no second",
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Mine.\n\n(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: dddddddddd.eeeeeeeeee.ffffffffff)"
+          }
+        ]
+      },
+      "want": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Mine."
+          },
+          {
+            "type": "text",
+            "text": "Wakeshift: this conversation is woken by Monitor."
+          },
+          {
+            "type": "text",
+            "text": "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: dddddddddd.eeeeeeeeee.ffffffffff)"
+          }
+        ],
+        "_meta": {
+          "other": "x"
+        }
+      }
+    },
+    {
+      "name": "a string with a beacon of its own",
+      "result": "Mine.\n\n(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: dddddddddd.eeeeeeeeee.ffffffffff)",
+      "want": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Mine.\n\nWakeshift: this conversation is woken by Monitor.\n\n(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: dddddddddd.eeeeeeeeee.ffffffffff)"
+          }
+        ],
+        "_meta": {
+          "other": "x"
+        }
+      }
+    },
+    {
+      "name": "a connector beacon in the result's own _meta: no second",
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Mine."
+          }
+        ],
+        "_meta": {
+          "wakeshift/connector": "theirs"
+        }
+      },
+      "want": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Mine."
+          },
+          {
+            "type": "text",
+            "text": "Wakeshift: this conversation is woken by Monitor."
+          }
+        ],
+        "_meta": {
+          "wakeshift/connector": "theirs",
+          "other": "x"
+        }
+      }
+    },
+    {
+      "name": "nothing to add leaves a result as it was",
+      "addition": {
+        "text": ""
+      },
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "A table."
+          }
+        ]
+      },
+      "want": {
+        "content": [
+          {
+            "type": "text",
+            "text": "A table."
+          }
+        ]
+      }
+    },
+    {
+      "name": "nothing to add leaves a string as one block",
+      "addition": {
+        "text": ""
+      },
+      "result": "A table.",
+      "want": {
+        "content": [
+          {
+            "type": "text",
+            "text": "A table."
+          }
+        ]
+      }
+    },
+    {
+      "name": "a beacon alone",
+      "addition": {
+        "text": "",
+        "trailer": "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: aaaaaaaaaa.bbbbbbbbbb.cccccccccc)",
+        "meta": {
+          "wakeshift/connector": "tok"
+        }
+      },
+      "wake_output": true,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"table\":\"oak\"}"
+          }
+        ],
+        "structuredContent": {
+          "table": "oak"
+        }
+      },
+      "want": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"table\":\"oak\"}"
+          },
+          {
+            "type": "text",
+            "text": "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: aaaaaaaaaa.bbbbbbbbbb.cccccccccc)"
+          }
+        ],
+        "structuredContent": {
+          "table": "oak"
+        },
+        "_meta": {
+          "wakeshift/connector": "tok"
+        }
+      }
+    }
+  ]
+}
