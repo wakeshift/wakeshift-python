@@ -160,8 +160,8 @@ class _Call:
 
 
 @dataclass(frozen=True)
-class Recognised:
-    """What Wakeshift recognised the calling conversation's harness as, and by
+class Recognized:
+    """What Wakeshift recognized the calling conversation's harness as, and by
     which signal; both None when nothing named one. claimed is what the agent said."""
 
     harness: str | None = None
@@ -425,9 +425,12 @@ class Wakeshift:
         self._warn_fn = on_warning or (lambda m: print(m, file=sys.stderr))
         self._events: dict[str, WakeEvent] = {}
         # What publish_manifest was last given (None: nothing yet); whether
-        # Wakeshift has the manifest for the events defined now; how many
-        # define_events there were; and one automatic send at a time.
+        # this process serves the app's tools (attach: only then is the
+        # manifest sent automatically); whether Wakeshift has the manifest
+        # for the events defined now; how many define_events there were;
+        # and one automatic send at a time.
         self._manifest_base: dict[str, Any] | None = None
+        self._serving = False
         self._published = False
         self._manifest_version = 0
         self._manifest_lock: asyncio.Lock | None = None
@@ -491,11 +494,12 @@ class Wakeshift:
         """Tells Wakeshift what the app may do, replacing what it said before:
         manifest, with the events you defined (define_event) after its own
         events. An event both defined and listed in manifest's events is an
-        error (ValueError), and nothing is sent. You needn't call it: Wakeshift
-        gets the manifest automatically when the app first needs it. Once
-        called, manifest is what every automatic send carries (even if this one
-        failed), with the events defined by then. Returns the manifest as
-        Wakeshift keeps it."""
+        error (ValueError), and nothing is sent. You needn't call it: a process
+        that serves your tools (attach) sends the manifest automatically,
+        merged into the one Wakeshift has. Call it to remove an event or clear
+        a setting. Once called, manifest's settings are what every automatic
+        send carries (even if this one failed), with the events defined by
+        then. Returns the manifest as Wakeshift keeps it."""
         version = self._manifest_version  # before the body: a later define_event is sent again
         body = self._manifest_body(manifest)
         self._manifest_base = dict(manifest)
@@ -531,23 +535,18 @@ class Wakeshift:
         return body
 
     async def _send_manifest(self) -> None:
-        """The automatic send: the manifest the app last published, or else the
-        settings Wakeshift has (asked for first, so the send never wipes what
-        was published separately), with the defined events."""
-        if self._manifest_base is not None:
-            await self._request("PUT", "/manifest", self._manifest_body(self._manifest_base))
-            return
-        stored = await self._request("GET", "/manifest")
-        description = stored.get("description")
-        kept: dict[str, Any] = {"description": description if isinstance(description, str) else ""}
-        if isinstance(stored.get("agent"), dict):
-            kept["agent"] = stored["agent"]
-        if stored.get("others_can_wake") is True:
-            kept["others_can_wake"] = True
-        tools = stored.get("preapprove_tools")
-        if isinstance(tools, list) and tools:
-            kept["preapprove_tools"] = tools
-        await self._request("PUT", "/manifest", self._manifest_body(kept))
+        """The automatic send, from a process that serves the app's tools: the
+        settings the app last published (only those it set), with the defined
+        events, merged into the manifest Wakeshift has, so it never removes an
+        event or clears a setting another process sent."""
+        body = {
+            k: v
+            for k, v in self._manifest_body(self._manifest_base or {}).items()
+            if v is not None and v != "" and v is not False and v != []
+        }
+        if "events" not in body:
+            return  # nothing to add (attach refuses with no events, but never send an empty list)
+        await self._request("POST", "/manifest/merge", body)
 
     # ── Events (MCP Events, natively or bridged) ───────────────────────────
 
@@ -607,11 +606,16 @@ class Wakeshift:
             wake.attach(server, identify=lambda ctx: Identity(user=my_user(ctx)))"""
         from .events import attach_events
 
-        return attach_events(self, server, list(self._events.values()), identify=identify, tools=tools, events_options=events)
+        attached = attach_events(self, server, list(self._events.values()), identify=identify, tools=tools, events_options=events)
+        self._serving = True  # the manifest is sent automatically from now on
+        return attached
 
     async def _ensure_events(self) -> None:
-        """Sends the manifest with the defined events, once (again after a define_event)."""
-        if self._published:
+        """Sends the manifest with the defined events, once (again after a
+        define_event), from a process that serves the app's tools (attach). A
+        process that only emits never sends it: its events may be fewer, or
+        older, than its server's."""
+        if self._published or not self._serving:
             return
         async with self._manifest_send_lock():
             if self._published:

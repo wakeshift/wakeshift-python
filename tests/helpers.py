@@ -78,7 +78,7 @@ class FakeCore:
         self.requests.append((request.method, path, body))
         fn = self.routes.get((request.method, path))
         if fn is None:
-            if (request.method, path) == ("PUT", "/manifest"):
+            if (request.method, path) in (("PUT", "/manifest"), ("POST", "/manifest/merge")):
                 return httpx.Response(200, json=body)
             if (request.method, path) == ("GET", "/manifest"):
                 return httpx.Response(200, json={"description": ""})  # nothing published yet

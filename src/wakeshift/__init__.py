@@ -28,7 +28,7 @@ from .client import (
     Manifest,
     PublishUrl,
     Recipient,
-    Recognised,
+    Recognized,
     ScopeEvent,
     WakeLimit,
     Wakeshift,
@@ -54,7 +54,7 @@ from .spec import EXTENSION_KEY, TEXT_META
 from .spec import REVISION as EVENTS_REVISION
 from .toolcall import Attached, CallEnded, EventsOptions, Subscription, ToolCall, WakeOutput
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "BUILTIN_TOOLS",
@@ -85,7 +85,7 @@ __all__ = [
     "Manifest",
     "PublishUrl",
     "Recipient",
-    "Recognised",
+    "Recognized",
     "ScopeEvent",
     "Subscriber",
     "Subscription",

@@ -171,11 +171,12 @@ def test_define_event_refuses_what_wakeshift_would() -> None:
         wake.define_event("a.e", description="d", args=empty, payload=P, text=text)
 
 
-async def test_emit_checks_the_payload_publishes_the_manifest_first_and_sends_the_rendered_line() -> None:
+async def test_emit_checks_the_payload_merges_the_manifest_first_and_sends_the_rendered_line() -> None:
     core = FakeCore(default_ok=True)
     core.on("POST", "/events/emit", lambda b: (200, {"matched": 2, "duplicate": False}))
     wake, _ = fake_wake(core)
     chat = chat_event(wake)
+    wake.attach(MCPServer("chat"))  # a process that serves tools sends the manifest
     with pytest.raises(WakeshiftError) as e:
         await chat.emit({"channel": "eng"}, {"from": "ada"})
     assert e.value.code == "bad_arguments" and "payload for" in e.value.detail
@@ -183,9 +184,9 @@ async def test_emit_checks_the_payload_publishes_the_manifest_first_and_sends_th
         await chat.emit({"channel": "eng"}, {"from": "ada", "text": "hi"}, to="u1")
     out = await chat.emit({"channel": "eng"}, {"from": "ada", "text": "shipped"}, id="m1")
     assert (out.matched, out.duplicate) == (2, False)
-    assert [f"{m} {p}" for m, p, _ in core.requests] == ["GET /manifest", "PUT /manifest", "POST /events/emit"]
-    assert core.requests[1][2]["events"][0]["name"] == "chat.message"
-    assert core.requests[2][2] == {
+    assert [f"{m} {p}" for m, p, _ in core.requests] == ["POST /manifest/merge", "POST /events/emit"]
+    assert core.requests[0][2]["events"][0]["name"] == "chat.message"
+    assert core.requests[1][2] == {
         "name": "chat.message",
         "arguments": {"channel": "eng"},
         "payload": {"from": "ada", "text": "shipped"},
@@ -194,7 +195,36 @@ async def test_emit_checks_the_payload_publishes_the_manifest_first_and_sends_th
     }
     # Sent once: the next emit goes straight out.
     await chat.emit({"channel": "eng"}, {"from": "bob", "text": "ok"})
-    assert len(core.bodies("/manifest")) == 2
+    assert len(core.bodies("/manifest/merge")) == 1
+
+
+async def test_app_calls_never_send_the_manifest_without_events_or_from_a_process_that_doesnt_serve_tools() -> None:
+    # 0.4.0 sent an empty list here, which cleared every one of the app's events.
+    bare = FakeCore(default_ok=True)
+    wake, _ = fake_wake(bare)
+    await wake._request_app("GET", "/manifest")  # pyright: ignore[reportPrivateUsage]
+    assert [f"{m} {p}" for m, p, _ in bare.requests] == ["GET /manifest"]
+    core = FakeCore(default_ok=True)
+    core.on("POST", "/events/status", lambda b: (200, {"subscriptions": 0, "connected": 0}))
+    wake, _ = fake_wake(core)
+    chat = chat_event(wake)
+    await wake._request_app("GET", "/manifest")  # pyright: ignore[reportPrivateUsage]
+    await chat.status({"channel": "eng"})
+    assert [f"{m} {p}" for m, p, _ in core.requests] == ["GET /manifest", "POST /events/status"]
+    # Serving, with no events (attach refuses with none): still nothing.
+    served_bare = FakeCore(default_ok=True)
+    wake, _ = fake_wake(served_bare)
+    wake._serving = True  # pyright: ignore[reportPrivateUsage]
+    await wake._request_app("GET", "/manifest")  # pyright: ignore[reportPrivateUsage]
+    assert [f"{m} {p}" for m, p, _ in served_bare.requests] == ["GET /manifest"]
+
+
+async def test_a_process_that_only_emits_never_sends_the_manifest() -> None:
+    core = FakeCore(default_ok=True)
+    core.on("POST", "/events/emit", lambda b: (200, {"matched": 0}))
+    wake, _ = fake_wake(core)
+    await chat_event(wake).emit({"channel": "eng"}, {"from": "ada", "text": "shipped"})
+    assert [f"{m} {p}" for m, p, _ in core.requests] == ["POST /events/emit"]
 
 
 async def test_a_personal_event_is_emitted_to_one_subscriber() -> None:

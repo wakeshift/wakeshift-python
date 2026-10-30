@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 import pytest
 from cryptography.exceptions import InvalidSignature
+from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel
 
 from wakeshift import (
@@ -125,23 +126,23 @@ class Note(BaseModel):
     text: str
 
 
-async def test_emit_publishes_the_manifest_then_sends_a_signed_request() -> None:
+async def test_emit_merges_the_manifest_then_sends_a_signed_request() -> None:
     core = Core(
         lambda path, body: (
             200,
-            (body or {"description": ""}) if path.endswith("/manifest") else {"matched": 3, "duplicate": False},
+            body if path.endswith("/manifest/merge") else {"matched": 3, "duplicate": False},
         )
     )
     wake = core.wake()
     news = wake.define_event("table.news", description="News at a table", args=Hole, payload=Note, text=lambda n, a: n.text)
+    wake.attach(MCPServer("news"))  # a process that serves tools sends the manifest
     out = await news.emit({"table": "oak"}, {"text": "dealt"}, id="d1")
     assert (out.matched, out.duplicate, out.unmatched, out.ended) == (3, False, [], [])
     assert [(r["method"], r["url"]) for r in core.sent] == [
-        ("GET", "http://core.test/api/apps/v1/manifest"),
-        ("PUT", "http://core.test/api/apps/v1/manifest"),
+        ("POST", "http://core.test/api/apps/v1/manifest/merge"),
         ("POST", "http://core.test/api/apps/v1/events/emit"),
     ]
-    r = core.sent[2]
+    r = core.sent[1]
     assert re.fullmatch(r"Bearer [\w-]+\.[\w-]+\.[\w-]+", r["auth"])
     assert SEED not in r["auth"], "the key never goes over the wire"
     assert r["body"] == {
@@ -153,7 +154,7 @@ async def test_emit_publishes_the_manifest_then_sends_a_signed_request() -> None
     }
     # Sent once: the next emit goes straight out.
     await news.emit({"table": "oak"}, {"text": "again"})
-    assert [r["method"] for r in core.sent] == ["GET", "PUT", "POST", "POST"]
+    assert [r["method"] for r in core.sent] == ["POST", "POST", "POST"]
 
 
 async def test_errors_carry_the_apis_code() -> None:
@@ -344,4 +345,4 @@ def test_the_package_no_longer_exports_topics_or_the_old_subscribe() -> None:
         assert hasattr(wakeshift.WakeEvent, name), name
     for name in ("revoke_publish_url", "forget_user", "workspace", "add_agent", "check_agent", "attach", "define_event"):
         assert hasattr(wakeshift.Wakeshift, name), name
-    assert wakeshift.__version__ == "0.4.0"
+    assert wakeshift.__version__ == "0.5.0"

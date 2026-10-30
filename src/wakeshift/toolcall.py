@@ -39,7 +39,7 @@ from .client import (
     HARNESS_DESCRIPTION,
     SESSION_ARG,
     SESSION_DESCRIPTION,
-    Recognised,
+    Recognized,
     _call_of,
     _client_capabilities,
     _request_info,
@@ -114,8 +114,8 @@ class Subscription:
     created: bool = False
     #: The conversation's session. A secret: don't show, store or log it.
     session: str = dataclasses.field(default="", repr=False)
-    #: What Wakeshift recognised the agent's program as.
-    recognised: Recognised = dataclasses.field(default_factory=Recognised)
+    #: What Wakeshift recognized the agent's program as.
+    recognized: Recognized = dataclasses.field(default_factory=Recognized)
     #: The caller subscribes itself (ToolCall.native): nothing was made, id
     #: is "", and the block tells it what to subscribe to.
     native: bool = False
@@ -329,9 +329,9 @@ class ToolCall:
         #: The session_key passed; after a subscribe or resolve_session, the
         #: conversation's session. A secret: don't show, store or log it.
         self.session = session
-        #: What Wakeshift recognised the agent's program as: None until a
+        #: What Wakeshift recognized the agent's program as: None until a
         #: subscribe or resolve_session.
-        self.recognised: Recognised | None = None
+        self.recognized: Recognized | None = None
         self._harness = harness
         self._conversation = conversation
         rc = getattr(context, "request_context", context)
@@ -393,7 +393,7 @@ class ToolCall:
             out = await s.attached._wake._request_app("POST", "/calls/session", {"call": self._wire()})
             s.pending = out.get("pending") or ""
             self.session = out.get("session") or ""
-            self.recognised = _recognised(out.get("agent"))
+            self.recognized = _recognized(out.get("agent"))
             return self.session
         finally:
             self._leave(s)
@@ -443,8 +443,8 @@ class ToolCall:
                 s.pending = out["pending"]
             s.armed = True
             self.session = out.get("session") or ""
-            rec = _recognised(out.get("agent"))
-            self.recognised = rec
+            rec = _recognized(out.get("agent"))
+            self.recognized = rec
             es = out.get("event_subscription") or {}
             created = bool(es.get("created"))
             if created:
@@ -454,7 +454,7 @@ class ToolCall:
                 user=es.get("user") or self.user or "",
                 created=created,
                 session=self.session,
-                recognised=rec,
+                recognized=rec,
             )
         finally:
             self._leave(s)
@@ -491,9 +491,9 @@ class ToolCall:
             self._leave(s)
 
 
-def _recognised(agent: Any) -> Recognised:
+def _recognized(agent: Any) -> Recognized:
     a = agent if isinstance(agent, Mapping) else {}
-    return Recognised(harness=a.get("harness"), via=a.get("via"), claimed=a.get("claimed"))
+    return Recognized(harness=a.get("harness"), via=a.get("via"), claimed=a.get("claimed"))
 
 
 # ── The handle attach returns ─────────────────────────────────────────────
@@ -732,7 +732,7 @@ class Attached:
             }
 
     async def _rollback_shielded(self, scope: _Scope) -> None:
-        """Rolls back under asyncio.shield, so a cancelled request still ends
+        """Rolls back under asyncio.shield, so a canceled request still ends
         what it made."""
         if not scope.created:
             return

@@ -1,5 +1,5 @@
 {
-  "_comment": "The manifest every SDK sends (PUT /api/apps/v1/manifest), and when. Each SDK's test runs each case against a fake core: it defines the sample events named in define (events-list.json's chat.message, game.turn and ci.run, whose manifest entries that file pins), runs the steps in order, and checks the manifest requests it made (GET and PUT /manifest, nothing else) against requests. In a request's body, an event that's a string is that defined event's manifest entry; an object is listed as it is. The fake core answers GET /manifest with stored ({\"description\": \"\"} if there's none), a PUT with 200 unless the step's answer says otherwise, and an emit with {\"matched\": 0}. Steps: emit (chat.message, with emit's arguments and payload), publish (an explicit publish of the manifest given, answered with answer if set), define (one more sample event). A step with error must fail, its message containing that text; every other step must succeed.",
+  "_comment": "The manifest every SDK sends, and when: an explicit publish replaces it (PUT /api/apps/v1/manifest); the automatic send, only from a process that serves the app's tools (attach), merges into the one Wakeshift has (POST /api/apps/v1/manifest/merge), with only the settings the app published and its events. Each SDK's test runs each case against a fake core: it defines the sample events named in define (events-list.json's chat.message, game.turn and ci.run, whose manifest entries that file pins), runs the steps in order, and checks every request it made to /manifest or under it (method, path below /api/apps/v1, and body; a GET has no body) against requests. In a request's body, an event that's a string is that defined event's manifest entry; an object is listed as it is. The fake core answers a GET of /manifest with {\"description\": \"\"}, a PUT or merge with 200 and its body unless the step's answer says otherwise, and every other request with {\"matched\": 0, \"subscriptions\": 0, \"connected\": 0, \"forgotten\": false}. Steps: attach (attach to an MCP server, with no options), emit (chat.message, with emit's arguments and payload), status (chat.message's status, with emit's arguments: a call that only reads), forget_user (forget the user \"ada\": an app call about no event), publish (an explicit publish of the manifest given, answered with answer if set), define (one more sample event), fail_next (the next request to /manifest or under it answers 503 with {\"error\": {\"code\": \"unavailable\", \"message\": \"try again\"}}). A step with error must fail, its message containing that text; every other step must succeed.",
   "emit": {
     "event": "chat.message",
     "arguments": { "channel": "eng" },
@@ -7,53 +7,55 @@
   },
   "cases": [
     {
-      "name": "the first emit sends the manifest once, keeping the settings Wakeshift has and replacing its events with the defined ones",
+      "name": "a process that serves the app's tools merges its defined events on its first call, once, with no settings",
       "define": ["chat.message", "game.turn"],
-      "stored": {
-        "description": "Team chat for agents",
-        "accounts": "app",
-        "agent": {
-          "wake": [{ "pattern": "chat.*", "description": "Messages in your channels" }],
-          "post": [{ "pattern": "chat.message", "description": "Your messages" }],
-          "wake_limits": [{ "seconds": 60, "max": 5 }],
-          "ttl_days": 30,
-          "start_prompt": "Join #general in Agent Chat"
-        },
-        "others_can_wake": true,
-        "preapprove_tools": ["history"],
-        "events": [{ "name": "old.event", "description": "Gone from the code.", "topic": "ev/old.event" }]
-      },
-      "steps": [{ "emit": true }, { "emit": true }],
+      "steps": [{ "attach": true }, { "emit": true }, { "emit": true }],
+      "requests": [{ "method": "POST", "path": "/manifest/merge", "body": { "events": ["chat.message", "game.turn"] } }]
+    },
+    {
+      "name": "a process that only emits never sends the manifest, even after a define",
+      "define": ["chat.message"],
+      "steps": [{ "emit": true }, { "define": "ci.run" }, { "emit": true }],
+      "requests": []
+    },
+    {
+      "name": "calls that only read, from a process that doesn't serve the app's tools, never send the manifest",
+      "define": ["chat.message"],
+      "steps": [{ "status": true }, { "forget_user": true }, { "status": true }],
+      "requests": []
+    },
+    {
+      "name": "a process with no events defined never sends the manifest",
+      "define": [],
+      "steps": [{ "forget_user": true }, { "forget_user": true }],
+      "requests": []
+    },
+    {
+      "name": "a status call from a process that serves the app's tools merges the events first, once",
+      "define": ["chat.message"],
+      "steps": [{ "attach": true }, { "status": true }, { "status": true }, { "emit": true }],
+      "requests": [{ "method": "POST", "path": "/manifest/merge", "body": { "events": ["chat.message"] } }]
+    },
+    {
+      "name": "nothing is sent before attach; the first call after it merges the events",
+      "define": ["chat.message"],
+      "steps": [{ "emit": true }, { "attach": true }, { "emit": true }],
+      "requests": [{ "method": "POST", "path": "/manifest/merge", "body": { "events": ["chat.message"] } }]
+    },
+    {
+      "name": "an event defined after attach: the next call merges again, with every defined event",
+      "define": ["chat.message"],
+      "steps": [{ "attach": true }, { "emit": true }, { "define": "ci.run" }, { "emit": true }],
       "requests": [
-        { "method": "GET" },
-        {
-          "method": "PUT",
-          "body": {
-            "description": "Team chat for agents",
-            "agent": {
-              "wake": [{ "pattern": "chat.*", "description": "Messages in your channels" }],
-              "post": [{ "pattern": "chat.message", "description": "Your messages" }],
-              "wake_limits": [{ "seconds": 60, "max": 5 }],
-              "ttl_days": 30,
-              "start_prompt": "Join #general in Agent Chat"
-            },
-            "others_can_wake": true,
-            "preapprove_tools": ["history"],
-            "events": ["chat.message", "game.turn"]
-          }
-        }
+        { "method": "POST", "path": "/manifest/merge", "body": { "events": ["chat.message"] } },
+        { "method": "POST", "path": "/manifest/merge", "body": { "events": ["chat.message", "ci.run"] } }
       ]
     },
     {
-      "name": "for an app Wakeshift has no settings for yet, the first emit sends the defined events",
-      "define": ["chat.message"],
-      "steps": [{ "emit": true }],
-      "requests": [{ "method": "GET" }, { "method": "PUT", "body": { "description": "", "events": ["chat.message"] } }]
-    },
-    {
-      "name": "an explicit publish sends the manifest's own events, then the defined ones, and the next emit sends nothing more",
+      "name": "an explicit publish replaces the manifest with its own events, then the defined ones, and the next emit sends nothing more",
       "define": ["chat.message", "game.turn"],
       "steps": [
+        { "attach": true },
         {
           "publish": {
             "description": "Team chat for agents",
@@ -80,6 +82,7 @@
       "requests": [
         {
           "method": "PUT",
+          "path": "/manifest",
           "body": {
             "description": "Team chat for agents",
             "agent": {
@@ -105,28 +108,57 @@
       ]
     },
     {
-      "name": "an event defined after an explicit publish: the automatic send is the published manifest with the new event",
+      "name": "an explicit publish from a process that only emits replaces the manifest",
+      "define": ["chat.message"],
+      "steps": [{ "publish": { "description": "Team chat for agents" } }, { "emit": true }],
+      "requests": [{ "method": "PUT", "path": "/manifest", "body": { "description": "Team chat for agents", "events": ["chat.message"] } }]
+    },
+    {
+      "name": "an event defined after an explicit publish: the automatic merge carries the published settings and every defined event",
       "define": ["chat.message"],
       "steps": [
-        { "publish": { "description": "Team chat for agents", "others_can_wake": true, "preapprove_tools": ["history"] } },
+        { "attach": true },
+        {
+          "publish": {
+            "description": "Team chat for agents",
+            "agent": { "wake": [{ "pattern": "chat.*", "description": "Messages in your channels" }], "post": [], "ttl_days": 30 },
+            "others_can_wake": true,
+            "preapprove_tools": ["history"]
+          }
+        },
         { "define": "ci.run" },
         { "emit": true }
       ],
       "requests": [
         {
           "method": "PUT",
-          "body": { "description": "Team chat for agents", "others_can_wake": true, "preapprove_tools": ["history"], "events": ["chat.message"] }
+          "path": "/manifest",
+          "body": {
+            "description": "Team chat for agents",
+            "agent": { "wake": [{ "pattern": "chat.*", "description": "Messages in your channels" }], "post": [], "ttl_days": 30 },
+            "others_can_wake": true,
+            "preapprove_tools": ["history"],
+            "events": ["chat.message"]
+          }
         },
         {
-          "method": "PUT",
-          "body": { "description": "Team chat for agents", "others_can_wake": true, "preapprove_tools": ["history"], "events": ["chat.message", "ci.run"] }
+          "method": "POST",
+          "path": "/manifest/merge",
+          "body": {
+            "description": "Team chat for agents",
+            "agent": { "wake": [{ "pattern": "chat.*", "description": "Messages in your channels" }], "post": [], "ttl_days": 30 },
+            "others_can_wake": true,
+            "preapprove_tools": ["history"],
+            "events": ["chat.message", "ci.run"]
+          }
         }
       ]
     },
     {
-      "name": "an explicit publish that failed: the automatic send that follows is the same manifest",
+      "name": "an explicit publish that failed: the next call of a process that serves the app's tools merges the same settings",
       "define": ["chat.message"],
       "steps": [
+        { "attach": true },
         {
           "publish": { "description": "Team chat for agents", "preapprove_tools": ["history"] },
           "answer": { "status": 503, "body": { "error": { "code": "unavailable", "message": "try again" } } },
@@ -135,8 +167,17 @@
         { "emit": true }
       ],
       "requests": [
-        { "method": "PUT", "body": { "description": "Team chat for agents", "preapprove_tools": ["history"], "events": ["chat.message"] } },
-        { "method": "PUT", "body": { "description": "Team chat for agents", "preapprove_tools": ["history"], "events": ["chat.message"] } }
+        { "method": "PUT", "path": "/manifest", "body": { "description": "Team chat for agents", "preapprove_tools": ["history"], "events": ["chat.message"] } },
+        { "method": "POST", "path": "/manifest/merge", "body": { "description": "Team chat for agents", "preapprove_tools": ["history"], "events": ["chat.message"] } }
+      ]
+    },
+    {
+      "name": "a failed automatic merge is tried again on the next call",
+      "define": ["chat.message"],
+      "steps": [{ "attach": true }, { "fail_next": true }, { "emit": true, "error": "try again" }, { "emit": true }],
+      "requests": [
+        { "method": "POST", "path": "/manifest/merge", "body": { "events": ["chat.message"] } },
+        { "method": "POST", "path": "/manifest/merge", "body": { "events": ["chat.message"] } }
       ]
     },
     {
@@ -154,9 +195,10 @@
       "requests": []
     },
     {
-      "name": "an event defined after a publish that listed it: the automatic send is refused",
+      "name": "an event defined after a publish that listed it: the automatic merge is refused",
       "define": ["chat.message"],
       "steps": [
+        { "attach": true },
         {
           "publish": {
             "description": "Team chat for agents",
@@ -169,6 +211,7 @@
       "requests": [
         {
           "method": "PUT",
+          "path": "/manifest",
           "body": {
             "description": "Team chat for agents",
             "events": [{ "name": "ci.run", "description": "A CI run finished.", "topic": "ev/ci.run" }, "chat.message"]

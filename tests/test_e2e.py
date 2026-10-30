@@ -458,7 +458,7 @@ async def test_wrapped_tools_against_a_real_core() -> None:
         assert text(res).count("wakeshift-beacon") <= 1
         first = subs["ada"]
         assert len(first) == 2 and all(s.created for s in first) and first[0].session == first[1].session != ""
-        assert first[0].user == "ada" and first[0].recognised.harness == "codex"
+        assert first[0].user == "ada" and first[0].recognized.harness == "codex"
         assert len(await listed("ada")) == 2
         # The next call in the thread: renewals, and the short form.
         again = await tool("ada", "codex_exec/0.50.0", "join", {"table": "oak"}, codex)

@@ -54,7 +54,7 @@ class WakeCore:
         self.delay = 0.0
 
     def paths(self) -> list[str]:
-        return [p for p, _ in self.calls if p != "/manifest"]
+        return [p for p, _ in self.calls if p not in ("/manifest", "/manifest/merge")]
 
     def bodies(self, path: str) -> list[Any]:
         return [b for p, b in self.calls if p == path]
@@ -71,7 +71,7 @@ class WakeCore:
         if path in self.fail:
             return httpx.Response(503, json={"error": {"code": "unavailable", "message": "down"}})
         call = (body or {}).get("call") or {}
-        if path == "/manifest":
+        if path in ("/manifest", "/manifest/merge"):
             return httpx.Response(200, json=body)
         if path == "/event-subscriptions":
             key = f"{body['name']}{json.dumps(body['arguments'], sort_keys=True)}"
@@ -206,7 +206,7 @@ async def test_two_subscribes_one_block() -> None:
     @w.attached.tool()
     async def join(table: str, call: ToolCall) -> str:
         """Take a seat."""
-        before.append((call.recognised, call.session, call.user, call.tool, call.native))
+        before.append((call.recognized, call.session, call.user, call.tool, call.native))
         a = await call.subscribe(w.turn, {"table": table}, reason=f"Playing at {table}", ttl=3600)
         b = await call.subscribe(w.shared, {"table": table}, label="poker")
         got.extend([a, b])
@@ -229,7 +229,7 @@ async def test_two_subscribes_one_block() -> None:
     add = w.core.bodies("/calls/addition")[0]
     assert add["pending"] == "pa_first" and "native" not in add and add["call"]["session"] == "wsc_s1"
     assert got[0].id == "sub-1" and got[0].user == "ada" and got[0].created and got[0].session == "wsc_s1"
-    assert got[0].recognised.harness == "claude-code"
+    assert got[0].recognized.harness == "claude-code"
 
 
 async def test_without_subscribing() -> None:
@@ -267,7 +267,7 @@ async def test_resolve_session() -> None:
     @w.attached.tool()
     async def join(call: ToolCall) -> str:
         s = await call.resolve_session()
-        seen.append((s, call.session, call.recognised))
+        seen.append((s, call.session, call.recognized))
         assert await call.resolve_session() == s
         await call.subscribe(w.shared, {"table": "oak"})
         return "ok"
@@ -332,7 +332,7 @@ async def test_rollback_on_each_failure_kind() -> None:
 
 
 async def test_rollback_on_cancellation() -> None:
-    """A cancelled request (here, its task cancelled mid-tool) still ends what
+    """A canceled request (here, its task canceled mid-tool) still ends what
     it made: the rollback is shielded."""
     w = Wrapped()
     subscribed = asyncio.Event()
