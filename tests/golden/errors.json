@@ -434,7 +434,24 @@
         },
         "message": "Too many.",
         "data": {
-          "kind": "subscriptions"
+          "limit": "subscriptions"
+        }
+      }
+    },
+    {
+      "name": "a poll subscription the person stopped",
+      "error": {
+        "code": "subscription_stopped",
+        "message": "Stopped."
+      },
+      "want": {
+        "code": {
+          "draft": -32024,
+          "chatgpt": -32012
+        },
+        "message": "Stopped.",
+        "data": {
+          "reason": "stopped"
         }
       }
     },

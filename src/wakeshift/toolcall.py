@@ -43,6 +43,7 @@ from .client import (
     _call_of,
     _client_capabilities,
     _request_info,
+    _takes_tasks,
     _tool_of,
 )
 from .errors import WakeshiftError
@@ -79,15 +80,42 @@ class CallEnded(RuntimeError):
     returning."""
 
 
-class WakeOutput(BaseModel):
-    """Subclass it for a wrapped tool's return type to carry Wakeshift's block
-    in its structured output too: the wrapper sets ``wakeshift`` to the
-    block's text (without a beacon line), for hosts that show the model only
-    structuredContent. The block stays in the content as well."""
+#: The structuredContent field a wrapped tool's structured result carries
+#: Wakeshift's block in (without a beacon line), for hosts that show the
+#: model only structuredContent. The three SDKs use the same name.
+WAKESHIFT_FIELD = "wakeshift"
 
-    wakeshift: str | None = Field(
-        default=None, description="What Wakeshift adds for this conversation: how it's woken by this app's events"
-    )
+#: What the field is, in the output schema tools/list gives a wrapped tool.
+WAKESHIFT_FIELD_DESCRIPTION = "What Wakeshift adds for this conversation: how it's woken by this app's events"
+
+
+class WakeOutput(BaseModel):
+    """A base for a wrapped tool's return type that declares ``wakeshift``
+    in the type itself. Optional: every structured result of a wrapped tool
+    gets the block's text (without a beacon line) in its ``wakeshift``
+    field, for hosts that show the model only structuredContent, and the
+    tool's output schema names it. The block stays in the content as well."""
+
+    wakeshift: str | None = Field(default=None, description=WAKESHIFT_FIELD_DESCRIPTION)
+
+
+def with_wakeshift_field(schema: Any) -> Any:
+    """An object output schema with an optional ``wakeshift`` string added
+    (a copy; the schema itself is left alone), so a client that checks
+    structuredContent against it takes the block. Anything else, or a schema
+    that already names it, comes back as it was. The shared fixture
+    sdk/typescript/test/wrapped-block.json (output_schemas) pins it."""
+    if not isinstance(schema, Mapping) or schema.get("type") != "object":
+        return schema
+    props = schema.get("properties")
+    if props is not None and not isinstance(props, Mapping):
+        return schema
+    if props is not None and WAKESHIFT_FIELD in props:
+        return schema
+    return {
+        **schema,
+        "properties": {**(props or {}), WAKESHIFT_FIELD: {"type": "string", "description": WAKESHIFT_FIELD_DESCRIPTION}},
+    }
 
 
 @dataclass(frozen=True)
@@ -184,14 +212,13 @@ def merge_block(
     meta: Mapping[str, Any] | None = None,
     *,
     string: bool = False,
-    wake_output: bool = False,
 ) -> dict[str, Any]:
     """A tool result (the wire form) with Wakeshift's block added: its text as
     a block after the app's content, then a text-carried beacon last, its
     _meta merged. A result that already carries a beacon keeps it, last, and
     gets no second one. ``string``: the tool returned a string, which stays
-    one text block. ``wake_output``: the tool's output opted in (WakeOutput),
-    so structuredContent gets the text too. The shared fixture
+    one text block. A structured result (structuredContent an object) gets
+    the text in its ``wakeshift`` field too. The shared fixture
     sdk/typescript/test/wrapped-block.json pins it."""
     out = dict(result)
     out["content"] = list(out.get("content") or [])
@@ -215,8 +242,8 @@ def merge_block(
     if string and all(isinstance(c, dict) and c.get("type") == "text" for c in out["content"]):
         joined = "\n\n".join(str(c.get("text", "")) for c in out["content"] if c.get("text"))
         out["content"] = [{"type": "text", "text": joined}] if joined else []
-    if text and wake_output and isinstance(out.get("structuredContent"), dict):
-        out["structuredContent"] = {**out["structuredContent"], "wakeshift": text}
+    if text and isinstance(out.get("structuredContent"), dict):
+        out["structuredContent"] = {**out["structuredContent"], WAKESHIFT_FIELD: text}
     return out
 
 
@@ -245,7 +272,6 @@ class _Scope:
         self.attached = attached
         self.request_id = request_id
         self.call: ToolCall | None = None
-        self.wake_output = False
         self.string = False
         self.lock = asyncio.Lock()
         self.busy = 0
@@ -340,6 +366,7 @@ class ToolCall:
         self._client = named or client or ""
         self._meta = meta
         self._ua = headers.get("user-agent", "") if headers else ""
+        self._tasks = _takes_tasks(meta, headers)
 
     def __repr__(self) -> str:
         return f"ToolCall(tool={self.tool!r}, user={self.user!r}, native={self.native!r})"
@@ -355,6 +382,7 @@ class ToolCall:
             harness=self._harness,
             conversation=self._conversation,
             tool=self.tool,
+            tasks=self._tasks,
         )
         return c.to_json()
 
@@ -606,7 +634,11 @@ class Attached:
         ret = hints.get("return", sig.return_annotation)
         if ret is not inspect.Signature.empty:
             annotations["return"] = ret
-        wake_output = _is_type(ret, WakeOutput)
+        if ret is str and "structured_output" not in kwargs:
+            # A tool returning str replies with text. MCPServer would give it
+            # an output schema and structuredContent {"result": …}, which
+            # some hosts show the model instead of the text.
+            kwargs = {**kwargs, "structured_output": False}
         tool_name = name or fn.__name__
         attached = self
 
@@ -643,7 +675,7 @@ class Attached:
                 conversation=_str(wake_vals[CONVERSATION_ARG]),
             )
             call.native, call.native_conversation = attached._native_of(context, rc, call._client)
-            scope.call, scope.wake_output = call, wake_output
+            scope.call = call
             try:
                 out = await fn(**kw, **{call_param: call})
             finally:
@@ -794,15 +826,24 @@ class Attached:
             str(add.get("trailer") or ""),
             add.get("meta") if isinstance(add.get("meta"), Mapping) else None,
             string=scope.string,
-            wake_output=scope.wake_output,
         )
-        if text and not scope.wake_output and out.get("structuredContent") is not None:
+        if text and out.get("structuredContent") is not None and not isinstance(out.get("structuredContent"), dict):
             self._warn_once(
                 "output:" + call.tool,
-                f"wakeshift: {call.tool} returns structured content without wakeshift.WakeOutput: hosts that show only "
-                "structuredContent won't see how this conversation is woken",
+                f"wakeshift: {call.tool} returns structuredContent that isn't an object, so it can't carry how this "
+                "conversation is woken: hosts that show only structuredContent won't see it",
             )
         return out
+
+    def _amend_list(self, tools: list[Any]) -> None:
+        """tools/list's tools with each wrapped tool's object output schema
+        naming ``wakeshift`` (with_wakeshift_field), which its structured
+        results carry."""
+        for i, t in enumerate(tools):
+            if isinstance(t, Mapping) and t.get("name") in self._wrapped and isinstance(t.get("outputSchema"), Mapping):
+                schema = with_wakeshift_field(t["outputSchema"])
+                if schema is not t["outputSchema"]:
+                    tools[i] = {**t, "outputSchema": schema}
 
 
 def _str(v: Any) -> str | None:

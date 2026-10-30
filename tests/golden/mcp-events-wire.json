@@ -1,0 +1,237 @@
+{
+  "_about": "The MCP Events wire format every SDK (pkg/appkit, sdk/typescript, sdk/python) serves for chat.message ({channel}), as a client that speaks the draft (SEP-3415) sees it: events/list's delivery modes, and for events/subscribe and events/poll, the client's params, what the SDK asks Wakeshift (core_request: the body without call and dialect), what Wakeshift answers (core_response) and the JSON-RPC result the client gets.",
+  "revision": "SEP-3415 (2026-10-27)",
+  "delivery": [
+    "webhook",
+    "poll"
+  ],
+  "subscribe": [
+    {
+      "name": "a first subscribe",
+      "params": {
+        "name": "chat.message",
+        "arguments": {
+          "channel": "eng"
+        },
+        "delivery": {
+          "mode": "webhook",
+          "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+          "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+        },
+        "cursor": null,
+        "ttlMs": 3600000
+      },
+      "core_request": {
+        "name": "chat.message",
+        "arguments": {
+          "channel": "eng"
+        },
+        "delivery": {
+          "mode": "webhook",
+          "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+          "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+        },
+        "ttl_ms": 3600000
+      },
+      "core_response": {
+        "id": "sub_5f1d2a0c9e8b7a6f5e4d3c2b",
+        "refresh_before": "2026-10-29T13:00:00Z",
+        "cursor": "c1.0",
+        "truncated": false,
+        "created": true
+      },
+      "result": {
+        "resultType": "complete",
+        "id": "sub_5f1d2a0c9e8b7a6f5e4d3c2b",
+        "refreshBefore": "2026-10-29T13:00:00Z",
+        "cursor": "c1.0",
+        "truncated": false
+      }
+    },
+    {
+      "name": "a refresh with a replay bound, and how delivery is going",
+      "params": {
+        "name": "chat.message",
+        "arguments": {
+          "channel": "eng"
+        },
+        "delivery": {
+          "mode": "webhook",
+          "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+          "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+        },
+        "cursor": "c1.12",
+        "maxAgeMs": 300000,
+        "ttlMs": 3600000
+      },
+      "core_request": {
+        "name": "chat.message",
+        "arguments": {
+          "channel": "eng"
+        },
+        "delivery": {
+          "mode": "webhook",
+          "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+          "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+        },
+        "cursor": "c1.12",
+        "max_age_ms": 300000,
+        "ttl_ms": 3600000
+      },
+      "core_response": {
+        "id": "sub_5f1d2a0c9e8b7a6f5e4d3c2b",
+        "refresh_before": "2026-10-29T14:00:00Z",
+        "cursor": "c1.14",
+        "truncated": true,
+        "created": false,
+        "delivery_status": {
+          "active": true,
+          "lastDeliveryAt": "2026-10-29T12:58:00Z",
+          "lastError": "http_5xx",
+          "failedSince": "2026-10-29T12:59:00Z"
+        }
+      },
+      "result": {
+        "resultType": "complete",
+        "id": "sub_5f1d2a0c9e8b7a6f5e4d3c2b",
+        "refreshBefore": "2026-10-29T14:00:00Z",
+        "cursor": "c1.14",
+        "truncated": true,
+        "deliveryStatus": {
+          "active": true,
+          "lastDeliveryAt": "2026-10-29T12:58:00Z",
+          "lastError": "http_5xx",
+          "failedSince": "2026-10-29T12:59:00Z"
+        }
+      }
+    }
+  ],
+  "poll": [
+    {
+      "name": "the first poll, from now",
+      "params": {
+        "name": "chat.message",
+        "arguments": {
+          "channel": "eng"
+        },
+        "cursor": null
+      },
+      "core_request": {
+        "name": "chat.message",
+        "arguments": {
+          "channel": "eng"
+        }
+      },
+      "core_response": {
+        "events": [],
+        "cursor": "c1.0",
+        "truncated": false,
+        "has_more": false,
+        "next_poll_ms": 10000,
+        "created": true
+      },
+      "result": {
+        "resultType": "complete",
+        "events": [],
+        "cursor": "c1.0",
+        "truncated": false,
+        "hasMore": false,
+        "nextPollMs": 10000
+      }
+    },
+    {
+      "name": "a poll with no cursor at all, as a client may send it",
+      "params": {
+        "name": "chat.message",
+        "arguments": {
+          "channel": "eng"
+        }
+      },
+      "core_request": {
+        "name": "chat.message",
+        "arguments": {
+          "channel": "eng"
+        }
+      },
+      "core_response": {
+        "events": [],
+        "cursor": "c1.3",
+        "truncated": false,
+        "has_more": false,
+        "next_poll_ms": 10000,
+        "created": false
+      },
+      "result": {
+        "resultType": "complete",
+        "events": [],
+        "cursor": "c1.3",
+        "truncated": false,
+        "hasMore": false,
+        "nextPollMs": 10000
+      }
+    },
+    {
+      "name": "events after a cursor, with more waiting and some skipped",
+      "params": {
+        "name": "chat.message",
+        "arguments": {
+          "channel": "eng"
+        },
+        "cursor": "c1.3",
+        "maxAgeMs": 300000,
+        "maxEvents": 1
+      },
+      "core_request": {
+        "name": "chat.message",
+        "arguments": {
+          "channel": "eng"
+        },
+        "cursor": "c1.3",
+        "max_age_ms": 300000,
+        "max_events": 1
+      },
+      "core_response": {
+        "events": [
+          {
+            "eventId": "4b1c6f0e-9d2a-8e3b-a1c4-5d6e7f8a9b0c",
+            "name": "chat.message",
+            "timestamp": "2026-10-29T12:00:00Z",
+            "data": {
+              "from": "ada",
+              "text": "shipped it"
+            },
+            "_meta": {
+              "ai.wakeshift/text": "ada: shipped it"
+            }
+          }
+        ],
+        "cursor": "c1.7",
+        "truncated": true,
+        "has_more": true,
+        "next_poll_ms": 0,
+        "created": false
+      },
+      "result": {
+        "resultType": "complete",
+        "events": [
+          {
+            "eventId": "4b1c6f0e-9d2a-8e3b-a1c4-5d6e7f8a9b0c",
+            "name": "chat.message",
+            "timestamp": "2026-10-29T12:00:00Z",
+            "data": {
+              "from": "ada",
+              "text": "shipped it"
+            },
+            "_meta": {
+              "ai.wakeshift/text": "ada: shipped it"
+            }
+          }
+        ],
+        "cursor": "c1.7",
+        "truncated": true,
+        "hasMore": true,
+        "nextPollMs": 0
+      }
+    }
+  ]
+}

@@ -2,6 +2,27 @@
 
 What changed in each release of `wakeshift`. 0.4.0 is the first published release: to start with it, read the [README](README.md). Its notes below, and the earlier releases', are for apps that ran the preview builds.
 
+## 0.5.2 (2026-10-30)
+
+### Added
+
+- **Claude Code is woken with nothing to install, and no restarts.** `attach` now serves `wakeshift_wait` to clients that take MCP tasks on protocol 2026-07-28: a recent Claude Code in the terminal, where Anthropic has turned them on. Wakeshift tells those conversations to call it after they subscribe; it returns at once and waits in the background, through `/compact` and restarts of Claude Code, and wakes the conversation when your events arrive. Other clients don't see it, and keep the instructions they had. Nothing to change in your code.
+
+### Fixed
+
+- **Agents that see only `structuredContent` are told how they're woken.** Some hosts, Claude Code among them, show the model a tool's `structuredContent` and not its text. A wrapped tool returning `str`, as the README's example does, got `structuredContent` (`{"result": …}`) from the MCP SDK without Wakeshift's instructions in it, so the agent said it was watching and was never woken. Now a wrapped tool annotated `-> str` replies with text only (no output schema; pass `structured_output=True` to keep MCP's), and every structured result of a wrapped tool carries the instructions in its `wakeshift` field, which `tools/list` adds to the tool's output schema. Subclassing `WakeOutput` still declares the field in your own type; it's no longer required. Nothing to change in your code.
+
+## 0.5.1 (2026-10-30)
+
+### Added
+
+- **Clients that speak MCP Events can poll.** `attach` now answers `events/poll`, and `events/list` offers `poll` beside `webhook` for every event. A client that can't take webhooks (an agent with no public URL, or Mastra in its poll mode) subscribes with its first poll, then each poll returns what happened since its cursor, in order. A poll's cursor acknowledges everything before it, so an event isn't lost when a poll fails: the next poll returns it again. Your `authorize` runs on every poll. Wakeshift keeps the subscription while the client polls (it lapses after 10 minutes without a poll), lists it with the user's other subscriptions (`list_subscriptions` says "polled by an MCP client"), and answers the client's next poll with `Forbidden` once the user stops it. Nothing to change in your code.
+- **Webhooks for an event you no longer offer end.** When you remove an event from your app's manifest (with `publish_manifest`), Wakeshift ends each webhook subscription to it within an hour, telling the client the event is gone (`terminated`, with `NotFound` and `data.kind: "event"`), so the client lists your events again rather than waiting for its next refresh. A poll for it gets `NotFound` at once. Nothing to change in your code.
+
+### Changed
+
+- `attach` follows SEP-3415 as revised on 2026-10-27. `ResourceExhausted`'s data is now `{"limit": "subscriptions"}`, the draft's name for it (it was `{"kind": "subscriptions"}`). `events/stream` still answers `Unsupported`: push isn't offered.
+
 ## 0.5.0 (2026-10-29)
 
 ### Breaking

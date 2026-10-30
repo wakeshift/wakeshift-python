@@ -23,7 +23,7 @@ from wakeshift import (
 from wakeshift import spec as wspec
 from wakeshift.events import _speaks_events
 
-from .helpers import FakeCore, fake_wake, initialize, served
+from .helpers import FakeCore, fake_wake, golden_file, initialize, served
 
 
 class ChatArgs(BaseModel):
@@ -80,7 +80,7 @@ def test_define_event_makes_the_manifests_event_type() -> None:
     turn = turn_event(wake)
     assert turn.manifest["topic"] == "ev/game.turn/{table}"
     assert turn.manifest["personal"] is True
-    assert turn._definition()["delivery"] == ["webhook"]
+    assert turn._definition()["delivery"] == ["webhook", "poll"]
 
 
 def test_a_filter_given_without_a_topic_gets_the_defaults_added_and_the_callers_stays_as_it_was() -> None:
@@ -423,7 +423,7 @@ async def test_a_client_that_speaks_mcp_events_subscribes_natively_and_isnt_offe
         lst = (await rpc("events/list", {}))["result"]
         assert lst["resultType"] == "complete"
         assert lst["events"][0]["name"] == "chat.message"
-        assert lst["events"][0]["delivery"] == ["webhook"]
+        assert lst["events"][0]["delivery"] == ["webhook", "poll"]
 
         delivery = {"mode": "webhook", "url": "https://chatgpt.example/cb", "secret": "whsec_x"}
         res = await rpc(
@@ -493,7 +493,8 @@ async def test_draft_clients_get_the_drafts_codes() -> None:
         assert (await rpc("events/unsubscribe", {"name": "chat.message", "arguments": {"channel": "eng"}, "delivery": delivery}))[
             "error"
         ]["code"] == -32023
-        assert (await rpc("events/poll", {}))["error"]["code"] == -32026
+        assert (await rpc("events/stream", {}))["error"]["code"] == -32026
+        assert (await rpc("events/poll", {}))["error"]["code"] == -32023  # no such event
         # A client that declared the extension isn't offered subscribe_events either.
         names = sorted(t["name"] for t in (await rpc("tools/list", {}))["result"]["tools"])
         assert names == ["list_subscriptions", "unsubscribe_events"]
@@ -515,7 +516,7 @@ async def test_subscription_limit_is_resource_exhausted() -> None:
         ]
         assert err["code"] == -32025
         assert "20 live webhook subscriptions" in err["message"]
-        assert err["data"] == {"kind": "subscriptions"}
+        assert err["data"] == {"limit": "subscriptions"}
 
 
 def test_spec_constants_match_the_cores() -> None:
@@ -637,3 +638,28 @@ async def test_a_wrapped_leave_tool_ends_the_callers_own_subscription_with_those
     assert reqs[0]["arguments"] == {"table": "t1"}
     assert (reqs[0]["call"]["user"], reqs[0]["call"]["session"], reqs[0]["call"]["tool"]) == ("u1", "wsc_abc", "leave")
     assert "session" not in reqs[1]["call"]
+
+
+async def test_the_mcp_events_wire_format_is_every_sdks() -> None:
+    """mcp-events-wire.json (with the Go and Node SDKs): the wire format every
+    SDK serves a draft client, both sides of each events/subscribe and
+    events/poll."""
+    g = golden_file("mcp-events-wire.json")
+    assert g["revision"] == wspec.REVISION
+    assert g["delivery"] == list(wspec.DELIVERY)
+    for kind in ("subscribe", "poll"):
+        for c in g[kind]:
+            core = FakeCore(default_ok=True)
+            core.on("POST", f"/events/{kind}", lambda b, out=c["core_response"]: (200, out))
+            wake, _ = fake_wake(core)
+            chat_event(wake)
+            server = MCPServer("chat")
+            wake.attach(server, identify=lambda ctx: Identity(user="u1"))
+            async with served(server, stateless=False) as (_, rpc):
+                await initialize(rpc, "some-draft-client")
+                res = await rpc(f"events/{kind}", c["params"])
+            assert res.get("result") == c["result"], (kind, c["name"], res)
+            body = dict(core.bodies(f"/events/{kind}")[0])
+            assert body.pop("call")["user"] == "u1", (kind, c["name"])
+            body.pop("dialect", None)
+            assert body == c["core_request"], (kind, c["name"], body)

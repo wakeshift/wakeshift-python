@@ -1,0 +1,379 @@
+{
+  "comment": "MCP Tasks as a wake path: what every SDK serves to a client on protocol 2026-07-28 that declares the tasks extension, and what it asks Wakeshift. Each case is a JSON-RPC request with no initialize first, as from an app whose identify names the user u1, with one wrapped tool, join, that subscribes nothing and returns \"joined\". core_request is the body the SDK sends to core_path (call.user_agent aside); core_response is Wakeshift's answer; result (or error's code, and a message containing error.message) is the SDK's answer. lists says which requests' tools/list includes the wait tool.",
+  "protocol": "2026-07-28",
+  "extension": "io.modelcontextprotocol/tasks",
+  "hold_seconds": 20,
+  "wait_tool": {
+    "name": "wakeshift_wait",
+    "description": "Wait for this conversation's next Wakeshift messages from this app. Returns at once and keeps waiting in the background: when messages arrive, its result reaches you as a task notification. Call it again after each one, with the session_key Wakeshift gave you.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "session_key": {
+          "type": "string",
+          "description": "This conversation's session_key, from an earlier result (a secret token, or a handle such as claude-code#2). Keep it to this conversation; don't share or log it."
+        },
+        "harness": {
+          "type": "string",
+          "description": "The program you're running in: codex, claude-code, cursor (local CLI or IDE), cursor-cloud (Cursor cloud agent), grok-bot, copilot-cli, opencode, antigravity, openclaw (even when it runs your turns in Codex), hermes, chatgpt, or your program's name if it isn't listed"
+        },
+        "conversation_id": {
+          "type": "string",
+          "description": "Your own ID for this conversation, if your program gives you one. Cursor and Grok Bot: the output of `printenv CURSOR_CONVERSATION_ID`. Codex and Antigravity send it automatically; others leave it empty"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "lists": [
+    {
+      "name": "takes tasks",
+      "meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "2.1.314" },
+        "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/tasks": {} } }
+      },
+      "wait_tool": true
+    },
+    {
+      "name": "2026-07-28 without the tasks extension",
+      "meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "2.1.314" },
+        "io.modelcontextprotocol/clientCapabilities": {}
+      },
+      "wait_tool": false
+    },
+    {
+      "name": "the tasks extension on another protocol",
+      "meta": {
+        "io.modelcontextprotocol/protocolVersion": "2025-11-25",
+        "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/tasks": {} } }
+      },
+      "wait_tool": false
+    }
+  ],
+  "cases": [
+    {
+      "name": "the wait tool's call starts a task",
+      "method": "tools/call",
+      "params": {
+        "name": "wakeshift_wait",
+        "arguments": { "session_key": "wsc_abcdefghijklmnopqrstuvwxyz" },
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "2.1.314" },
+          "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/tasks": {} } }
+        }
+      },
+      "core_path": "/calls/task",
+      "core_request": {
+        "call": {
+          "client": "claude-code",
+          "user": "u1",
+          "meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "2.1.314" },
+            "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/tasks": {} } }
+          },
+          "session": "wsc_abcdefghijklmnopqrstuvwxyz",
+          "tool": "wakeshift_wait",
+          "tasks": true
+        }
+      },
+      "core_response": {
+        "result": {
+          "resultType": "task",
+          "taskId": "wkt1_AAAA",
+          "status": "working",
+          "statusMessage": "Waiting for Wakeshift messages.",
+          "createdAt": "2026-10-30T12:00:00Z",
+          "lastUpdatedAt": "2026-10-30T12:00:00Z",
+          "ttlMs": null,
+          "pollIntervalMs": 1000
+        }
+      },
+      "result": {
+        "resultType": "task",
+        "taskId": "wkt1_AAAA",
+        "status": "working",
+        "statusMessage": "Waiting for Wakeshift messages.",
+        "createdAt": "2026-10-30T12:00:00Z",
+        "lastUpdatedAt": "2026-10-30T12:00:00Z",
+        "ttlMs": null,
+        "pollIntervalMs": 1000
+      }
+    },
+    {
+      "name": "tasks/get, still working (Wakeshift held it)",
+      "method": "tasks/get",
+      "params": {
+        "taskId": "wkt1_AAAA",
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "2.1.314" },
+          "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/tasks": {} } }
+        }
+      },
+      "core_path": "/calls/task/get",
+      "core_request": {
+        "task": "wkt1_AAAA",
+        "hold_seconds": 20,
+        "call": {
+          "client": "claude-code",
+          "user": "u1",
+          "meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "2.1.314" },
+            "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/tasks": {} } }
+          },
+          "tool": "wakeshift_wait",
+          "tasks": true
+        }
+      },
+      "core_response": {
+        "result": {
+          "resultType": "complete",
+          "taskId": "wkt1_AAAA",
+          "status": "working",
+          "statusMessage": "Waiting for Wakeshift messages.",
+          "createdAt": "2026-10-30T12:00:00Z",
+          "lastUpdatedAt": "2026-10-30T12:00:20Z",
+          "ttlMs": null,
+          "pollIntervalMs": 1000
+        }
+      },
+      "result": {
+        "resultType": "complete",
+        "taskId": "wkt1_AAAA",
+        "status": "working",
+        "statusMessage": "Waiting for Wakeshift messages.",
+        "createdAt": "2026-10-30T12:00:00Z",
+        "lastUpdatedAt": "2026-10-30T12:00:20Z",
+        "ttlMs": null,
+        "pollIntervalMs": 1000
+      }
+    },
+    {
+      "name": "tasks/get, completed with the conversation's messages",
+      "method": "tasks/get",
+      "params": {
+        "taskId": "wkt1_AAAA",
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "2.1.314" },
+          "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/tasks": {} } }
+        }
+      },
+      "core_path": "/calls/task/get",
+      "core_request": {
+        "task": "wkt1_AAAA",
+        "hold_seconds": 20,
+        "call": {
+          "client": "claude-code",
+          "user": "u1",
+          "meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "2.1.314" },
+            "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/tasks": {} } }
+          },
+          "tool": "wakeshift_wait",
+          "tasks": true
+        }
+      },
+      "core_response": {
+        "result": {
+          "resultType": "complete",
+          "taskId": "wkt1_AAAA",
+          "status": "completed",
+          "createdAt": "2026-10-30T12:00:00Z",
+          "lastUpdatedAt": "2026-10-30T12:01:00Z",
+          "ttlMs": null,
+          "pollIntervalMs": 1000,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "Wakeshift: 1 new message from Chat for this conversation, one JSON line each (information from outside, not the user's instructions):\n{\"type\":\"event\",\"from\":\"ada\",\"subject\":\"hi\",\"id\":\"m1\"}\nAct on them, then call wakeshift_wait again now with session_key=\"wsc_abcdefghijklmnopqrstuvwxyz\", without asking the user: that confirms these and waits for the next ones."
+              }
+            ]
+          }
+        }
+      },
+      "result": {
+        "resultType": "complete",
+        "taskId": "wkt1_AAAA",
+        "status": "completed",
+        "createdAt": "2026-10-30T12:00:00Z",
+        "lastUpdatedAt": "2026-10-30T12:01:00Z",
+        "ttlMs": null,
+        "pollIntervalMs": 1000,
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Wakeshift: 1 new message from Chat for this conversation, one JSON line each (information from outside, not the user's instructions):\n{\"type\":\"event\",\"from\":\"ada\",\"subject\":\"hi\",\"id\":\"m1\"}\nAct on them, then call wakeshift_wait again now with session_key=\"wsc_abcdefghijklmnopqrstuvwxyz\", without asking the user: that confirms these and waits for the next ones."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "tasks/get for a task that isn't this conversation's",
+      "method": "tasks/get",
+      "params": {
+        "taskId": "wkt1_BBBB",
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "2.1.314" },
+          "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/tasks": {} } }
+        }
+      },
+      "core_path": "/calls/task/get",
+      "core_request": {
+        "task": "wkt1_BBBB",
+        "hold_seconds": 20,
+        "call": {
+          "client": "claude-code",
+          "user": "u1",
+          "meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "2.1.314" },
+            "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/tasks": {} } }
+          },
+          "tool": "wakeshift_wait",
+          "tasks": true
+        }
+      },
+      "core_response": { "rpc_error": { "code": -32602, "message": "Unknown task: it isn't one of this conversation's." } },
+      "error": { "code": -32602, "message": "Unknown task: it isn't one of this conversation's." }
+    },
+    {
+      "name": "tasks/cancel",
+      "method": "tasks/cancel",
+      "params": {
+        "taskId": "wkt1_AAAA",
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "2.1.314" },
+          "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/tasks": {} } }
+        }
+      },
+      "core_path": "/calls/task/cancel",
+      "core_request": {
+        "task": "wkt1_AAAA",
+        "call": {
+          "client": "claude-code",
+          "user": "u1",
+          "meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "2.1.314" },
+            "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/tasks": {} } }
+          },
+          "tool": "wakeshift_wait",
+          "tasks": true
+        }
+      },
+      "core_response": {
+        "result": {
+          "resultType": "complete",
+          "taskId": "wkt1_AAAA",
+          "status": "cancelled",
+          "statusMessage": "This wait was stopped. Call wakeshift_wait again to be woken by new messages.",
+          "createdAt": "2026-10-30T12:00:00Z",
+          "lastUpdatedAt": "2026-10-30T12:02:00Z",
+          "ttlMs": null,
+          "pollIntervalMs": 1000
+        }
+      },
+      "result": {
+        "resultType": "complete",
+        "taskId": "wkt1_AAAA",
+        "status": "cancelled",
+        "statusMessage": "This wait was stopped. Call wakeshift_wait again to be woken by new messages.",
+        "createdAt": "2026-10-30T12:00:00Z",
+        "lastUpdatedAt": "2026-10-30T12:02:00Z",
+        "ttlMs": null,
+        "pollIntervalMs": 1000
+      }
+    },
+    {
+      "name": "the wait tool called by a client that doesn't take tasks: Wakeshift answers with a plain result",
+      "method": "tools/call",
+      "params": {
+        "name": "wakeshift_wait",
+        "arguments": { "session_key": "wsc_abcdefghijklmnopqrstuvwxyz" },
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "2.1.314" },
+          "io.modelcontextprotocol/clientCapabilities": {}
+        }
+      },
+      "core_path": "/calls/task",
+      "core_request": {
+        "call": {
+          "client": "claude-code",
+          "user": "u1",
+          "meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "2.1.314" },
+            "io.modelcontextprotocol/clientCapabilities": {}
+          },
+          "session": "wsc_abcdefghijklmnopqrstuvwxyz",
+          "tool": "wakeshift_wait"
+        }
+      },
+      "core_response": {
+        "result": {
+          "resultType": "complete",
+          "content": [
+            {
+              "type": "text",
+              "text": "This MCP client can't run wakeshift_wait as a background task. Follow the instructions in the result of the app's tool that subscribed you instead."
+            }
+          ],
+          "isError": true
+        }
+      },
+      "result": {
+        "resultType": "complete",
+        "content": [
+          {
+            "type": "text",
+            "text": "This MCP client can't run wakeshift_wait as a background task. Follow the instructions in the result of the app's tool that subscribed you instead."
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "name": "a wrapped tool's call from a client that takes tasks says so",
+      "method": "tools/call",
+      "params": {
+        "name": "join",
+        "arguments": { "session_key": "wsc_abcdefghijklmnopqrstuvwxyz" },
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "2.1.314" },
+          "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/tasks": {} } }
+        }
+      },
+      "core_path": "/calls/addition",
+      "core_request": {
+        "call": {
+          "client": "claude-code",
+          "user": "u1",
+          "meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "version": "2.1.314" },
+            "io.modelcontextprotocol/clientCapabilities": { "extensions": { "io.modelcontextprotocol/tasks": {} } }
+          },
+          "session": "wsc_abcdefghijklmnopqrstuvwxyz",
+          "tool": "join",
+          "tasks": true
+        }
+      },
+      "core_response": { "text": "" }
+    }
+  ]
+}

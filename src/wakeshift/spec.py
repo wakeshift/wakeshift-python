@@ -9,8 +9,14 @@ import binascii
 from dataclasses import dataclass
 from typing import Literal
 
-#: The draft these follow.
-REVISION = "SEP-3415 (2026-10-16)"
+#: The draft these follow: SEP-3415 as revised on 2026-10-27. Where clients
+#: differ from it, Wakeshift follows the clients (webhook-id equals eventId;
+#: Mcp-Name checked only when present).
+REVISION = "SEP-3415 (2026-10-27)"
+
+#: The delivery modes Wakeshift offers for every event type (events/list's
+#: delivery): a webhook, or polls. Push (events/stream) isn't offered.
+DELIVERY = ("webhook", "poll")
 
 #: Capability keys: the draft's extension, and the top-level key ChatGPT reads. A server advertises both.
 EXTENSION_KEY = "io.modelcontextprotocol/events"

@@ -1,5 +1,5 @@
 {
-  "comment": "What a wrapped tool's reply looks like once Wakeshift's block is added (docs/subscribe-from-tools.md, \"The block, added automatically\"): result is what the handler returned (a string, or a CallToolResult), addition is /calls/addition's answer (the top-level one unless the case has its own), wake_output says the tool opted in to typed output, want is the reply. Every SDK's tests read it; Go's skips the string cases (its handlers return a CallToolResult).",
+  "comment": "What a wrapped tool's reply looks like once Wakeshift's block is added (docs/subscribe-from-tools.md, \"The block, added automatically\"): result is what the handler returned (a string, or a CallToolResult), addition is /calls/addition's answer (the top-level one unless the case has its own), want is the reply. A structured result (structuredContent an object) carries the block's text, without the beacon, in its wakeshift field, whether or not the tool's output type declares it. output_schemas is how tools/list gives a wrapped tool's output schema: an object schema gains an optional wakeshift string. Every SDK's tests read it; Go's skips the string cases (its handlers return a CallToolResult).",
   "addition": {
     "text": "Wakeshift: this conversation is woken by Monitor.",
     "trailer": "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: aaaaaaaaaa.bbbbbbbbbb.cccccccccc)",
@@ -110,7 +110,7 @@
       }
     },
     {
-      "name": "structuredContent passes through",
+      "name": "structuredContent: the block's text, without the beacon, in its wakeshift field too",
       "result": {
         "content": [
           {
@@ -138,7 +138,8 @@
           }
         ],
         "structuredContent": {
-          "table": "oak"
+          "table": "oak",
+          "wakeshift": "Wakeshift: this conversation is woken by Monitor."
         },
         "_meta": {
           "wakeshift/connector": "tok",
@@ -147,8 +148,45 @@
       }
     },
     {
-      "name": "typed output: the block's text, without the beacon, in structuredContent too",
-      "wake_output": true,
+      "name": "a plain value wrapped as structuredContent {result} gets the field too",
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Watching #eng."
+          }
+        ],
+        "structuredContent": {
+          "result": "Watching #eng."
+        }
+      },
+      "want": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Watching #eng."
+          },
+          {
+            "type": "text",
+            "text": "Wakeshift: this conversation is woken by Monitor."
+          },
+          {
+            "type": "text",
+            "text": "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: aaaaaaaaaa.bbbbbbbbbb.cccccccccc)"
+          }
+        ],
+        "structuredContent": {
+          "result": "Watching #eng.",
+          "wakeshift": "Wakeshift: this conversation is woken by Monitor."
+        },
+        "_meta": {
+          "wakeshift/connector": "tok",
+          "other": "x"
+        }
+      }
+    },
+    {
+      "name": "a wakeshift field of the result's own is replaced",
       "result": {
         "content": [
           {
@@ -157,7 +195,8 @@
           }
         ],
         "structuredContent": {
-          "table": "oak"
+          "table": "oak",
+          "wakeshift": "stale"
         }
       },
       "want": {
@@ -306,7 +345,6 @@
           "wakeshift/connector": "tok"
         }
       },
-      "wake_output": true,
       "result": {
         "content": [
           {
@@ -334,6 +372,75 @@
         },
         "_meta": {
           "wakeshift/connector": "tok"
+        }
+      }
+    }
+  ],
+  "output_schemas": [
+    {
+      "name": "an object schema gains an optional wakeshift string",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "table": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "table"
+        ],
+        "additionalProperties": false
+      },
+      "want": {
+        "type": "object",
+        "properties": {
+          "table": {
+            "type": "string"
+          },
+          "wakeshift": {
+            "type": "string",
+            "description": "What Wakeshift adds for this conversation: how it's woken by this app's events"
+          }
+        },
+        "required": [
+          "table"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "an object schema without properties",
+      "schema": {
+        "type": "object"
+      },
+      "want": {
+        "type": "object",
+        "properties": {
+          "wakeshift": {
+            "type": "string",
+            "description": "What Wakeshift adds for this conversation: how it's woken by this app's events"
+          }
+        }
+      }
+    },
+    {
+      "name": "a schema that names wakeshift is left as it is",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "wakeshift": {
+            "type": "string",
+            "description": "Mine."
+          }
+        }
+      },
+      "want": {
+        "type": "object",
+        "properties": {
+          "wakeshift": {
+            "type": "string",
+            "description": "Mine."
+          }
         }
       }
     }

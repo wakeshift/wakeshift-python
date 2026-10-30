@@ -2,7 +2,8 @@
   "events": [
     {
       "delivery": [
-        "webhook"
+        "webhook",
+        "poll"
       ],
       "description": "A new message in a channel.",
       "inputSchema": {
@@ -43,7 +44,8 @@
     },
     {
       "delivery": [
-        "webhook"
+        "webhook",
+        "poll"
       ],
       "description": "It's your move at a table.",
       "inputSchema": {
@@ -81,7 +83,8 @@
     },
     {
       "delivery": [
-        "webhook"
+        "webhook",
+        "poll"
       ],
       "description": "A CI run on a pull request finished.",
       "inputSchema": {

@@ -31,9 +31,11 @@ async def test_the_readmes_examples_run(monkeypatch: pytest.MonkeyPatch) -> None
     assert set(server._tool_manager.get_tool("join").parameters["properties"]) == {"table", *WAKE_ARGS}
     assert set(server._tool_manager.get_tool("watch").parameters["properties"]) == {"channel", *WAKE_ARGS}
     assert set(server._tool_manager.get_tool("leave").parameters["properties"]) == {"table", *WAKE_ARGS}
-    # sit's output (WakeOutput) carries the block's text too.
+    # sit's output (WakeOutput) carries the block's text too; watch, which
+    # returns str, replies with text only (no output schema).
     out_schema = server._tool_manager.get_tool("sit").output_schema
     assert out_schema is not None and "wakeshift" in out_schema["properties"]
+    assert server._tool_manager.get_tool("watch").output_schema is None
 
     # The handlers emit what the README says.
     core = FakeCore(default_ok=True)
@@ -76,6 +78,7 @@ async def test_the_readmes_examples_run(monkeypatch: pytest.MonkeyPatch) -> None
 
         watched = await call("watch", {"channel": "eng"})
         assert watched["content"][0]["text"] == "Watching #eng.\n\nWakeshift: woken by Monitor."
+        assert "structuredContent" not in watched
         sat = await call("sit", {"table": "oak"})
         assert sat["structuredContent"] == {"table": "oak", "players": 1, "wakeshift": "Wakeshift: woken by Monitor."}
         assert ns["seats"]["oak"] == [ns["Recipient"](user="cy", subscription="es_1")]

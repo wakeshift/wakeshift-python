@@ -345,4 +345,4 @@ def test_the_package_no_longer_exports_topics_or_the_old_subscribe() -> None:
         assert hasattr(wakeshift.WakeEvent, name), name
     for name in ("revoke_publish_url", "forget_user", "workspace", "add_agent", "check_agent", "attach", "define_event"):
         assert hasattr(wakeshift.Wakeshift, name), name
-    assert wakeshift.__version__ == "0.5.0"
+    assert wakeshift.__version__ == "0.5.2"

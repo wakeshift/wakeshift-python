@@ -54,7 +54,7 @@ from .spec import EXTENSION_KEY, TEXT_META
 from .spec import REVISION as EVENTS_REVISION
 from .toolcall import Attached, CallEnded, EventsOptions, Subscription, ToolCall, WakeOutput
 
-__version__ = "0.5.0"
+__version__ = "0.5.2"
 
 __all__ = [
     "BUILTIN_TOOLS",

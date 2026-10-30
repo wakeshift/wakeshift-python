@@ -149,6 +149,9 @@ class _Call:
     #: The tool being called: a connector beacon in its result names it, and
     #: Wakeshift's hooks act on the beacon only from that tool's result.
     tool: str | None = None
+    #: The client takes MCP tasks (protocol 2026-07-28 with the tasks
+    #: extension), and attach serves the wait tool for it (tasks.py).
+    tasks: bool = False
 
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {"client": self.client}
@@ -156,6 +159,8 @@ class _Call:
             v = getattr(self, k)
             if v:
                 out[k] = v
+        if self.tasks:
+            out["tasks"] = True
         return out
 
 
@@ -356,6 +361,7 @@ def _call_of(
     harness: str | None = None,
     conversation: str | None = None,
     tool: str | None = None,
+    tasks: bool = False,
 ) -> _Call:
     """Packs a tool call: tool is the name of the tool being called
     (Wakeshift's hooks act on a connector beacon only from that tool's result)."""
@@ -368,7 +374,27 @@ def _call_of(
         harness=(harness or "").strip() or None,
         conversation=(conversation or "").strip() or None,
         tool=(tool or "").strip() or None,
+        tasks=tasks,
     )
+
+
+TASKS_EXTENSION = "io.modelcontextprotocol/tasks"
+_MODERN = "2026-07-28"
+
+
+def _takes_tasks(meta: Mapping[str, Any] | None, headers: Mapping[str, str] | None = None) -> bool:
+    """Whether a request is protocol 2026-07-28 (its _meta or its
+    MCP-Protocol-Version header says) and declares the MCP tasks extension in
+    its own capabilities: a client that takes MCP tasks (tasks.py)."""
+    meta = meta or {}
+    version = meta.get("io.modelcontextprotocol/protocolVersion")
+    if version is None and headers:
+        version = headers.get("mcp-protocol-version")
+    if version != _MODERN:
+        return False
+    caps = meta.get("io.modelcontextprotocol/clientCapabilities")
+    ext = caps.get("extensions") if isinstance(caps, Mapping) else None
+    return isinstance(ext, Mapping) and TASKS_EXTENSION in ext
 
 
 def _call(ctx: Any, *, user: str | None, args: Mapping[str, Any] | None, tool: str, client: str | None = None) -> _Call:
@@ -386,6 +412,7 @@ def _call(ctx: Any, *, user: str | None, args: Mapping[str, Any] | None, tool: s
         harness=_arg(args, HARNESS_ARG),
         conversation=_arg(args, CONVERSATION_ARG),
         tool=tool,
+        tasks=_takes_tasks(meta, headers),
     )
 
 
@@ -655,10 +682,11 @@ class Wakeshift:
             ended=_recipients_of(out.get("ended")),
         )
 
-    async def _request_app(self, method: str, path: str, body: Any = None) -> dict[str, Any]:
-        """A call to the app API, after the manifest with the defined events is published."""
+    async def _request_app(self, method: str, path: str, body: Any = None, *, timeout: float | None = None) -> dict[str, Any]:
+        """A call to the app API, after the manifest with the defined events is
+        published. timeout: a longer one for this request (a held tasks/get)."""
         await self._ensure_events()
-        return await self._request(method, path, body)
+        return await self._request(method, path, body, timeout=timeout)
 
     # ── Users' workspaces ──────────────────────────────────────────────────
 
@@ -681,35 +709,38 @@ class Wakeshift:
 
     # ── HTTP ───────────────────────────────────────────────────────────────
 
-    async def _send(self, method: str, url: str, **kw: Any) -> tuple[httpx.Response, str]:
+    async def _send(self, method: str, url: str, *, timeout: float | None = None, **kw: Any) -> tuple[httpx.Response, str]:
         # A request the load balancer refused during a rollout is sent again (retry.py).
+        limit = max(timeout or 0, self._timeout)
         try:
             if self._http is not None:
-                return await self._send_with(self._http, method, url, **kw)
-            async with httpx.AsyncClient(timeout=self._timeout) as h:
-                return await self._send_with(h, method, url, **kw)
+                return await self._send_with(self._http, method, url, limit, **kw)
+            async with httpx.AsyncClient(timeout=limit) as h:
+                return await self._send_with(h, method, url, limit, **kw)
         except httpx.TimeoutException as err:
-            raise self._unreachable(f"no answer within {self._timeout:g}s") from err
+            raise self._unreachable(f"no answer within {limit:g}s") from err
         except httpx.HTTPError as err:
             raise self._unreachable(str(err) or type(err).__name__) from err
 
-    async def _send_with(self, h: httpx.AsyncClient, method: str, url: str, **kw: Any) -> tuple[httpx.Response, str]:
+    async def _send_with(
+        self, h: httpx.AsyncClient, method: str, url: str, timeout: float, **kw: Any
+    ) -> tuple[httpx.Response, str]:
         attempt = 0
         while True:
-            resp = await h.request(method, url, timeout=self._timeout, **kw)
+            resp = await h.request(method, url, timeout=timeout, **kw)
             text = resp.text
             if attempt >= len(self._retry_pauses) or not refused(method, resp):
                 return resp, text
             await asyncio.sleep(self._retry_pauses[attempt])
             attempt += 1
 
-    async def _request(self, method: str, path: str, body: Any = None) -> dict[str, Any]:
+    async def _request(self, method: str, path: str, body: Any = None, *, timeout: float | None = None) -> dict[str, Any]:
         headers = {"Authorization": "Bearer " + self._assertion()}
         kw: dict[str, Any] = {"headers": headers}
         if body is not None:
             headers["Content-Type"] = "application/json"
             kw["content"] = json.dumps(body)
-        resp, text = await self._send(method, self.core + "/api/apps/v1" + path, **kw)
+        resp, text = await self._send(method, self.core + "/api/apps/v1" + path, timeout=timeout, **kw)
         try:
             data = json.loads(text) if text else None
         except ValueError:

@@ -13,7 +13,7 @@ import httpx
 import pytest
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.shared.exceptions import MCPError
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from wakeshift import (
     BUILTIN_TOOLS,
@@ -32,7 +32,7 @@ from wakeshift import (
     is_code,
 )
 from wakeshift.client import SESSION_DESCRIPTION
-from wakeshift.toolcall import CONVERSATION_META, conversation_key, merge_block
+from wakeshift.toolcall import CONVERSATION_META, conversation_key, merge_block, with_wakeshift_field
 
 from .helpers import app_key, golden_file, served
 
@@ -666,19 +666,91 @@ async def test_typed_output() -> None:
         await call.subscribe(w.shared, {"table": table})
         return View(table=table)
 
-    @w.attached.tool()
-    async def join_plain(table: str, call: ToolCall) -> PlainView:
-        await call.subscribe(w.shared, {"table": table})
-        return PlainView(table=table)
-
     async with w.served() as (_, rpc):
         res = await call_tool(rpc, "join", {"table": "oak"})
         assert res["result"]["structuredContent"] == {"table": "oak", "wakeshift": WOKEN}
         t = texts(res)
         assert len(t) == 3 and t[1] == WOKEN and t[2] == TRAILER
-        res = await call_tool(rpc, "join_plain", {"table": "elm"})
-        assert res["result"]["structuredContent"] == {"table": "elm"} and len(texts(res)) == 3
-    assert any("WakeOutput" in m for m in w.warnings)
+    assert not w.warnings
+
+
+class StrictView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    table: str
+
+
+async def test_structured_output_carries_the_block() -> None:
+    """Any structured result of a wrapped tool carries the block in
+    wakeshift, without opting in, and tools/list's output schema names it,
+    so a client that checks structuredContent against the schema takes it."""
+    w = Wrapped()
+
+    @w.attached.tool()
+    async def join_plain(table: str, call: ToolCall) -> PlainView:
+        await call.subscribe(w.shared, {"table": table})
+        return PlainView(table=table)
+
+    @w.attached.tool()
+    async def join_strict(table: str, call: ToolCall) -> StrictView:
+        await call.subscribe(w.shared, {"table": table})
+        return StrictView(table=table)
+
+    @w.attached.tool()
+    async def seats(table: str, call: ToolCall) -> list[str]:
+        await call.subscribe(w.shared, {"table": table})
+        return ["ada", "bo"]
+
+    @w.server.tool()
+    async def unwrapped(table: str) -> PlainView:
+        return PlainView(table=table)
+
+    async with w.served() as (_, rpc):
+        listed = {t["name"]: t for t in (await rpc("tools/list", {}))["result"]["tools"]}
+        for name in ("join_plain", "join_strict", "seats"):
+            res = await call_tool(rpc, name, {"table": "oak"})
+            assert res["result"]["structuredContent"]["wakeshift"] == WOKEN, name
+            assert texts(res)[-2:] == [WOKEN, TRAILER], name
+            assert listed[name]["outputSchema"]["properties"]["wakeshift"]["type"] == "string", name
+        assert res["result"]["structuredContent"] == {"result": ["ada", "bo"], "wakeshift": WOKEN}
+        assert listed["join_strict"]["outputSchema"]["additionalProperties"] is False
+        assert "wakeshift" not in listed["join_strict"]["outputSchema"].get("required", [])
+        # A tool that isn't wrapped gets no block, and its schema is its own.
+        assert "wakeshift" not in listed["unwrapped"]["outputSchema"]["properties"]
+    # The registered schema itself is left alone.
+    assert "wakeshift" not in w.server._tool_manager.get_tool("join_plain").output_schema["properties"]
+    assert not w.warnings
+
+
+async def test_str_tool_replies_with_text() -> None:
+    """A wrapped tool returning str has no output schema and replies with
+    text only, the block in it, so a host that shows structuredContent
+    instead of the text can't miss the block. structured_output=True keeps
+    MCPServer's {"result": …}, which carries the block too."""
+    w = Wrapped()
+
+    @w.attached.tool()
+    async def watch(table: str, call: ToolCall) -> str:
+        await call.subscribe(w.shared, {"table": table})
+        return f"Watching {table}."
+
+    @w.attached.tool(structured_output=True)
+    async def watch_structured(table: str, call: ToolCall) -> str:
+        await call.subscribe(w.shared, {"table": table})
+        return f"Watching {table}."
+
+    async with w.served() as (_, rpc):
+        listed = {t["name"]: t for t in (await rpc("tools/list", {}))["result"]["tools"]}
+        assert listed["watch"].get("outputSchema") is None
+        res = await call_tool(rpc, "watch", {"table": "oak"})
+        assert res["result"].get("structuredContent") is None
+        assert texts(res) == [f"Watching oak.\n\n{WOKEN}\n\n{TRAILER}"]
+        assert "wakeshift" in listed["watch_structured"]["outputSchema"]["properties"]
+        res = await call_tool(rpc, "watch_structured", {"table": "oak"})
+        assert not res["result"].get("isError"), res
+        assert res["result"]["structuredContent"] == {"result": "Watching oak.", "wakeshift": WOKEN}
+    # Neither call was refused or rolled back.
+    assert w.core.bodies("/event-subscriptions/unsubscribe") == []
+    assert not w.warnings
 
 
 async def test_no_session_alias() -> None:
@@ -706,15 +778,12 @@ def test_wrapped_block_golden() -> None:
         add = c.get("addition", f["addition"])
         string = isinstance(c["result"], str)
         result = {"content": [{"type": "text", "text": c["result"]}]} if string else c["result"]
-        got = merge_block(
-            result,
-            add.get("text", ""),
-            add.get("trailer", ""),
-            add.get("meta"),
-            string=string,
-            wake_output=bool(c.get("wake_output")),
-        )
+        got = merge_block(result, add.get("text", ""), add.get("trailer", ""), add.get("meta"), string=string)
         assert got == c["want"], c["name"]
+    for c in f["output_schemas"]:
+        before = json.dumps(c["schema"], sort_keys=True)
+        assert with_wakeshift_field(c["schema"]) == c["want"], c["name"]
+        assert json.dumps(c["schema"], sort_keys=True) == before, c["name"]
 
 
 def _recipient(v: Any) -> Recipient:
