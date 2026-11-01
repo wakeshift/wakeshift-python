@@ -276,7 +276,11 @@ async def test_bridged_clients_get_subscribe_events_every_client_gets_unsubscrib
         ),
     )
     core.on("POST", "/event-subscriptions/end", lambda b: (200, {"ended": True}))
-    core.on("POST", "/event-subscriptions/unsubscribe", lambda b: (200, {"ended": True}))
+    core.on(
+        "POST",
+        "/event-subscriptions/unsubscribe",
+        lambda b: (200, {"ended": True, "addition": {"text": "Keep passing session_key."}}),
+    )
     wake, _ = fake_wake(core)
     chat_event(wake)
     turn_event(wake)
@@ -336,7 +340,8 @@ async def test_bridged_clients_get_subscribe_events_every_client_gets_unsubscrib
         un = await rpc(
             "tools/call", {"name": "unsubscribe_events", "arguments": {"event": "chat.message", "arguments": {"channel": "eng"}}}
         )
-        assert "Stopped chat.message" in text_of(un)
+        # Wakeshift's addition (the session key stays the same) follows the reply.
+        assert text_of(un) == 'Stopped chat.message {"channel":"eng"}.\n\nKeep passing session_key.'
 
 
 class RunArgs(BaseModel):

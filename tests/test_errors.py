@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from wakeshift import Wakeshift, WakeshiftError
@@ -20,14 +20,14 @@ GOLDEN = golden_file("errors.json")
 CORE = "http://core.test"
 
 
-def response(a: dict[str, Any]) -> httpx.Response:
+def response(a: dict[str, Any]) -> httpx2.Response:
     headers = {"Content-Type": a["content_type"]} if a["content_type"] else {}
-    return httpx.Response(a["status"], headers=headers, content=a["body"].encode())
+    return httpx2.Response(a["status"], headers=headers, content=a["body"].encode())
 
 
 async def error_for(a: dict[str, Any]) -> BaseException:
     """The error a forget_user (a POST, so nothing here is retried) gets for an answer."""
-    wake = Wakeshift(app_key(), core=CORE, http=httpx.AsyncClient(transport=httpx.MockTransport(lambda r: response(a))))
+    wake = Wakeshift(app_key(), core=CORE, http=httpx2.AsyncClient(transport=httpx2.MockTransport(lambda r: response(a))))
     with pytest.raises(WakeshiftError) as e:
         await wake.forget_user("ada")
     return e.value
@@ -63,10 +63,10 @@ async def test_a_2xx_without_a_json_object(case: dict[str, Any]) -> None:
 
 
 async def test_a_core_that_doesnt_answer_is_unreachable() -> None:
-    def down(r: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection refused")
+    def down(r: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("connection refused")
 
-    wake = Wakeshift(app_key(), core=CORE, http=httpx.AsyncClient(transport=httpx.MockTransport(down)))
+    wake = Wakeshift(app_key(), core=CORE, http=httpx2.AsyncClient(transport=httpx2.MockTransport(down)))
     with pytest.raises(WakeshiftError) as e:
         await wake.forget_user("ada")
     u = GOLDEN["unreachable"]

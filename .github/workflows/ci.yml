@@ -27,4 +27,6 @@ jobs:
       # The oldest Python it supports, and the newest.
       - run: uv run --locked --python 3.11 --isolated pytest -q
       - run: uv run --locked --python 3.14 --isolated pytest -q
+      # The same suite with attach on FastMCP 4 instead of MCPServer.
+      - run: WAKESHIFT_TEST_SERVER=fastmcp uv run --locked pytest -q
       - run: uv build

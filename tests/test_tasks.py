@@ -133,3 +133,24 @@ async def test_other_task_ids_are_not_wakeshifts() -> None:
             with contextlib.suppress(AssertionError):
                 await rpc(method, {"taskId": "app-own-task", "_meta": G["lists"][0]["meta"]}, headers=modern(method))
     assert not any("/calls/task" in path for _, path, _ in core.requests), core.requests
+
+
+async def test_a_public_tools_list_cache_scope_becomes_private() -> None:
+    """tools/list differs by what each request declares (the wait tool,
+    subscribe_events), so attach makes a public cache scope the server set
+    private, and leaves its ttlMs and server/discover's scope alone. On the
+    official MCPServer here; test_fastmcp.py checks FastMCP's cache_scope."""
+    from mcp.server.caching import CacheHint
+    from mcp.server.mcpserver import MCPServer as OfficialMCPServer
+
+    wake, _ = fake_wake(FakeCore(default_ok=True))
+    wake.define_event("chat.message", description="A new message", args=_Chat, payload=_Msg, text=lambda m: m.text)
+    hint = CacheHint(ttl_ms=60_000, scope="public")
+    server = OfficialMCPServer("chat", cache_hints={"tools/list": hint, "server/discover": hint})
+    wake.attach(server)
+    meta = G["lists"][0]["meta"]
+    async with served(server) as (_, rpc):
+        listed = (await rpc("tools/list", {"_meta": meta}, headers=modern("tools/list")))["result"]
+        assert listed["ttlMs"] == 60_000 and listed["cacheScope"] == "private"
+        d = (await rpc("server/discover", {"_meta": meta}, headers=modern("server/discover")))["result"]
+        assert d["ttlMs"] == 60_000 and d["cacheScope"] == "public"

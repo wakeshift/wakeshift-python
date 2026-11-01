@@ -2,6 +2,19 @@
 
 What changed in each release of `wakeshift`. 0.4.0 is the first published release: to start with it, read the [README](README.md). Its notes below, and the earlier releases', are for apps that ran the preview builds.
 
+## 0.6.0 (2026-11-01)
+
+### Added
+
+- **FastMCP 4.** `wake.attach` takes a FastMCP server (`fastmcp.FastMCP`, 4.1 or later) as it takes an `MCPServer`, with the same calls and the same behavior: native events, the built-in tools, the wait tool for clients that take MCP tasks, and `@attached.tool()`, which registers a FastMCP tool with its options, `Context` parameter and dependencies. Your FastMCP middleware sees a tool's result before Wakeshift adds to it. `wakeshift.fastmcp.identify_by_claim` names the user by a claim of FastMCP's access token. Install with `pip install 'wakeshift[fastmcp]'`. A wrapped tool's structured result is checked against its output schema, as on `MCPServer`, so a result a client would refuse fails the call and ends its subscriptions. Attach the server you run: one mounted on another refuses its wrapped tools and warns. FastMCP 2.x and 3.x, built on `mcp` 1.x, are refused with a `TypeError`.
+- **The MCP SDK's low-level `Server`.** `wake.attach` takes a `mcp.server.lowlevel.Server` too, after its handlers are set: it serves native events and the wait tool, and adds its own tools to your `tools/list` and `tools/call` handlers. Your `on_call_tool` handler subscribes with `attached.call(ctx)`, which returns the call's `ToolCall`; the reply gets Wakeshift's block, and a call that raises or returns `isError` ends what it subscribed. `wrapped_tool(tool)` adds `session_key`, `harness` and `conversation_id` to a tool's input schema, and `wakeshift` to its output schema. `attached.call(ctx)` works in a tool attach didn't register on `MCPServer` or FastMCP too.
+
+### Changed
+
+- **One HTTP stack: `httpx2`, as `mcp` 2.x uses.** The SDK talked to Wakeshift through `httpx` while `mcp` itself uses `httpx2`, so every install carried both. It now uses `httpx2` (2.10 or later), and installs three fewer packages (`httpx`, `httpcore`, `certifi`). If you pass your own client as `Wakeshift(http=…)`, make it an `httpx2.AsyncClient`. TLS certificates are now checked against your operating system's certificate store (on macOS and Windows through `truststore`, on Linux the system's CA bundle), or `SSL_CERT_FILE` / `SSL_CERT_DIR` if you set them, not `certifi`'s bundle: a CA your OS trusts, such as a corporate or local one, now works with nothing to configure.
+- **`pydantic` 2.12 or later**, the version `mcp` 2.x already requires.
+- **`tools/list` is cached per client.** `attach` changes `tools/list` by what each request declares (the wait tool, `subscribe_events`), so a `cacheScope` of `public` your server set (`cache_hints` on `MCPServer`, `cache_scope` on FastMCP) is answered as `private`. `ttlMs`, and every other result's hints, are unchanged.
+
 ## 0.5.2 (2026-10-30)
 
 ### Added

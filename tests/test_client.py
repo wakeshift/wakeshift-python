@@ -8,7 +8,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from cryptography.exceptions import InvalidSignature
 from mcp.server.mcpserver import MCPServer
@@ -91,16 +91,16 @@ class Core:
         self.reply = reply
         self.sent: list[dict[str, Any]] = []
 
-    def __call__(self, request: httpx.Request) -> httpx.Response:
+    def __call__(self, request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content) if request.content else None
         self.sent.append(
             {"method": request.method, "url": str(request.url), "auth": request.headers.get("authorization", ""), "body": body}
         )
         status, out = self.reply(request.url.raw_path.decode().split("?")[0], body)
-        return httpx.Response(status, json=out)
+        return httpx2.Response(status, json=out)
 
     def wake(self, **kw: Any) -> Wakeshift:
-        return Wakeshift(KEY, core="http://core.test", http=httpx.AsyncClient(transport=httpx.MockTransport(self)), **kw)
+        return Wakeshift(KEY, core="http://core.test", http=httpx2.AsyncClient(transport=httpx2.MockTransport(self)), **kw)
 
 
 def test_the_core_url_given_else_wakeshift_core_else_production_except_for_a_test_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -174,8 +174,8 @@ async def test_errors_carry_the_apis_code() -> None:
 
 @pytest.mark.parametrize("body", ["", "<html>ok</html>", "null", "42"])
 async def test_a_2xx_without_a_json_object_is_a_wakeshift_error(body: str) -> None:
-    http = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda r: httpx.Response(200, text=body, headers={"Content-Type": "text/html"}))
+    http = httpx2.AsyncClient(
+        transport=httpx2.MockTransport(lambda r: httpx2.Response(200, text=body, headers={"Content-Type": "text/html"}))
     )
     wake = Wakeshift(KEY, core="http://core.test", http=http)
     with pytest.raises(WakeshiftError) as e:
@@ -185,22 +185,22 @@ async def test_a_2xx_without_a_json_object_is_a_wakeshift_error(body: str) -> No
 
 
 async def test_a_core_that_doesnt_answer_the_error_names_it() -> None:
-    def refused(r: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection refused")
+    def refused(r: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("connection refused")
 
-    wake = Wakeshift(KEY, core="http://127.0.0.1:9", http=httpx.AsyncClient(transport=httpx.MockTransport(refused)))
+    wake = Wakeshift(KEY, core="http://127.0.0.1:9", http=httpx2.AsyncClient(transport=httpx2.MockTransport(refused)))
     with pytest.raises(WakeshiftError) as e:
         await wake.forget_user("ada")
     assert (e.value.code, e.value.status) == ("unreachable", 0)
     assert str(e.value).startswith(
         "wakeshift: can't reach Wakeshift at http://127.0.0.1:9 (connection refused). Check that WAKESHIFT_CORE"
     )
-    assert isinstance(e.value.__cause__, httpx.ConnectError)
+    assert isinstance(e.value.__cause__, httpx2.ConnectError)
 
-    def slow(r: httpx.Request) -> httpx.Response:
-        raise httpx.ReadTimeout("timed out")
+    def slow(r: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ReadTimeout("timed out")
 
-    wake2 = Wakeshift(KEY, core="http://core.test", http=httpx.AsyncClient(transport=httpx.MockTransport(slow)), timeout=0.02)
+    wake2 = Wakeshift(KEY, core="http://core.test", http=httpx2.AsyncClient(transport=httpx2.MockTransport(slow)), timeout=0.02)
     with pytest.raises(WakeshiftError, match=r"can't reach Wakeshift at http://core\.test \(no answer within 0\.02s\)"):
         await wake2.workspace("ada", "Ada")
 
@@ -345,4 +345,4 @@ def test_the_package_no_longer_exports_topics_or_the_old_subscribe() -> None:
         assert hasattr(wakeshift.WakeEvent, name), name
     for name in ("revoke_publish_url", "forget_user", "workspace", "add_agent", "check_agent", "attach", "define_event"):
         assert hasattr(wakeshift.Wakeshift, name), name
-    assert wakeshift.__version__ == "0.5.2"
+    assert wakeshift.__version__ == "0.6.0"

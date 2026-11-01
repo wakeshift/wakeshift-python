@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel
@@ -240,7 +240,7 @@ async def test_events_defined_served_emitted_bridged_and_native() -> None:
 
             # An event's publish URL: a POST's body is the payload, checked against
             # the schema; a personal event's goes to the one subscriber it's for.
-            async with httpx.AsyncClient() as web:
+            async with httpx2.AsyncClient() as web:
                 build_url = await build.publish_url({"repo": "acme"})
                 assert build_url.event == "ci.build" and build_url.url.startswith(core + "/v1/publish/")
                 posted = await web.post(build_url.url, json={"conclusion": "success", "url": "https://ci.example/2"})
@@ -501,3 +501,118 @@ async def test_wrapped_tools_against_a_real_core() -> None:
         assert got.matched == 1 and got.ended == [Recipient(user="dee", subscription=dee.id)], got
         got = await turn.emit({"table": "oak"}, {"to_call": "10"}, to=to, id="py-hand-2")
         assert got.duplicate and len(got.ended) == 1, got
+
+
+async def test_fastmcp_against_a_real_core() -> None:
+    """attach on a FastMCP 4 app (wakeshift[fastmcp]), served as FastMCP
+    serves it (http_app, stateless), with FastMCP's own bearer auth naming
+    the user: a protocol 2026-07-28 client that takes MCP tasks (Claude
+    Code's task path) discovers the server, lists the tools, gets the block
+    from a wrapped tool returning str, and is woken through wakeshift_wait
+    and tasks/get by an emit; an older client is woken through its Monitor."""
+    pytest.importorskip("fastmcp")
+    from fastmcp import FastMCP
+    from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+
+    from wakeshift.fastmcp import identify_by_claim
+    from wakeshift.tasks import TASKS_EXTENSION, WAIT_TOOL
+
+    core, key = harness()
+    wake = Wakeshift(key, core=core)
+    builds = wake.define_event(
+        "fastmcp.build",
+        description="A build of one of your repos finished",
+        args=Repo,
+        payload=Build,
+        text=lambda b, a: f"CI {b.conclusion} on {a.repo}",
+        personal=True,
+    )
+    tokens = {f"tok-{u}": {"client_id": "cli", "scopes": [], "sub": f"fm-{u}"} for u in ("ada", "bo")}
+    mcp = FastMCP("ci-bot", auth=StaticTokenVerifier(tokens=tokens))
+    attached = wake.attach(mcp, identify=identify_by_claim("sub"))
+
+    @attached.tool()
+    async def watch(repo: str, call: ToolCall) -> str:
+        """Wake me when a build of a repo finishes."""
+        await call.subscribe(builds, {"repo": repo})
+        return f"Watching {repo}."
+
+    app = mcp.http_app(path="/mcp", stateless_http=True, json_response=True)
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "claude-code", "version": "2.1.314"},
+        "io.modelcontextprotocol/clientCapabilities": {"extensions": {TASKS_EXTENSION: {}}},
+    }
+
+    def modern(method: str, name: str | None = None) -> dict[str, str]:
+        h = {"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": method, "User-Agent": "claude-code/2.1.314"}
+        if name:
+            h["Mcp-Name"] = name
+        return h
+
+    monitor: Lines | None = None
+    async with app.router.lifespan_context(app):
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1:8000") as client:
+            ada = Rpc(client, "/mcp", headers={"Authorization": "Bearer tok-ada"})
+            d = await ada("server/discover", {"_meta": meta}, headers=modern("server/discover"))
+            assert "result" in d, d
+            r = d["result"]
+            assert r["resultType"] == "complete" and "2026-07-28" in r["supportedVersions"]
+            assert isinstance(r["ttlMs"], int) and r["cacheScope"] in ("public", "private")
+            assert r["capabilities"]["events"] == {"listChanged": False}
+            assert TASKS_EXTENSION in r["capabilities"]["extensions"]
+
+            listed = (await ada("tools/list", {"_meta": meta}, headers=modern("tools/list")))["result"]
+            assert listed["resultType"] == "complete" and isinstance(listed["ttlMs"], int)
+            assert listed["cacheScope"] == "private"
+            tools = {t["name"]: t for t in listed["tools"]}
+            assert {"watch", "subscribe_events", "unsubscribe_events", "list_subscriptions", WAIT_TOOL} <= set(tools)
+            assert set(tools["watch"]["inputSchema"]["properties"]) == {"repo", "session_key", "harness", "conversation_id"}
+            assert "outputSchema" not in tools["watch"]
+
+            res = await ada(
+                "tools/call",
+                {"name": "watch", "arguments": {"repo": "acme"}, "_meta": meta},
+                headers=modern("tools/call", "watch"),
+            )
+            assert "structuredContent" not in res["result"], res
+            text = text_of(res)
+            assert text.startswith("Watching acme.\n\n") and WAIT_TOOL in text, text
+            session = re.search(r"wsc_[a-z2-7]+", text)
+            assert session, text
+            assert (await builds.status({"repo": "acme"}, to="fm-ada")).subscriptions == 1
+
+            wait = await ada(
+                "tools/call",
+                {"name": WAIT_TOOL, "arguments": {"session_key": session.group(0)}, "_meta": meta},
+                headers=modern("tools/call", WAIT_TOOL),
+            )
+            task = wait["result"]
+            assert task["resultType"] == "task" and task["taskId"].startswith("wkt1_"), wait
+            got = await builds.emit({"repo": "acme"}, {"conclusion": "failure", "url": "https://ci.example/9"}, to="fm-ada")
+            assert got.matched == 1, got
+            done: dict[str, Any] = {}
+            for _ in range(3):  # each tasks/get is held until a message arrives (or 20 seconds)
+                done = (
+                    await ada(
+                        "tasks/get",
+                        {"taskId": task["taskId"], "_meta": meta},
+                        headers=modern("tasks/get", task["taskId"]),
+                    )
+                )["result"]
+                if done["status"] != "working":
+                    break
+            assert done["status"] == "completed", done
+            assert "CI failure on acme" in json.dumps(done["result"]), done
+
+            # An older client (no 2026-07-28, no tasks): its Monitor wakes it.
+            bo = Rpc(client, "/mcp", headers={"Authorization": "Bearer tok-bo", "User-Agent": "claude-code/2.1.280"})
+            await initialize(bo, "claude-code")
+            res = await bo("tools/call", {"name": "watch", "arguments": {"repo": "acme"}})
+            try:
+                monitor = Lines(monitor_of(res))
+                await builds.emit({"repo": "acme"}, {"conclusion": "success", "url": "https://ci.example/10"}, to="fm-bo")
+                await monitor.expect("CI success on acme")
+            finally:
+                if monitor is not None:
+                    monitor.stop()

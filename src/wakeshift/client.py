@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 from urllib.parse import quote
 
-import httpx
+import httpx2
 from mcp_types import CallToolResult, TextContent
 
 from .errors import WakeshiftError
@@ -428,7 +428,7 @@ class Wakeshift:
         core: str | None = None,
         timeout: float = 20.0,
         on_warning: Callable[[str], None] | None = None,
-        http: httpx.AsyncClient | None = None,
+        http: httpx2.AsyncClient | None = None,
     ) -> None:
         if not key:
             raise ValueError("wakeshift: no app key (WAKESHIFT_KEY?)")
@@ -609,8 +609,10 @@ class Wakeshift:
         tools: Sequence[str] | None = None,
         events: EventsOptions | None = None,
     ) -> Attached:
-        """Attaches Wakeshift to an MCPServer, before you run it: the one call
-        that connects the two. Today it serves the defined events: MCP Events
+        """Attaches Wakeshift to an MCPServer, a low-level Server
+        (mcp.server.lowlevel.Server, after its handlers are set; its
+        on_call_tool subscribes with ``attached.call(ctx)``) or a FastMCP 4
+        server, before you run it: the one call that connects the two. Today it serves the defined events: MCP Events
         (events/list, events/subscribe, events/unsubscribe) for clients that
         speak it, such as ChatGPT, and the subscribe_events tool for everyone
         else; plus unsubscribe_events and list_subscriptions for every client.
@@ -709,22 +711,22 @@ class Wakeshift:
 
     # ── HTTP ───────────────────────────────────────────────────────────────
 
-    async def _send(self, method: str, url: str, *, timeout: float | None = None, **kw: Any) -> tuple[httpx.Response, str]:
+    async def _send(self, method: str, url: str, *, timeout: float | None = None, **kw: Any) -> tuple[httpx2.Response, str]:
         # A request the load balancer refused during a rollout is sent again (retry.py).
         limit = max(timeout or 0, self._timeout)
         try:
             if self._http is not None:
                 return await self._send_with(self._http, method, url, limit, **kw)
-            async with httpx.AsyncClient(timeout=limit) as h:
+            async with httpx2.AsyncClient(timeout=limit) as h:
                 return await self._send_with(h, method, url, limit, **kw)
-        except httpx.TimeoutException as err:
+        except httpx2.TimeoutException as err:
             raise self._unreachable(f"no answer within {limit:g}s") from err
-        except httpx.HTTPError as err:
+        except httpx2.HTTPError as err:
             raise self._unreachable(str(err) or type(err).__name__) from err
 
     async def _send_with(
-        self, h: httpx.AsyncClient, method: str, url: str, timeout: float, **kw: Any
-    ) -> tuple[httpx.Response, str]:
+        self, h: httpx2.AsyncClient, method: str, url: str, timeout: float, **kw: Any
+    ) -> tuple[httpx2.Response, str]:
         attempt = 0
         while True:
             resp = await h.request(method, url, timeout=timeout, **kw)

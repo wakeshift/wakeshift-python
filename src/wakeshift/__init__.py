@@ -52,9 +52,9 @@ from .harness import harness_agent
 from .key import AppKey, parse_key, sign_assertion
 from .spec import EXTENSION_KEY, TEXT_META
 from .spec import REVISION as EVENTS_REVISION
-from .toolcall import Attached, CallEnded, EventsOptions, Subscription, ToolCall, WakeOutput
+from .toolcall import Attached, CallEnded, EventsOptions, Subscription, ToolCall, WakeOutput, wrapped_tool
 
-__version__ = "0.5.2"
+__version__ = "0.6.0"
 
 __all__ = [
     "BUILTIN_TOOLS",
@@ -99,4 +99,5 @@ __all__ = [
     "is_code",
     "parse_key",
     "sign_assertion",
+    "wrapped_tool",
 ]

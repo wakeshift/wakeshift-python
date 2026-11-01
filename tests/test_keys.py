@@ -9,7 +9,7 @@ import asyncio
 import json
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from wakeshift import AppInfo, Wakeshift, parse_key, sign_assertion
@@ -89,18 +89,18 @@ class Core:
 
     def __init__(self, app: tuple[int, Any] = (200, APP)) -> None:
         self.app = app
-        self.sent: list[httpx.Request] = []
+        self.sent: list[httpx2.Request] = []
 
-    def __call__(self, request: httpx.Request) -> httpx.Response:
+    def __call__(self, request: httpx2.Request) -> httpx2.Response:
         self.sent.append(request)
         if request.url.path == "/api/apps/v1/app":
-            return httpx.Response(self.app[0], json=self.app[1])
+            return httpx2.Response(self.app[0], json=self.app[1])
         if request.url.path == "/oauth/token":
-            return httpx.Response(200, json={"access_token": "at", "expires_in": 900, "wakeshift_user": "u-1"})
-        return httpx.Response(200, json={"workspace": "w-1"})
+            return httpx2.Response(200, json={"access_token": "at", "expires_in": 900, "wakeshift_user": "u-1"})
+        return httpx2.Response(200, json={"workspace": "w-1"})
 
     def wake(self, key: str = NEW_KEY) -> Wakeshift:
-        return Wakeshift(key, core="http://core.test", http=httpx.AsyncClient(transport=httpx.MockTransport(self)))
+        return Wakeshift(key, core="http://core.test", http=httpx2.AsyncClient(transport=httpx2.MockTransport(self)))
 
     def paths(self) -> list[str]:
         return [r.url.path for r in self.sent]

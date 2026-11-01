@@ -51,6 +51,7 @@
   "goose-desktop": "goose",
   "grok-bot": "grok-bot",
   "hermes": "hermes",
+  "hermes-agent": "hermes-agent",
   "mcp": "mcp",
   "openai-mcp": "chatgpt",
   "openclaw": "openclaw",

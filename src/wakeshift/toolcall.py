@@ -50,6 +50,7 @@ from .errors import WakeshiftError
 from .spec import EXTENSION_KEY, dialect_of
 
 if TYPE_CHECKING:
+    from ._hosts import Host
     from .client import Wakeshift
     from .events import Identity, WakeEvent
 
@@ -116,6 +117,36 @@ def with_wakeshift_field(schema: Any) -> Any:
         **schema,
         "properties": {**(props or {}), WAKESHIFT_FIELD: {"type": "string", "description": WAKESHIFT_FIELD_DESCRIPTION}},
     }
+
+
+def wrapped_tool(tool: Any) -> Any:
+    """A low-level Server's tool definition (an ``mcp_types.Tool``, or a dict
+    in the wire's names) for a tool whose on_call_tool handler subscribes
+    with ``attached.call(ctx)``, as ``@attached.tool()`` would list it: its
+    input schema gains session_key, harness and conversation_id (a parameter
+    the tool names itself is kept), and an object output schema names
+    ``wakeshift``. Returns a copy::
+
+        TOOLS = [wrapped_tool(types.Tool(name="watch", input_schema={...}))]
+    """
+    from .client import WAKE_ARGS_SCHEMA
+
+    def inputs(schema: Any) -> dict[str, Any]:
+        s: dict[str, Any] = dict(schema) if isinstance(schema, Mapping) else {"type": "object"}
+        props: dict[str, Any] = dict(s.get("properties") or {})
+        for k, v in WAKE_ARGS_SCHEMA.items():
+            props.setdefault(k, dict(v))
+        return {**s, "properties": props}
+
+    if isinstance(tool, Mapping):
+        out = {**tool, "inputSchema": inputs(tool.get("inputSchema"))}
+        if tool.get("outputSchema") is not None:
+            out["outputSchema"] = with_wakeshift_field(tool["outputSchema"])
+        return out
+    update: dict[str, Any] = {"input_schema": inputs(tool.input_schema)}
+    if tool.output_schema is not None:
+        update["output_schema"] = with_wakeshift_field(tool.output_schema)
+    return tool.model_copy(update=update)
 
 
 @dataclass(frozen=True)
@@ -273,6 +304,11 @@ class _Scope:
         self.request_id = request_id
         self.call: ToolCall | None = None
         self.string = False
+        #: The tools/call's tool name, as the client called it.
+        self.tool = ""
+        #: The wrapped tool's output check, for a framework that doesn't
+        #: check a result against the output schema itself (FastMCP).
+        self.check: Callable[[Any], str | None] | None = None
         self.lock = asyncio.Lock()
         self.busy = 0
         self.ended = False
@@ -317,9 +353,10 @@ class _Scope:
 
 
 class ToolCall:
-    """One call of a tool registered with ``@attached.tool()``: who's calling,
-    and the calls that subscribe the calling conversation. Only the SDK makes
-    one."""
+    """One call of a tool registered with ``@attached.tool()`` (or answered
+    by a low-level Server's on_call_tool, ``attached.call(ctx)``): who's
+    calling, and the calls that subscribe the calling conversation. Only the
+    SDK makes one."""
 
     def __init__(
         self,
@@ -339,7 +376,8 @@ class ToolCall:
         if _token is not _SENTINEL:
             raise TypeError("wakeshift: a ToolCall is made by @attached.tool(): subscribe only from a wrapped tool")
         self._scope = scope
-        #: The tool's Context (mcp.server.mcpserver.Context): MCP's own.
+        #: The tool's Context: MCPServer's or FastMCP's, or a low-level
+        #: handler's ServerRequestContext.
         self.context = context
         #: Who attach's identify says is calling (None for none).
         self.user = user
@@ -553,21 +591,23 @@ def _is_type(annotation: Any, cls: type) -> bool:
 
 
 class Attached:
-    """Wakeshift attached to an MCPServer (``wake.attach``): register tools
-    with ``@attached.tool()`` so they can subscribe the calling conversation."""
+    """Wakeshift attached to an MCPServer or a FastMCP 4 server
+    (``wake.attach``): register tools with ``@attached.tool()`` so they can
+    subscribe the calling conversation."""
 
     def __init__(
         self,
         wake: "Wakeshift",
-        server: Any,
+        host: "Host",
         identify: "Callable[[Any], Identity | None] | None",
         events: EventsOptions | None,
     ) -> None:
         self._wake = wake
-        self._server = server
+        self._host = host
         self._identify = identify
         self._events = events or EventsOptions()
         self._wrapped: set[str] = set()
+        self._checks: dict[str, Callable[[Any], str | None]] = {}
         self._warned: set[str] = set()
         self._tasks: set[asyncio.Task[Any]] = set()
 
@@ -581,13 +621,19 @@ class Attached:
         self, name: str | None = None, description: str | None = None, **kwargs: Any
     ) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
         """Registers an async tool on the server attach was given, as
-        ``server.tool()`` would (its options pass through), with a parameter
+        ``server.tool()`` would (its options pass through: on FastMCP,
+        ``Tool.from_function``'s, plus MCPServer's ``structured_output``), with a parameter
         annotated ``ToolCall`` the SDK fills. The tool's schema gains
         session_key, harness and conversation_id, and hides ``call``. The
         reply gets Wakeshift's block; a call that fails ends the
         subscriptions it made."""
         if callable(name):
             raise TypeError("wakeshift: use @attached.tool(), with the parentheses")
+        if not self._host.registers_tools:
+            raise TypeError(
+                "wakeshift: a low-level Server has no tools to register: list your tool with wakeshift.wrapped_tool(...) "
+                "and call attached.call(ctx) in your on_call_tool handler"
+            )
 
         def decorator(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
             self._register(fn, name, description, kwargs)
@@ -595,8 +641,54 @@ class Attached:
 
         return decorator
 
+    def call(self, ctx: Any) -> ToolCall:
+        """The ToolCall for the tools/call being answered, for a tool attach
+        didn't register: a low-level Server's on_call_tool handler passes its
+        ctx. The call then gets Wakeshift's block and rolls back what it
+        subscribed if it fails, as a wrapped tool's does; list the tool with
+        ``wrapped_tool`` so its schema takes Wakeshift's arguments. Called
+        again in the same call, it returns the same ToolCall::
+
+            async def call_tool(ctx, params):
+                if params.name == "watch":
+                    await attached.call(ctx).subscribe(ping, {"room": params.arguments["room"]})
+                    ...
+        """
+        rc = getattr(ctx, "request_context", ctx)
+        scope = _SCOPE.get()
+        if (
+            scope is None
+            or scope.attached is not self
+            or scope.ended
+            or str(scope.request_id) != str(getattr(rc, "request_id", None))
+        ):
+            self._wake._warn(self._host.misplaced(_tool_of(rc)))
+            raise RuntimeError("wakeshift: attached.call(ctx) works only in a tools/call on the server its attach was given")
+        if scope.call is not None:
+            return scope.call
+        params = getattr(rc, "params", None)
+        args = params.get("arguments") if isinstance(params, Mapping) else None
+        args = args if isinstance(args, Mapping) else {}
+        who = self._identity_of(rc)
+        call = ToolCall(
+            _SENTINEL,
+            scope=scope,
+            context=ctx,
+            user=who.user if who else None,
+            client=who.client if who else None,
+            tool=_tool_of(rc) or scope.tool,
+            native=False,
+            native_conversation=None,
+            session=_str(args.get(SESSION_ARG)),
+            harness=_str(args.get(HARNESS_ARG)),
+            conversation=_str(args.get(CONVERSATION_ARG)),
+        )
+        call.native, call.native_conversation = self._native_of(ctx, rc, call._client)
+        scope.call = call
+        return call
+
     def _register(self, fn: Callable[..., Any], name: str | None, description: str | None, kwargs: dict[str, Any]) -> None:
-        from mcp.server.mcpserver import Context
+        Context = self._host.context_type  # noqa: N806
 
         if not inspect.iscoroutinefunction(fn):
             raise TypeError(f"wakeshift: {getattr(fn, '__name__', fn)}: @attached.tool() takes an async function")
@@ -634,11 +726,6 @@ class Attached:
         ret = hints.get("return", sig.return_annotation)
         if ret is not inspect.Signature.empty:
             annotations["return"] = ret
-        if ret is str and "structured_output" not in kwargs:
-            # A tool returning str replies with text. MCPServer would give it
-            # an output schema and structuredContent {"result": …}, which
-            # some hosts show the model instead of the text.
-            kwargs = {**kwargs, "structured_output": False}
         tool_name = name or fn.__name__
         attached = self
 
@@ -653,12 +740,10 @@ class Attached:
                 scope is None
                 or scope.attached is not attached
                 or scope.call is not None
-                or scope.request_id != getattr(rc, "request_id", None)
+                # FastMCP's request IDs are strings; the low-level ones are as sent.
+                or str(scope.request_id) != str(getattr(rc, "request_id", None))
             ):
-                attached._wake._warn(
-                    f"wakeshift: {tool_name} ran without its attach's middleware in front: register it with the "
-                    "Attached of the server it's on"
-                )
+                attached._wake._warn(attached._host.misplaced(tool_name))
                 raise RuntimeError("wakeshift: a wrapped tool runs only on the server its attach was given")
             who = attached._identity_of(rc)
             call = ToolCall(
@@ -667,7 +752,7 @@ class Attached:
                 context=context,
                 user=who.user if who else None,
                 client=who.client if who else None,
-                tool=_tool_of(rc) or tool_name,
+                tool=_tool_of(rc) or scope.tool or tool_name,
                 native=False,
                 native_conversation=None,
                 session=_str(wake_vals[SESSION_ARG]),
@@ -676,6 +761,7 @@ class Attached:
             )
             call.native, call.native_conversation = attached._native_of(context, rc, call._client)
             scope.call = call
+            scope.check = attached._checks.get(tool_name)
             try:
                 out = await fn(**kw, **{call_param: call})
             finally:
@@ -689,7 +775,12 @@ class Attached:
         wrapper.__module__ = fn.__module__
         wrapper.__signature__ = inspect.Signature(params, return_annotation=ret)  # type: ignore[attr-defined]
         wrapper.__annotations__ = annotations
-        self._server.add_tool(wrapper, name=tool_name, description=description, **kwargs)
+        # A tool returning str replies with text: MCPServer and FastMCP would
+        # give it an output schema and structuredContent {"result": …}, which
+        # some hosts show the model instead of the text.
+        check = self._host.add_tool(wrapper, name=tool_name, description=description, text=ret is str, options=kwargs)
+        if check is not None:
+            self._checks[tool_name] = check
         self._wrapped.add(tool_name)
 
     # ── Who's calling ─────────────────────────────────────────────────────
@@ -730,9 +821,15 @@ class Attached:
 
     async def _tools_call(self, ctx: Any, call_next: Callable[[Any], Awaitable[Any]]) -> Any:
         scope = _Scope(self, getattr(ctx, "request_id", None))
+        scope.tool = _tool_of(ctx)
         token = _SCOPE.set(scope)
         try:
-            result = await call_next(ctx)
+            try:
+                result = await call_next(ctx)
+            finally:
+                # A call made with attached.call(ctx) ends with its handler.
+                if scope.call is not None and not scope.ended:
+                    await scope.end()
         except BaseException:
             if scope.wrapped:
                 await self._rollback_shielded(scope)
@@ -744,6 +841,16 @@ class Attached:
         if not isinstance(result, dict) or result.get("isError"):
             await self._rollback_shielded(scope)
             return result
+        bad = scope.check(result) if scope.check else None
+        if bad:
+            # As MCPServer refuses such a result: the call fails, and what it
+            # subscribed is rolled back.
+            await self._rollback_shielded(scope)
+            assert scope.call is not None
+            return {
+                "content": [{"type": "text", "text": f"Error executing tool {scope.call.tool}: {bad}"}],
+                "isError": True,
+            }
         try:
             return await self._add_block(scope, result)
         except Exception as err:

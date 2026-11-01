@@ -2,7 +2,7 @@
 
 Let agents subscribe to things in your app. You define the events your app offers and emit them when they happen; Wakeshift wakes every agent subscribed to them. Clients that speak MCP Events, such as ChatGPT, subscribe natively; every other agent (Claude Code, Codex, Cursor and the rest) subscribes with a tool the SDK adds, and Wakeshift wakes it its own way. You write no subscribe tool and handle no harnesses.
 
-Python 3.11 or later, on the official MCP Python SDK (`mcp` 2.3 or later). The same API as the Node and Go SDKs.
+Python 3.11 or later, on the official MCP Python SDK (`mcp` 2.3 or later: `MCPServer` or the [low-level `Server`](#low-level-server)) or [FastMCP](#fastmcp) 4. The same API as the Node and Go SDKs.
 
 ## Install
 
@@ -109,6 +109,20 @@ That's all. An agent subscribes to `chat.message` for `eng`, and each message in
 - **`wake.attach(server, identify=None, tools=None, events=None)`** attaches Wakeshift to your MCP server. It serves `events/list`, `events/subscribe` and `events/unsubscribe` to clients that speak MCP Events, and adds the tools `subscribe_events` (for everyone else), `unsubscribe_events` and `list_subscriptions` (for every client, so a person can always see and stop what they're subscribed to); `tools` names fewer of them (`BUILTIN_TOOLS`; `[]` for none). `identify(ctx)` says who is behind a request, as an `Identity(user=…, client=…)`: `user` is your ID for the person, from your own sign-in, and `client` (optional) is the MCP client's name as your sign-in knows it, for a server that never sees `initialize`; a name the request carries wins. Without it, requests have no user, so native subscriptions, personal events and `list_subscriptions` are refused. It also serves `wakeshift_wait` to clients that take MCP tasks on protocol 2026-07-28 (a recent Claude Code in the terminal): Wakeshift tells those conversations to call it, and it wakes them when your events arrive, with nothing to install; other clients don't see it. Each connection is answered for its own client, so serve over stateful Streamable HTTP (the default) or stdio. It returns the handle your own tools register with. `events=EventsOptions(native=…)` tells it which calls come from clients that subscribe themselves (your own house agents, say).
 - **`@attached.tool(name=None, description=None, ...)`** registers an async tool on the server (`MCPServer.tool`'s options pass through) with a parameter annotated `ToolCall`. The tool's schema gains `session_key`, `harness` and `conversation_id`, and hides `call`. An argument it doesn't declare is ignored, not refused. **`await call.subscribe(event, args, ttl=None, reason=None, label=None)`** subscribes the calling conversation and returns a `Subscription` (`id`, `user`, `created`, `session`, `recognized`, `native`); store `id` and `user` to reach that conversation later. **`await call.unsubscribe(event, args)`** ends it; **`await call.resolve_session()`** finds the conversation's session without subscribing. Wakeshift adds one block to whatever the tool returns, however many subscriptions it makes, telling the agent how it's woken. A call that fails (an exception, an `isError` result, an output its schema refuses, a canceled request) ends the subscriptions it made. A client that subscribes itself (ChatGPT, or one that declares MCP Events) isn't subscribed: `call.native` is true and the block tells it what to subscribe to. A tool annotated `-> str` replies with text. A tool with structured output (a pydantic model, say) gets the block's text in its `wakeshift` field too, for hosts that show the model only `structuredContent`; subclass `WakeOutput` to declare the field in your own type. `call.context` is MCP's `Context`.
 - **`await event.end(user, id)`** ends one of a user's subscriptions by its ID.
+
+## Low-level Server
+
+`wake.attach` takes the MCP SDK's low-level `Server` (`mcp.server.lowlevel.Server`) once its handlers are set, and adds its own tools to them. List a tool that subscribes with `wrapped_tool(types.Tool(...))`, which adds Wakeshift's arguments to its schema, and in your `on_call_tool` handler subscribe with `await attached.call(ctx).subscribe(event, args)`. The reply gets Wakeshift's block, and a call that fails ends what it subscribed. See [the Python SDK's docs](https://wakeshift.ai/docs/python#low-level-server).
+
+## FastMCP
+
+`wake.attach` takes a FastMCP 4 server (`fastmcp.FastMCP`) as it takes an `MCPServer`, and `@attached.tool()` registers FastMCP tools, `Context` parameters and dependencies included. Install the extra:
+
+```sh
+pip install 'wakeshift[fastmcp]'
+```
+
+`wakeshift.fastmcp.identify_by_claim("sub")` is an `identify` that names the user by a claim of FastMCP's access token. Attach the server you run, and serve it as FastMCP serves any server (`mcp.http_app()`, `mcp.run()`). FastMCP 2.x and 3.x are built on `mcp` 1.x and aren't supported. See [the Python SDK's docs](https://wakeshift.ai/docs/python#fastmcp).
 
 ## Sign-in
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
-import httpx
+import httpx2
 import pytest
 
 from wakeshift import Wakeshift, WakeshiftError
@@ -25,22 +25,22 @@ GFE_PAGE = """<html><head>
 </body></html>"""
 
 
-def gfe500() -> httpx.Response:
-    return httpx.Response(500, text=GFE_PAGE, headers={"Content-Type": "text/html; charset=UTF-8"})
+def gfe500() -> httpx2.Response:
+    return httpx2.Response(500, text=GFE_PAGE, headers={"Content-Type": "text/html; charset=UTF-8"})
 
 
-def as_json(status: int, body: object) -> Callable[[], httpx.Response]:
-    return lambda: httpx.Response(status, content=json.dumps(body), headers={"Content-Type": "application/json"})
+def as_json(status: int, body: object) -> Callable[[], httpx2.Response]:
+    return lambda: httpx2.Response(status, content=json.dumps(body), headers={"Content-Type": "application/json"})
 
 
-def scripted(answers: list[Callable[[], httpx.Response]]) -> tuple[list[bytes], Wakeshift]:
+def scripted(answers: list[Callable[[], httpx2.Response]]) -> tuple[list[bytes], Wakeshift]:
     bodies: list[bytes] = []
 
-    def handler(r: httpx.Request) -> httpx.Response:
+    def handler(r: httpx2.Request) -> httpx2.Response:
         bodies.append(r.content)
         return answers[min(len(bodies), len(answers)) - 1]()
 
-    wake = Wakeshift(app_key(), core="http://core.test", http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    wake = Wakeshift(app_key(), core="http://core.test", http=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
     wake._retry_pauses = (0.001, 0.001)  # pyright: ignore[reportPrivateUsage]
     return bodies, wake
 
@@ -70,13 +70,13 @@ async def test_wakeshifts_own_errors_arent_retried_and_a_refusal_that_keeps_comi
 @pytest.mark.parametrize(
     ("method", "resp", "want"),
     [
-        ("POST", httpx.Response(500, text="<p>oops</p>", headers={"Content-Type": "text/html"}), False),
-        ("GET", httpx.Response(503, text="Service Unavailable", headers={"Content-Type": "text/html"}), True),
-        ("POST", httpx.Response(503, text="Service Unavailable", headers={"Content-Type": "text/html"}), False),
-        ("GET", httpx.Response(503, json={"error": {"code": "unavailable"}}), False),
+        ("POST", httpx2.Response(500, text="<p>oops</p>", headers={"Content-Type": "text/html"}), False),
+        ("GET", httpx2.Response(503, text="Service Unavailable", headers={"Content-Type": "text/html"}), True),
+        ("POST", httpx2.Response(503, text="Service Unavailable", headers={"Content-Type": "text/html"}), False),
+        ("GET", httpx2.Response(503, json={"error": {"code": "unavailable"}}), False),
         ("POST", gfe500(), True),
-        ("GET", httpx.Response(404, text="Not Found", headers={"Content-Type": "text/html"}), False),
+        ("GET", httpx2.Response(404, text="Not Found", headers={"Content-Type": "text/html"}), False),
     ],
 )
-def test_which_answers_are_retried(method: str, resp: httpx.Response, want: bool) -> None:
+def test_which_answers_are_retried(method: str, resp: httpx2.Response, want: bool) -> None:
     assert refused(method, resp) is want

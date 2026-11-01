@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 
 from wakeshift import Wakeshift
 
@@ -72,26 +72,26 @@ class FakeCore:
     def bodies(self, path: str) -> list[Any]:
         return [b for _, p, b in self.requests if p == path]
 
-    def handler(self, request: httpx.Request) -> httpx.Response:
+    def handler(self, request: httpx2.Request) -> httpx2.Response:
         path = request.url.path.removeprefix("/api/apps/v1")
         body = json.loads(request.content) if request.content else None
         self.requests.append((request.method, path, body))
         fn = self.routes.get((request.method, path))
         if fn is None:
             if (request.method, path) in (("PUT", "/manifest"), ("POST", "/manifest/merge")):
-                return httpx.Response(200, json=body)
+                return httpx2.Response(200, json=body)
             if (request.method, path) == ("GET", "/manifest"):
-                return httpx.Response(200, json={"description": ""})  # nothing published yet
+                return httpx2.Response(200, json={"description": ""})  # nothing published yet
             if self.default_ok:
-                return httpx.Response(200, json={})
-            return httpx.Response(404, json={"error": {"code": "not_found", "message": f"no route {request.method} {path}"}})
+                return httpx2.Response(200, json={})
+            return httpx2.Response(404, json={"error": {"code": "not_found", "message": f"no route {request.method} {path}"}})
         status, out = fn(body)
-        return httpx.Response(status, json=out)
+        return httpx2.Response(status, json=out)
 
 
 def fake_wake(core: FakeCore | None = None, app: str = "sample", **kw: Any) -> tuple[Wakeshift, FakeCore]:
     core = core or FakeCore(default_ok=True)
-    http = httpx.AsyncClient(transport=httpx.MockTransport(core.handler))
+    http = httpx2.AsyncClient(transport=httpx2.MockTransport(core.handler))
     return Wakeshift(app_key(app), core="http://core.test", http=http, **kw), core
 
 
@@ -99,7 +99,7 @@ class Rpc:
     """Raw JSON-RPC to the server; a stateful one keeps the session the
     initialize response named, as an MCP client would."""
 
-    def __init__(self, client: httpx.AsyncClient, path: str, headers: dict[str, str] | None = None) -> None:
+    def __init__(self, client: httpx2.AsyncClient, path: str, headers: dict[str, str] | None = None) -> None:
         self.client = client
         self.path = path
         self.n = 0
@@ -137,13 +137,13 @@ class Rpc:
 @asynccontextmanager
 async def served(
     server: Any, *, wrap: Callable[[Any], Any] | None = None, stateless: bool = True
-) -> AsyncIterator[tuple[httpx.AsyncClient, Rpc]]:
+) -> AsyncIterator[tuple[httpx2.AsyncClient, Rpc]]:
     """An MCPServer served in-process over Streamable HTTP (JSON responses):
     stateless by default; stateful keeps each client's initialize."""
     app = server.streamable_http_app(stateless_http=stateless, json_response=True)
     asgi = wrap(app) if wrap else app
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi), base_url="http://127.0.0.1:8000") as client:
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=asgi), base_url="http://127.0.0.1:8000") as client:
             yield client, Rpc(client, "/mcp")
 
 

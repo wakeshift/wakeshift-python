@@ -707,12 +707,12 @@ def attach_events(
     events_options: "EventsOptions | None" = None,
 ) -> "Attached":
     """The events part of Wakeshift.attach, on an MCPServer
-    (mcp.server.mcpserver.MCPServer). Returns the handle wrapped tools
-    register with."""
-    from mcp.server.mcpserver import Context
+    (mcp.server.mcpserver.MCPServer), a low-level Server or a FastMCP 4 server.
+    Returns the handle wrapped tools register with."""
     from mcp.shared.exceptions import MCPError
     from mcp_types import RequestParams
 
+    from ._hosts import host_of
     from .toolcall import Attached
 
     if not events:
@@ -723,9 +723,10 @@ def attach_events(
         if t not in BUILTIN_TOOLS:
             raise ValueError(f"wakeshift: attach's tools names {t!r}: its own tools are {', '.join(BUILTIN_TOOLS)}")
     wanted = set(BUILTIN_TOOLS if tools is None else tools)
-    low = getattr(server, "_lowlevel_server", None)
-    if low is None or not hasattr(server, "add_tool"):
-        raise TypeError("wakeshift: attach takes an MCPServer (mcp.server.mcpserver.MCPServer)")
+    host = host_of(server)
+    low = host.lowlevel
+    # The Context type the framework fills in a tool (MCPServer's or FastMCP's).
+    Context = host.context_type  # noqa: N806
 
     def identity_of(ctx: Any) -> Identity:
         # Without identify, requests have no user (and identify's no client).
@@ -878,7 +879,7 @@ def attach_events(
         session_key: str | None = None,
         harness: str | None = None,
         conversation_id: str | None = None,
-        ctx: Context | None = None,
+        ctx: Any = None,
     ) -> CallToolResult:
         ev = by_name.get(event or "")
         if ev is None:
@@ -920,7 +921,7 @@ def attach_events(
         session_key: str | None = None,
         harness: str | None = None,
         conversation_id: str | None = None,
-        ctx: Context | None = None,
+        ctx: Any = None,
     ) -> CallToolResult:
         rc = ctx_of(ctx)
         who, identified = caller_of(rc)
@@ -944,8 +945,10 @@ def attach_events(
                     "arguments": a_json,
                 },
             )
+            # addition: the conversation's session key stays the same.
             return _ok(
-                fill("unsubscribed" if out.get("ended") else "not_subscribed", event=ev.name, arguments=_canonical(a_json))
+                fill("unsubscribed" if out.get("ended") else "not_subscribed", event=ev.name, arguments=_canonical(a_json)),
+                _Addition.from_json(out.get("addition")),
             )
         except ArgsError as err:
             return _fail(err.detail)
@@ -956,7 +959,7 @@ def attach_events(
         session_key: str | None = None,
         harness: str | None = None,
         conversation_id: str | None = None,
-        ctx: Context | None = None,
+        ctx: Any = None,
     ) -> CallToolResult:
         who = identity_of(ctx_of(ctx)).user
         if not who:
@@ -989,6 +992,10 @@ def attach_events(
             )
         return _ok(fill("list", lines="\n".join(lines)))
 
+    # The framework fills ctx: its Context type, read from the annotation.
+    for f in (subscribe_events, unsubscribe_events, list_subscriptions):
+        f.__annotations__["ctx"] = Context | None
+
     own_tools = (
         (
             "subscribe_events",
@@ -1018,14 +1025,12 @@ def attach_events(
         # that approve read-only tools without asking (Codex, by default)
         # don't ask; and idempotent, as in every SDK (events-list.json).
         annotations = ToolAnnotations(read_only_hint=True, idempotent_hint=True) if name == "list_subscriptions" else None
-        server.add_tool(fn, name=name, description=description, annotations=annotations)
         # The advertised input schema is written out: the enum of event names,
         # an object of arguments, and the same descriptions as the other SDKs.
-        tool = server._tool_manager.get_tool(name)
         schema: dict[str, Any] = {"type": "object", "properties": properties}
         if required:
             schema["required"] = required
-        tool.parameters = schema
+        host.add_tool(fn, name=name, description=description, annotations=annotations, input_schema=schema)
 
     # ── Capabilities and per-connection negotiation ───────────────────────
     # The draft's extension key is advertised through the server's own
@@ -1034,7 +1039,7 @@ def attach_events(
     # A client that speaks MCP Events subscribes natively, so it isn't offered
     # subscribe_events.
 
-    attached = Attached(wake, server, identify, events_options)
+    attached = Attached(wake, host, identify, events_options)
     # Clients that take MCP tasks (Claude Code): Wakeshift's wait tool,
     # answered with a task (tasks.py).
     task_server = TaskServer(wake, caller_of)
@@ -1064,8 +1069,13 @@ def attach_events(
                 result["tools"] = [
                     t for t in result["tools"] if not (isinstance(t, Mapping) and t.get("name") == "subscribe_events")
                 ]
+            # The list differs by what each request declares (the wait tool,
+            # subscribe_events), so a cached copy is this client's only
+            # (SEP-2549): a public scope the server set becomes private.
+            if result.get("cacheScope") == "public":
+                result["cacheScope"] = "private"
         TaskServer.amend(ctx, method, result)
         return result
 
-    server.middleware.append(middleware)
+    host.install(middleware, wake._warn)
     return attached

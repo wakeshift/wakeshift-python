@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from mcp.server.mcpserver import MCPServer
 
@@ -58,22 +58,22 @@ async def test_manifest_matches_the_other_sdks(case: dict[str, Any]) -> None:
     answer: dict[str, Any] | None = None
     unavailable = {"status": 503, "body": {"error": {"code": "unavailable", "message": "try again"}}}
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal answer
         path = request.url.path.removeprefix("/api/apps/v1")
         if path != "/manifest" and not path.startswith("/manifest/"):
-            return httpx.Response(200, json={"matched": 0, "subscriptions": 0, "connected": 0, "forgotten": False})
+            return httpx2.Response(200, json={"matched": 0, "subscriptions": 0, "connected": 0, "forgotten": False})
         if request.method == "GET":
             got.append({"method": "GET", "path": path})
-            return httpx.Response(200, json={"description": ""})
+            return httpx2.Response(200, json={"description": ""})
         body = json.loads(request.content)
         got.append({"method": request.method, "path": path, "body": body})
         if answer is not None:
             reply, answer = answer, None
-            return httpx.Response(reply["status"], json=reply["body"])
-        return httpx.Response(200, json=body)
+            return httpx2.Response(reply["status"], json=reply["body"])
+        return httpx2.Response(200, json=body)
 
-    wake = Wakeshift(app_key(), core="http://core.test", http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    wake = Wakeshift(app_key(), core="http://core.test", http=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
     events = {name: define_sample(wake, name) for name in case["define"]}
     emit = FIXTURE["emit"]
     for i, step in enumerate(case["steps"]):

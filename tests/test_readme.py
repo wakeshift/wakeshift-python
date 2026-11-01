@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from .helpers import FakeCore, app_key, served
@@ -51,7 +51,7 @@ async def test_the_readmes_examples_run(monkeypatch: pytest.MonkeyPatch) -> None
     )
     core.on("POST", "/event-subscriptions/unsubscribe", lambda b: (200, {"ended": True}))
     core.on("POST", "/calls/addition", lambda b: (200, {"text": "Wakeshift: woken by Monitor."}))
-    ns["wake"]._http = httpx.AsyncClient(transport=httpx.MockTransport(core.handler))
+    ns["wake"]._http = httpx2.AsyncClient(transport=httpx2.MockTransport(core.handler))
     await ns["on_message"]("eng", "ada", "shipped it")
     await ns["on_turn"]("juniper", "ada", ["As", "Kd"], 2)
     emits = core.bodies("/events/emit")

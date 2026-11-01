@@ -9,7 +9,7 @@ import asyncio
 import json
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.shared.exceptions import MCPError
@@ -34,6 +34,7 @@ from wakeshift import (
 from wakeshift.client import SESSION_DESCRIPTION
 from wakeshift.toolcall import CONVERSATION_META, conversation_key, merge_block, with_wakeshift_field
 
+from .conftest import FASTMCP
 from .helpers import app_key, golden_file, served
 
 TRAILER = "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: aaaaaaaaaa.bbbbbbbbbb.cccccccccc)"
@@ -62,23 +63,23 @@ class WakeCore:
     def reset(self) -> None:
         self.calls.clear()
 
-    async def handler(self, request: httpx.Request) -> httpx.Response:
+    async def handler(self, request: httpx2.Request) -> httpx2.Response:
         path = request.url.path.removeprefix("/api/apps/v1")
         if self.delay and path == "/event-subscriptions":
             await asyncio.sleep(self.delay)
         body = json.loads(request.content) if request.content else {}
         self.calls.append((path, body))
         if path in self.fail:
-            return httpx.Response(503, json={"error": {"code": "unavailable", "message": "down"}})
+            return httpx2.Response(503, json={"error": {"code": "unavailable", "message": "down"}})
         call = (body or {}).get("call") or {}
         if path in ("/manifest", "/manifest/merge"):
-            return httpx.Response(200, json=body)
+            return httpx2.Response(200, json=body)
         if path == "/event-subscriptions":
             key = f"{body['name']}{json.dumps(body['arguments'], sort_keys=True)}"
             created = key not in self.seen
             self.seen.add(key)
             self.subs += 1
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={
                     "event_subscription": {"id": f"sub-{self.subs}", "user": call.get("user"), "created": created},
@@ -88,25 +89,25 @@ class WakeCore:
                 },
             )
         if path == "/calls/session":
-            return httpx.Response(
+            return httpx2.Response(
                 200, json={"session": "wsc_resolved", "pending": "pa_session", "agent": {"harness": "codex", "via": "meta"}}
             )
         if path == "/calls/addition":
             if self.addition is not None:
-                return httpx.Response(200, json=self.addition)
-            return httpx.Response(
+                return httpx2.Response(200, json=self.addition)
+            return httpx2.Response(
                 200, json={"text": WOKEN, "trailer": TRAILER, "meta": {"wakeshift/connector": "tok", "other": "x"}}
             )
         if path in ("/event-subscriptions/unsubscribe", "/event-subscriptions/end"):
-            return httpx.Response(200, json={"ended": True})
+            return httpx2.Response(200, json={"ended": True})
         if path == "/event-subscriptions/list":
-            return httpx.Response(200, json={"subscriptions": self.native})
+            return httpx2.Response(200, json={"subscriptions": self.native})
         if path == "/events/status":
             if "subscriptions" not in body:
-                return httpx.Response(
+                return httpx2.Response(
                     200, json={"subscriptions": 3, "connected": 2, "via": {"stream": 1, "poll": 1, "hooks": 0, "webhook": 0}}
                 )
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={
                     "subscriptions": [
@@ -117,9 +118,9 @@ class WakeCore:
                 },
             )
         if path == "/events/publish-urls":
-            return httpx.Response(200, json={"id": "p1", "url": "https://x"})
+            return httpx2.Response(200, json={"id": "p1", "url": "https://x"})
         if path == "/events/emit":
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={
                     "matched": 2,
@@ -128,7 +129,7 @@ class WakeCore:
                     "ended": [{"user": "u2", "subscription": "s2"}],
                 },
             )
-        return httpx.Response(404, json={"error": {"code": "not_found", "message": path}})
+        return httpx2.Response(404, json={"error": {"code": "not_found", "message": path}})
 
 
 class TableArgs(BaseModel):
@@ -154,7 +155,7 @@ class Wrapped:
     def __init__(self, events: EventsOptions | None = None, identify: Any = "header") -> None:
         self.core = WakeCore()
         self.warnings: list[str] = []
-        http = httpx.AsyncClient(transport=httpx.MockTransport(self.core.handler))
+        http = httpx2.AsyncClient(transport=httpx2.MockTransport(self.core.handler))
         self.wake = Wakeshift(app_key("cards"), core="http://core.test", http=http, on_warning=self.warnings.append)
         self.turn = self.wake.define_event(
             "game.turn", description="Your turn.", args=TableArgs, payload=TurnMsg, text=lambda m, a: m.text, personal=True
@@ -716,8 +717,11 @@ async def test_structured_output_carries_the_block() -> None:
         assert "wakeshift" not in listed["join_strict"]["outputSchema"].get("required", [])
         # A tool that isn't wrapped gets no block, and its schema is its own.
         assert "wakeshift" not in listed["unwrapped"]["outputSchema"]["properties"]
-    # The registered schema itself is left alone.
-    assert "wakeshift" not in w.server._tool_manager.get_tool("join_plain").output_schema["properties"]
+    # The registered schema itself is left alone on MCPServer, which checks
+    # results against it; FastMCP's names the field (it doesn't check, and a
+    # transform that renames the tool keeps it).
+    registered = w.server._tool_manager.get_tool("join_plain").output_schema["properties"]
+    assert ("wakeshift" in registered) is FASTMCP
     assert not w.warnings
 
 
@@ -811,9 +815,9 @@ async def test_emit_recipients_golden() -> None:
         assert w.core.bodies("/events/emit")[0]["to"] == c["wire"], c["name"]
     for c in f["responses"]:
         resp = c["response"]
-        http = httpx.AsyncClient(
-            transport=httpx.MockTransport(
-                lambda r, resp=resp: httpx.Response(200, json=resp if r.url.path.endswith("/emit") else {})
+        http = httpx2.AsyncClient(
+            transport=httpx2.MockTransport(
+                lambda r, resp=resp: httpx2.Response(200, json=resp if r.url.path.endswith("/emit") else {})
             )
         )
         wake = Wakeshift(app_key("cards"), core="http://core.test", http=http)
