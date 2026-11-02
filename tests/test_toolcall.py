@@ -49,6 +49,8 @@ class WakeCore:
         self.seen: set[str] = set()
         self.subs = 0
         self.addition: dict[str, Any] | None = None
+        #: /event-subscriptions/unsubscribe's answer, if set.
+        self.unsubscribe: dict[str, Any] | None = None
         self.fail: set[str] = set()
         self.native: list[dict[str, Any]] = []
         #: Seconds each subscribe takes.
@@ -98,6 +100,8 @@ class WakeCore:
             return httpx2.Response(
                 200, json={"text": WOKEN, "trailer": TRAILER, "meta": {"wakeshift/connector": "tok", "other": "x"}}
             )
+        if path == "/event-subscriptions/unsubscribe" and self.unsubscribe is not None:
+            return httpx2.Response(200, json=self.unsubscribe)
         if path in ("/event-subscriptions/unsubscribe", "/event-subscriptions/end"):
             return httpx2.Response(200, json={"ended": True})
         if path == "/event-subscriptions/list":
@@ -231,6 +235,36 @@ async def test_two_subscribes_one_block() -> None:
     assert add["pending"] == "pa_first" and "native" not in add and add["call"]["session"] == "wsc_s1"
     assert got[0].id == "sub-1" and got[0].user == "ada" and got[0].created and got[0].session == "wsc_s1"
     assert got[0].recognized.harness == "claude-code"
+
+
+async def test_unsubscribe_without_the_key_note_in_the_block() -> None:
+    # Wakeshift's answer to an unsubscribe that passed no session key (so
+    # nothing ended) comes first in the block, even when nothing names the
+    # conversation and no block would be asked for.
+    note = "Wakeshift: nothing was unsubscribed. Call this tool again with the session_key you were given."
+    w = Wrapped()
+    ended: list[bool] = []
+
+    @w.attached.tool()
+    async def unwatch(table: str, call: ToolCall) -> str:
+        ok = await call.unsubscribe(w.shared, {"table": table})
+        ended.append(ok)
+        return "Stopped watching." if ok else "This chat wasn't watching."
+
+    w.core.unsubscribe = {"ended": False, "addition": {"text": note}}
+    async with w.served() as (_, rpc):
+        res = await call_tool(rpc, "unwatch", {"table": "oak"})
+        assert texts(res) == [f"This chat wasn't watching.\n\n{note}"]
+        assert w.core.paths() == ["/event-subscriptions/unsubscribe"]
+        w.core.reset()
+        res = await call_tool(rpc, "unwatch", {"table": "oak", "session_key": "wsc_s1"})
+        assert texts(res) == [f"This chat wasn't watching.\n\n{note}\n\n{WOKEN}\n\n{TRAILER}"]
+        # No note: no block for a keyless call, as before.
+        w.core.unsubscribe = None
+        w.core.reset()
+        res = await call_tool(rpc, "unwatch", {"table": "oak"})
+        assert texts(res) == ["Stopped watching."]
+    assert ended == [False, False, True]
 
 
 async def test_without_subscribing() -> None:

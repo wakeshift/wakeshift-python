@@ -295,6 +295,12 @@ async def test_events_defined_served_emitted_bridged_and_native() -> None:
                 assert found, mine
                 assert "Stopped subscription" in text_of(await tool(chatgpt, "unsubscribe_events", {"id": found.group(1)}))
                 assert "no subscriptions" in text_of(await tool(chatgpt, "list_subscriptions", {}))
+            # Without the session key (Claude Code's calls name no conversation):
+            # nothing ends, and the reply says to call again with it.
+            keyless = text_of(await tool(p2, "unsubscribe_events", {"event": "game.turn", "arguments": {"table": "t1"}}))
+            assert keyless.startswith("This conversation wasn't subscribed to game.turn"), keyless
+            assert "nothing was unsubscribed, and this conversation may still be subscribed" in keyless, keyless
+            assert p2_session not in keyless
             stopped = await tool(
                 p2, "unsubscribe_events", {"event": "game.turn", "arguments": {"table": "t1"}, "session_key": p2_session}
             )

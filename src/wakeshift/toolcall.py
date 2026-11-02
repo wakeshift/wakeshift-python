@@ -316,6 +316,9 @@ class _Scope:
         self.armed = False
         self.created: list[_Created] = []
         self.native: list[dict[str, Any]] = []
+        #: Wakeshift's notes from the call's unsubscribes (one that ended
+        #: nothing because the call passed no session key), for the block.
+        self.notes: list[str] = []
 
     @property
     def wrapped(self) -> bool:
@@ -552,6 +555,12 @@ class ToolCall:
             out = await wake._request_app(
                 "POST", "/event-subscriptions/unsubscribe", {"call": self._wire(), "name": event.name, "arguments": a_json}
             )
+            # addition: the call passed no session key, so it ended nothing;
+            # the block says to call again with it.
+            add = out.get("addition")
+            note = str(add.get("text") or "").strip() if isinstance(add, Mapping) else ""
+            if note and note not in s.notes:
+                s.notes.append(note)
             return bool(out.get("ended"))
         finally:
             self._leave(s)
@@ -906,27 +915,17 @@ class Attached:
 
     async def _add_block(self, scope: _Scope, result: dict[str, Any]) -> dict[str, Any]:
         """result with the call's one block, from /calls/addition. A call that
-        names no conversation, and subscribed nothing, gets nothing. Only a
-        failure for a call that subscribed (or names native lines) raises."""
+        names no conversation, and subscribed nothing, gets nothing but the
+        notes of its unsubscribes. Only a failure for a call that subscribed
+        (or names native lines) raises."""
         call = scope.call
         assert call is not None
-        wire = call._wire()
-        if not scope.pending and not scope.native and not wire.get("session") and not wire.get("conversation"):
-            if not conversation_key(wire.get("meta")):
-                return result
-        body: dict[str, Any] = {"call": wire}
-        if scope.pending:
-            body["pending"] = scope.pending
-        if scope.native:
-            body["native"] = scope.native
-        try:
-            add = await self._wake._request_app("POST", "/calls/addition", body)
-        except Exception as err:
-            if scope.armed or scope.native:
-                raise
-            self._wake._warn(f"wakeshift: Wakeshift's addition to {call.tool}'s result: {err}")
+        add = await self._fetch_addition(scope, call)
+        if add is None and not scope.notes:
             return result
-        text = str(add.get("text") or "").strip()
+        add = add or {}
+        # Notes from the call's unsubscribes come first, whatever else it gets.
+        text = "\n\n".join(t for t in (" ".join(scope.notes), str(add.get("text") or "").strip()) if t)
         out = merge_block(
             result,
             text,
@@ -941,6 +940,27 @@ class Attached:
                 "conversation is woken: hosts that show only structuredContent won't see it",
             )
         return out
+
+    async def _fetch_addition(self, scope: _Scope, call: ToolCall) -> Mapping[str, Any] | None:
+        """/calls/addition's answer for the call (_add_block), or None if it
+        names no conversation and subscribed nothing, or the courtesy
+        failed."""
+        wire = call._wire()
+        if not scope.pending and not scope.native and not wire.get("session") and not wire.get("conversation"):
+            if not conversation_key(wire.get("meta")):
+                return None
+        body: dict[str, Any] = {"call": wire}
+        if scope.pending:
+            body["pending"] = scope.pending
+        if scope.native:
+            body["native"] = scope.native
+        try:
+            return await self._wake._request_app("POST", "/calls/addition", body)
+        except Exception as err:
+            if scope.armed or scope.native:
+                raise
+            self._wake._warn(f"wakeshift: Wakeshift's addition to {call.tool}'s result: {err}")
+            return None
 
     def _amend_list(self, tools: list[Any]) -> None:
         """tools/list's tools with each wrapped tool's object output schema

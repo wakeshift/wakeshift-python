@@ -1,7 +1,10 @@
 name: Release
 
 # Pushing a tag v<version> (the version in pyproject.toml) publishes that
-# version to PyPI, through trusted publishing: no token is stored here.
+# version to PyPI, through trusted publishing: no token is stored here, and
+# the publish action attests each file (PEP 740), so PyPI shows which commit
+# and workflow built it. Then a GitHub release for the tag carries the
+# files, their CycloneDX SBOM and the CHANGELOG's notes.
 on:
   push:
     tags: ["v*"]
@@ -39,6 +42,27 @@ jobs:
           name: dist
           path: dist/
           if-no-files-found: error
+      # Kept out of dist/, which is exactly what goes to PyPI.
+      - name: SBOM and release notes
+        run: |
+          version=$(uv version --short)
+          if ! grep -q "^## $version (" CHANGELOG.md; then
+            echo "CHANGELOG.md has no entry for $version (## $version (<date>))" >&2
+            exit 1
+          fi
+          mkdir -p release
+          # The runtime dependencies, as locked and tested here.
+          uv export --format cyclonedx1.5 --preview-features sbom-export --frozen --no-dev \
+            -o "release/wakeshift-$version.cdx.json"
+          awk -v v="$version" '
+            $0 ~ "^## " { if (on) exit; if (index($0, "## " v " (") == 1) { on = 1; next } }
+            on { print }
+          ' CHANGELOG.md >release/notes.md
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: release/
+          if-no-files-found: error
 
   publish:
     name: Publish to PyPI
@@ -56,3 +80,27 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+
+  release:
+    name: GitHub release, with the SBOM
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: release/
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$TAG" --notes-file release/notes.md dist/* release/*.cdx.json
