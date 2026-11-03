@@ -962,6 +962,32 @@ class Attached:
             self._wake._warn(f"wakeshift: Wakeshift's addition to {call.tool}'s result: {err}")
             return None
 
+    async def _name_app(self, tools: list[Any]) -> None:
+        """notifies() with no app named says "this app": tools/list names the
+        app instead, as the console has it (GET /app, asked once). A name
+        Wakeshift doesn't give leaves "this app"."""
+        from .events import _UNNAMED_APP, _unnamed_parts
+
+        first, second = _unnamed_parts()
+
+        def has(t: Any) -> bool:
+            d = t.get("description") if isinstance(t, Mapping) else None
+            return isinstance(d, str) and first in d and second in d
+
+        if not any(has(t) for t in tools):
+            return
+        try:
+            name = (await self._wake.app()).name.strip()
+        except Exception:
+            return
+        if not name:
+            return
+        named1 = first.replace(_UNNAMED_APP, name, 1)
+        named2 = second.replace("This app", name[:1].upper() + name[1:], 1)
+        for i, t in enumerate(tools):
+            if has(t):
+                tools[i] = {**t, "description": t["description"].replace(first, named1, 1).replace(second, named2, 1)}
+
     def _amend_list(self, tools: list[Any]) -> None:
         """tools/list's tools with each wrapped tool's object output schema
         naming ``wakeshift`` (with_wakeshift_field), which its structured

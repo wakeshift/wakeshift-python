@@ -455,11 +455,13 @@ class Wakeshift:
         # this process serves the app's tools (attach: only then is the
         # manifest sent automatically); whether Wakeshift has the manifest
         # for the events defined now; how many define_events there were;
-        # and one automatic send at a time.
+        # how many manifests Wakeshift has taken from this process; and one
+        # send at a time.
         self._manifest_base: dict[str, Any] | None = None
         self._serving = False
         self._published = False
         self._manifest_version = 0
+        self._sends = 0
         self._manifest_lock: asyncio.Lock | None = None
 
     # ── The app ────────────────────────────────────────────────────────────
@@ -521,10 +523,11 @@ class Wakeshift:
         """Tells Wakeshift what the app may do, replacing what it said before:
         manifest, with the events you defined (define_event) after its own
         events. An event both defined and listed in manifest's events is an
-        error (ValueError), and nothing is sent. You needn't call it: a process
-        that serves your tools (attach) sends the manifest automatically,
-        merged into the one Wakeshift has. Call it to remove an event or clear
-        a setting. Once called, manifest's settings are what every automatic
+        error (ValueError), and nothing is sent. You needn't call it: the SDK
+        sends the manifest automatically, merged into the one Wakeshift has (a
+        process that serves your tools on its first call about events, any
+        process on an emit of an event Wakeshift doesn't know yet). Call it to
+        remove an event or clear a setting. Once called, manifest's settings are what every automatic
         send carries (even if this one failed), with the events defined by
         then. Returns the manifest as Wakeshift keeps it."""
         version = self._manifest_version  # before the body: a later define_event is sent again
@@ -539,6 +542,7 @@ class Wakeshift:
                 self._published = False  # the next automatic send tries again
                 raise
             self._published = self._manifest_version == version
+            self._sends += 1
         return cast(Manifest, out)
 
     def _manifest_send_lock(self) -> asyncio.Lock:
@@ -562,10 +566,10 @@ class Wakeshift:
         return body
 
     async def _send_manifest(self) -> None:
-        """The automatic send, from a process that serves the app's tools: the
-        settings the app last published (only those it set), with the defined
-        events, merged into the manifest Wakeshift has, so it never removes an
-        event or clears a setting another process sent."""
+        """The automatic send: the settings the app last published (only those
+        it set), with the defined events, merged into the manifest Wakeshift
+        has, so it never removes an event or clears a setting another process
+        sent."""
         body = {
             k: v
             for k, v in self._manifest_body(self._manifest_base or {}).items()
@@ -574,6 +578,21 @@ class Wakeshift:
         if "events" not in body:
             return  # nothing to add (attach refuses with no events, but never send an empty list)
         await self._request("POST", "/manifest/merge", body)
+        self._sends += 1
+
+    async def _resend_manifest(self, seen: int) -> None:
+        """An emit's answer to unknown_event: Wakeshift doesn't have the event
+        (no process has sent a manifest with it yet, or a publish since
+        removed it), so this process sends its own, merged, unless a send
+        finished since the emit went (seen: the sends then). One send at a
+        time, so emits that fail together send it once."""
+        async with self._manifest_send_lock():
+            if self._sends != seen:
+                return
+            version = self._manifest_version
+            await self._send_manifest()
+            if self._manifest_version == version:
+                self._published = True
 
     # ── Events (MCP Events, natively or bridged) ───────────────────────────
 
@@ -642,8 +661,9 @@ class Wakeshift:
     async def _ensure_events(self) -> None:
         """Sends the manifest with the defined events, once (again after a
         define_event), from a process that serves the app's tools (attach). A
-        process that only emits never sends it: its events may be fewer, or
-        older, than its server's."""
+        process that only emits sends it only when Wakeshift doesn't know an
+        event it emits (_emit_event): its events may be fewer, or older, than
+        its server's, and a merge never removes an event it leaves out."""
         if self._published or not self._serving:
             return
         async with self._manifest_send_lock():
@@ -676,7 +696,17 @@ class Wakeshift:
                 body["to"] = to[0].user
             else:
                 body["to"] = [_recipient_wire(r) for r in to]
-        out = await self._request("POST", "/events/emit", body)
+        # Wakeshift may not have the event yet (an emit at startup, before
+        # any agent has connected to the app's server): send this process's
+        # manifest, merged, then emit once more.
+        seen = self._sends
+        try:
+            out = await self._request("POST", "/events/emit", body)
+        except WakeshiftError as e:
+            if e.status != 404 or e.code != "unknown_event":
+                raise
+            await self._resend_manifest(seen)
+            out = await self._request("POST", "/events/emit", body)
         return Emitted(
             matched=int(out["matched"]),
             duplicate=bool(out.get("duplicate")),

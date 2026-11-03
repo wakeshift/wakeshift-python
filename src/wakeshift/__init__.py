@@ -47,6 +47,7 @@ from .events import (
     Identity,
     Subscriber,
     WakeEvent,
+    notifies,
 )
 from .harness import harness_agent
 from .key import AppKey, parse_key, sign_assertion
@@ -54,7 +55,7 @@ from .spec import EXTENSION_KEY, TEXT_META
 from .spec import REVISION as EVENTS_REVISION
 from .toolcall import Attached, CallEnded, EventsOptions, Subscription, ToolCall, WakeOutput, wrapped_tool
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 
 __all__ = [
     "BUILTIN_TOOLS",
@@ -62,6 +63,7 @@ __all__ = [
     "DEFAULT_CORE",
     "EVENTS_REVISION",
     "EVENT_TOOL_TEXT",
+    "notifies",
     "EXTENSION_KEY",
     "HARNESS_ARG",
     "LIST_TOOL_DESCRIPTION",

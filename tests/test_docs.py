@@ -1,7 +1,8 @@
 """The site's Python examples run: in Wakeshift's own repository, site/docs/python.md's
 python blocks run in order, in one namespace, against a fake core (its FastMCP block in
-a namespace of its own); every other python block in site/docs at least compiles. The README's are tested in test_readme.py. The
-published copy of the SDK has no site, so this skips there."""
+a namespace of its own), and so does AGENTS.md's (site/llms/agents.md); every other
+python block in site/docs at least compiles. The README's are tested in test_readme.py.
+The published copy of the SDK has no site, so this skips there."""
 
 from __future__ import annotations
 
@@ -40,14 +41,54 @@ def blocks(page: Path, name: str | None = None) -> list[str]:
     return out
 
 
+#: /AGENTS.md, the instructions for coding agents the site serves.
+AGENTS = DOCS.parent / "llms" / "agents.md"
+
+
 def test_every_python_block_compiles() -> None:
-    pages = sorted(DOCS.glob("*.md"))
+    pages = [*sorted(DOCS.glob("*.md")), AGENTS]
     found = 0
     for page in pages:
         for b in blocks(page):
             compile(b, str(page), "exec")
             found += 1
     assert found >= 2
+
+
+async def test_the_agents_files_python_example_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AGENTS.md's server.py runs as shown, against a fake core: its watch_ci tool
+    subscribes the calling conversation, and on_ci_finished emits, lowercased."""
+    code = blocks(AGENTS)
+    assert len(code) == 1, "AGENTS.md has one python block"
+    monkeypatch.setenv("WAKESHIFT_KEY", app_key("ci-bot"))
+    monkeypatch.setenv("WAKESHIFT_CORE", "http://core.test")
+    ns: dict[str, Any] = {"__name__": "agents_md"}
+    exec(compile(code[0], str(AGENTS), "exec"), ns)
+
+    core = FakeCore(default_ok=True)
+    core.on("POST", "/events/emit", lambda b: (200, {"matched": 1}))
+    core.on(
+        "POST",
+        "/event-subscriptions",
+        lambda b: (200, {"event_subscription": {"id": "es_1", "user": None, "created": True}, "session": "wsc_1"}),
+    )
+    core.on("POST", "/calls/addition", lambda b: (200, {"text": "Wakeshift: woken by Monitor."}))
+    ns["wake"]._http = httpx2.AsyncClient(transport=httpx2.MockTransport(core.handler))
+    assert ns["app"] is not None
+    async with served(ns["server"]) as (_, rpc):
+        listed = {t["name"] for t in (await rpc("tools/list", {}))["result"]["tools"]}
+        assert {"subscribe_events", "unsubscribe_events", "list_subscriptions", "watch_ci"} <= listed
+        res = await rpc(
+            "tools/call",
+            {"name": "watch_ci", "arguments": {"owner": "Acme", "repo": "API"}},
+            headers={"User-Agent": "claude-code/2.1.314"},
+        )
+        assert "result" in res and not res["result"].get("isError"), res
+    assert core.bodies("/event-subscriptions")[0]["arguments"] == {"owner": "acme", "repo": "api"}
+
+    await ns["on_ci_finished"]("Acme", "API", ns["Run"](branch="main", conclusion="success", url="https://x.test"), "d1")
+    emitted = core.bodies("/events/emit")[0]
+    assert emitted["arguments"] == {"owner": "acme", "repo": "api"}, emitted
 
 
 async def test_the_python_pages_examples_run(monkeypatch: pytest.MonkeyPatch) -> None:

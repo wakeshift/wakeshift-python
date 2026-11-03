@@ -1,11 +1,12 @@
 """The manifest the three SDKs send, and when (the shared golden file
-manifest.json): an explicit publish replaces it; the automatic send, only from
-a process that serves the app's tools (attach), merges the settings the app
-published and its events, its listed events then the defined ones, refusing a
-name in both."""
+manifest.json): an explicit publish replaces it; the automatic send (from a
+process that serves the app's tools, attach, or after an emit's
+unknown_event) merges the settings the app published and its events, its
+listed events then the defined ones, refusing a name in both."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -57,10 +58,17 @@ async def test_manifest_matches_the_other_sdks(case: dict[str, Any]) -> None:
     got: list[dict[str, Any]] = []
     answer: dict[str, Any] | None = None
     unavailable = {"status": 503, "body": {"error": {"code": "unavailable", "message": "try again"}}}
+    unknown = case.get("unknown_emits") or 0
 
     def handler(request: httpx2.Request) -> httpx2.Response:
-        nonlocal answer
+        nonlocal answer, unknown
         path = request.url.path.removeprefix("/api/apps/v1")
+        if path == "/events/emit" and "unknown_emits" in case:
+            got.append({"method": request.method, "path": path})
+            if unknown > 0:
+                unknown -= 1
+                return httpx2.Response(404, json={"error": {"code": "unknown_event", "message": "no such event"}})
+            return httpx2.Response(200, json={"matched": 0})
         if path != "/manifest" and not path.startswith("/manifest/"):
             return httpx2.Response(200, json={"matched": 0, "subscriptions": 0, "connected": 0, "forgotten": False})
         if request.method == "GET":
@@ -110,3 +118,32 @@ async def test_manifest_matches_the_other_sdks(case: dict[str, Any]) -> None:
             body["events"] = [events[e].manifest if isinstance(e, str) else e for e in body["events"]]
         want.append({"method": r["method"], "path": r["path"], "body": body})
     assert sorted_json(got) == sorted_json(want)
+
+
+async def test_concurrent_unknown_emits_merge_once() -> None:
+    """Emits that fail together, before Wakeshift has the event (an app
+    emitting at startup, before any agent has connected), send the manifest
+    once."""
+    known = False
+    merges = emits = 0
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        nonlocal known, merges, emits
+        path = request.url.path.removeprefix("/api/apps/v1")
+        if path == "/manifest/merge":
+            merges += 1
+            await asyncio.sleep(0.02)
+            known = True
+            return httpx2.Response(200, json=json.loads(request.content))
+        emits += 1
+        if not known:
+            return httpx2.Response(404, json={"error": {"code": "unknown_event", "message": "no such event"}})
+        return httpx2.Response(200, json={"matched": 0})
+
+    wake = Wakeshift(app_key(), core="http://core.test", http=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
+    chat = define_sample(wake, "chat.message")
+    emit = FIXTURE["emit"]
+    results = await asyncio.gather(*(chat.emit(emit["arguments"], emit["payload"]) for _ in range(5)))
+    assert len(results) == 5
+    assert merges == 1
+    assert emits == 10

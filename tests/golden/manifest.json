@@ -1,5 +1,5 @@
 {
-  "_comment": "The manifest every SDK sends, and when: an explicit publish replaces it (PUT /api/apps/v1/manifest); the automatic send, only from a process that serves the app's tools (attach), merges into the one Wakeshift has (POST /api/apps/v1/manifest/merge), with only the settings the app published and its events. Each SDK's test runs each case against a fake core: it defines the sample events named in define (events-list.json's chat.message, game.turn and ci.run, whose manifest entries that file pins), runs the steps in order, and checks every request it made to /manifest or under it (method, path below /api/apps/v1, and body; a GET has no body) against requests. In a request's body, an event that's a string is that defined event's manifest entry; an object is listed as it is. The fake core answers a GET of /manifest with {\"description\": \"\"}, a PUT or merge with 200 and its body unless the step's answer says otherwise, and every other request with {\"matched\": 0, \"subscriptions\": 0, \"connected\": 0, \"forgotten\": false}. Steps: attach (attach to an MCP server, with no options), emit (chat.message, with emit's arguments and payload), status (chat.message's status, with emit's arguments: a call that only reads), forget_user (forget the user \"ada\": an app call about no event), publish (an explicit publish of the manifest given, answered with answer if set), define (one more sample event), fail_next (the next request to /manifest or under it answers 503 with {\"error\": {\"code\": \"unavailable\", \"message\": \"try again\"}}). A step with error must fail, its message containing that text; every other step must succeed.",
+  "_comment": "The manifest every SDK sends, and when: an explicit publish replaces it (PUT /api/apps/v1/manifest); the automatic send merges into the one Wakeshift has (POST /api/apps/v1/manifest/merge), with only the settings the app published and its events: from a process that serves the app's tools (attach), on its first call about events; from any process, when Wakeshift answers an emit with unknown_event, after which it emits once more. A case with unknown_emits: the fake core answers that many emits (the first ones) with 404 {\"error\": {\"code\": \"unknown_event\", \"message\": \"no such event\"}}, and requests lists each emit too, as {\"method\": \"POST\", \"path\": \"/events/emit\"} (its body isn't checked). Each SDK's test runs each case against a fake core: it defines the sample events named in define (events-list.json's chat.message, game.turn and ci.run, whose manifest entries that file pins), runs the steps in order, and checks every request it made to /manifest or under it (method, path below /api/apps/v1, and body; a GET has no body) against requests. In a request's body, an event that's a string is that defined event's manifest entry; an object is listed as it is. The fake core answers a GET of /manifest with {\"description\": \"\"}, a PUT or merge with 200 and its body unless the step's answer says otherwise, and every other request with {\"matched\": 0, \"subscriptions\": 0, \"connected\": 0, \"forgotten\": false}. Steps: attach (attach to an MCP server, with no options), emit (chat.message, with emit's arguments and payload), status (chat.message's status, with emit's arguments: a call that only reads), forget_user (forget the user \"ada\": an app call about no event), publish (an explicit publish of the manifest given, answered with answer if set), define (one more sample event), fail_next (the next request to /manifest or under it answers 503 with {\"error\": {\"code\": \"unavailable\", \"message\": \"try again\"}}). A step with error must fail, its message containing that text; every other step must succeed.",
   "emit": {
     "event": "chat.message",
     "arguments": { "channel": "eng" },
@@ -13,10 +13,71 @@
       "requests": [{ "method": "POST", "path": "/manifest/merge", "body": { "events": ["chat.message", "game.turn"] } }]
     },
     {
-      "name": "a process that only emits never sends the manifest, even after a define",
+      "name": "a process that only emits sends no manifest while Wakeshift knows its events, even after a define",
       "define": ["chat.message"],
       "steps": [{ "emit": true }, { "define": "ci.run" }, { "emit": true }],
       "requests": []
+    },
+    {
+      "name": "an emit Wakeshift doesn't know the event for, before attach: one merge of the defined events, no settings, then the emit again; the next emit sends nothing more",
+      "define": ["chat.message", "game.turn"],
+      "unknown_emits": 1,
+      "steps": [{ "emit": true }, { "emit": true }],
+      "requests": [
+        { "method": "POST", "path": "/events/emit" },
+        { "method": "POST", "path": "/manifest/merge", "body": { "events": ["chat.message", "game.turn"] } },
+        { "method": "POST", "path": "/events/emit" },
+        { "method": "POST", "path": "/events/emit" }
+      ]
+    },
+    {
+      "name": "after an unknown_event's merge, attach sends nothing more for the same events",
+      "define": ["chat.message"],
+      "unknown_emits": 1,
+      "steps": [{ "emit": true }, { "attach": true }, { "emit": true }],
+      "requests": [
+        { "method": "POST", "path": "/events/emit" },
+        { "method": "POST", "path": "/manifest/merge", "body": { "events": ["chat.message"] } },
+        { "method": "POST", "path": "/events/emit" },
+        { "method": "POST", "path": "/events/emit" }
+      ]
+    },
+    {
+      "name": "an unknown_event's merge carries the settings the app published, and only those",
+      "define": ["chat.message"],
+      "unknown_emits": 1,
+      "steps": [
+        { "publish": { "description": "Team chat for agents" }, "answer": { "status": 503, "body": { "error": { "code": "unavailable", "message": "try again" } } }, "error": "try again" },
+        { "emit": true }
+      ],
+      "requests": [
+        { "method": "PUT", "path": "/manifest", "body": { "description": "Team chat for agents", "events": ["chat.message"] } },
+        { "method": "POST", "path": "/events/emit" },
+        { "method": "POST", "path": "/manifest/merge", "body": { "description": "Team chat for agents", "events": ["chat.message"] } },
+        { "method": "POST", "path": "/events/emit" }
+      ]
+    },
+    {
+      "name": "an event Wakeshift still doesn't know after the merge fails the emit, after one more try",
+      "define": ["chat.message"],
+      "unknown_emits": 99,
+      "steps": [{ "emit": true, "error": "unknown_event" }],
+      "requests": [
+        { "method": "POST", "path": "/events/emit" },
+        { "method": "POST", "path": "/manifest/merge", "body": { "events": ["chat.message"] } },
+        { "method": "POST", "path": "/events/emit" }
+      ]
+    },
+    {
+      "name": "an emit after attach merges first and gets no unknown_event: no second merge",
+      "define": ["chat.message"],
+      "unknown_emits": 0,
+      "steps": [{ "attach": true }, { "emit": true }, { "emit": true }],
+      "requests": [
+        { "method": "POST", "path": "/manifest/merge", "body": { "events": ["chat.message"] } },
+        { "method": "POST", "path": "/events/emit" },
+        { "method": "POST", "path": "/events/emit" }
+      ]
     },
     {
       "name": "calls that only read, from a process that doesn't serve the app's tools, never send the manifest",
