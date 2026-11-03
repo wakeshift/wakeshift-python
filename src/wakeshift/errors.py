@@ -22,6 +22,17 @@ class WakeshiftError(Exception):
         self.reason = reason
 
 
+class IdReusedError(WakeshiftError):
+    """An emit's id was used within the last day for a different emit
+    (another event, arguments, recipients or payload): a WakeshiftError with
+    code ``id_reused`` (status 409). Nothing was sent. A retry of the same
+    emit isn't refused: it returns the first emit's result with
+    ``duplicate=True``."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(409, "id_reused", message)
+
+
 def is_code(err: BaseException, code: str) -> bool:
     """Whether err is a WakeshiftError with code."""
     return isinstance(err, WakeshiftError) and err.code == code

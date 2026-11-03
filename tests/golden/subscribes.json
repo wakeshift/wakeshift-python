@@ -1,0 +1,104 @@
+{
+  "_comment": "How tools/list describes a tool that declares the events it subscribes to (TypeScript attached.events(name, { subscribes }, handler), Go appkit.Subscribes, Python @attached.tool(subscribes=...)): the tool's description, then EVENT_TOOL_TEXT.notifies with \" of this event: <description>\" (or \" of these events: <d1>; <d2>\") in place of {when}. app is the app's name as GET /app gives it (\"\": this app); events are the declared events' descriptions. Shared by the three SDKs.",
+  "cases": [
+    {
+      "name": "one event, the app named",
+      "description": "Watch a build, and get notified in this conversation when it finishes.",
+      "app": "Shipyard",
+      "events": [
+        "A build finished: it passed, failed or was canceled."
+      ],
+      "want": "Watch a build, and get notified in this conversation when it finishes. This tool is how Shipyard notifies you in this conversation of this event: A build finished: it passed, failed or was canceled. Shipyard delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it."
+    },
+    {
+      "name": "no app name: this app",
+      "description": "Watch a build.",
+      "app": "",
+      "events": [
+        "A build finished: it passed, failed or was canceled."
+      ],
+      "want": "Watch a build. This tool is how this app notifies you in this conversation of this event: A build finished: it passed, failed or was canceled. This app delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it."
+    },
+    {
+      "name": "a lowercase app name is capitalized where it starts a sentence",
+      "description": "Watch a build.",
+      "app": "shipyard",
+      "events": [
+        "A build finished: it passed, failed or was canceled"
+      ],
+      "want": "Watch a build. This tool is how shipyard notifies you in this conversation of this event: A build finished: it passed, failed or was canceled. Shipyard delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it."
+    },
+    {
+      "name": "several events, each without its period",
+      "description": "Watch a deploy.",
+      "app": "Shipyard",
+      "events": [
+        "A deploy started.",
+        "A deploy finished: it succeeded or was rolled back."
+      ],
+      "want": "Watch a deploy. This tool is how Shipyard notifies you in this conversation of these events: A deploy started; A deploy finished: it succeeded or was rolled back. Shipyard delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it."
+    },
+    {
+      "name": "trailing periods and spaces trimmed, exactly one added",
+      "description": "  Watch a build.  ",
+      "app": "Shipyard",
+      "events": [
+        "A build finished...  "
+      ],
+      "want": "Watch a build. This tool is how Shipyard notifies you in this conversation of this event: A build finished. Shipyard delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it."
+    },
+    {
+      "name": "a description over several lines reads as one",
+      "description": "Watch a build.",
+      "app": "Shipyard",
+      "events": [
+        "A build finished:\n  it passed or failed."
+      ],
+      "want": "Watch a build. This tool is how Shipyard notifies you in this conversation of this event: A build finished: it passed or failed. Shipyard delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it."
+    },
+    {
+      "name": "the same description twice is named once",
+      "description": "Watch a build.",
+      "app": "Shipyard",
+      "events": [
+        "A build finished: it passed, failed or was canceled.",
+        "A build finished: it passed, failed or was canceled"
+      ],
+      "want": "Watch a build. This tool is how Shipyard notifies you in this conversation of this event: A build finished: it passed, failed or was canceled. Shipyard delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it."
+    },
+    {
+      "name": "an empty tool description is the sentence alone",
+      "description": "",
+      "app": "Shipyard",
+      "events": [
+        "A build finished: it passed, failed or was canceled."
+      ],
+      "want": "This tool is how Shipyard notifies you in this conversation of this event: A build finished: it passed, failed or was canceled. Shipyard delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it."
+    },
+    {
+      "name": "no events: unchanged",
+      "description": "List builds.",
+      "app": "Shipyard",
+      "events": [],
+      "want": "List builds."
+    },
+    {
+      "name": "notifies() already wrote a sentence: unchanged",
+      "description": "Watch a build. This tool is how Shipyard notifies you in this conversation when a build finishes. Shipyard delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it.",
+      "app": "Shipyard",
+      "events": [
+        "A build finished: it passed, failed or was canceled."
+      ],
+      "want": "Watch a build. This tool is how Shipyard notifies you in this conversation when a build finishes. Shipyard delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it."
+    },
+    {
+      "name": "notifies() for this app, before tools/list names it: unchanged",
+      "description": "Watch a build. This tool is how this app notifies you in this conversation. This app delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it.",
+      "app": "Shipyard",
+      "events": [
+        "A build finished: it passed, failed or was canceled."
+      ],
+      "want": "Watch a build. This tool is how this app notifies you in this conversation. This app delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it."
+    }
+  ]
+}

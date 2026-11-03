@@ -15,7 +15,7 @@ from urllib.parse import quote
 import httpx2
 from mcp_types import CallToolResult, TextContent
 
-from .errors import WakeshiftError
+from .errors import IdReusedError, WakeshiftError
 from .key import AppKey, is_test_key, parse_key, sign_assertion
 from .retry import RETRY_PAUSES, refused
 
@@ -221,11 +221,15 @@ class Recipient:
 class Emitted:
     """What an emit reached."""
 
-    #: Conversations it woke (or will).
+    #: Conversations it reached: each woken now, or as soon as its agent can
+    #: take it.
     matched: int
-    #: An earlier emit had this occurrence's id.
+    #: A retry: an earlier emit, the same as this one, had its id, and this
+    #: is that emit's result (nothing new was sent). The id on a different
+    #: emit raises IdReusedError instead.
     duplicate: bool = False
-    #: The user and native recipients with no live subscription it reached.
+    #: The user and native recipients with no live subscription it reached,
+    #: whether ``to`` names one or many.
     unmatched: list[Recipient] = field(default_factory=list)
     #: The subscription recipients no longer live (or not that user's, or
     #: this event's): forget them. A duplicate reports the first emit's.
@@ -701,12 +705,17 @@ class Wakeshift:
         # manifest, merged, then emit once more.
         seen = self._sends
         try:
-            out = await self._request("POST", "/events/emit", body)
+            try:
+                out = await self._request("POST", "/events/emit", body)
+            except WakeshiftError as e:
+                if e.status != 404 or e.code != "unknown_event":
+                    raise
+                await self._resend_manifest(seen)
+                out = await self._request("POST", "/events/emit", body)
         except WakeshiftError as e:
-            if e.status != 404 or e.code != "unknown_event":
-                raise
-            await self._resend_manifest(seen)
-            out = await self._request("POST", "/events/emit", body)
+            if e.status == 409 and e.code == "id_reused":
+                raise IdReusedError(e.detail) from e
+            raise
         return Emitted(
             matched=int(out["matched"]),
             duplicate=bool(out.get("duplicate")),

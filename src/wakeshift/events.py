@@ -14,7 +14,7 @@ shared golden files."""
 import inspect
 import json
 import re
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC
 from typing import TYPE_CHECKING, Any
@@ -115,6 +115,9 @@ EVENT_TOOL_TEXT: dict[str, str] = {
     "none": "You have no subscriptions to this app's events.",
     "not_subscribed": "This conversation wasn't subscribed to {event} {arguments}.",
     "notifies": "This tool is how {app} notifies you in this conversation{when}. {App} delivers its notifications through Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. Follow it.",
+    "notifies_event": " of this event: {events}",
+    "notifies_events": " of these events: {events}",
+    "notifies_events_separator": "; ",
     "personal_no_user": "{event} is personal, and this app couldn't tell who you are: sign in to it first.",
     "polled": "polled by an MCP client",
     "refused": "You may not subscribe to {event} with these arguments.",
@@ -152,6 +155,53 @@ def _notifies_sentence(app: str, when: str | None = None) -> str:
     )
 
 
+def _event_descriptions(descriptions: Iterable[str]) -> list[str]:
+    """The declared events' descriptions as the subscribes sentence quotes
+    them: each on one line, its trailing periods trimmed, each once."""
+    out: list[str] = []
+    for d in descriptions:
+        c = _TRAILING.sub("", " ".join((d or "").split()))
+        if c and c not in out:
+            out.append(c)
+    return out
+
+
+_TRAILING = re.compile(r"[.\s]+$")
+
+
+def _subscribes_sentence(app: str, descriptions: Iterable[str]) -> str:
+    """The sentence tools/list adds to a tool that declares the events it
+    subscribes to: notifies' sentence with the events' own descriptions
+    where when goes. sdk/typescript/test/subscribes.json pins it."""
+    ds = _event_descriptions(descriptions)
+    if not ds:
+        return ""
+    of = fill(
+        "notifies_event" if len(ds) == 1 else "notifies_events",
+        events=EVENT_TOOL_TEXT["notifies_events_separator"].join(ds),
+    )
+    return EVENT_TOOL_TEXT["notifies"].replace("{when}", of).replace("{App}", app[:1].upper() + app[1:]).replace("{app}", app)
+
+
+# The part of every notifies sentence after the app's name, whatever its app
+# and events: a description that has it already says how the app notifies.
+_NOTIFIES_TAIL = EVENT_TOOL_TEXT["notifies"][EVENT_TOOL_TEXT["notifies"].index("{App}") + len("{App}") :]
+
+
+def _with_subscribes(description: str, descriptions: Iterable[str], app: str = _UNNAMED_APP) -> str:
+    """A tool's description as tools/list gives it for a tool that declares
+    the events it subscribes to: the subscribes sentence after the tool's own
+    description. One that already has a notifies sentence (notifies(), for
+    custom wording), or no events, is left as it was."""
+    d = (description or "").strip()
+    if _NOTIFIES_TAIL in d:
+        return description
+    n = _subscribes_sentence((app or "").strip() or _UNNAMED_APP, descriptions)
+    if not n:
+        return description
+    return f"{d} {n}" if d else n
+
+
 def _unnamed_parts() -> tuple[str, str]:
     s = _notifies_sentence(_UNNAMED_APP)
     i = s.index(" notifies you in this conversation")
@@ -160,7 +210,12 @@ def _unnamed_parts() -> tuple[str, str]:
 
 
 def notifies(description: str, *, app: str | None = None, when: str | None = None) -> str:
-    """A tool's description, for a tool that subscribes the calling
+    """An optional override, for custom wording: ``@attached.tool(subscribes=[...])``
+    already gives a subscribing tool's description a sentence in tools/list,
+    from its events' own descriptions. A low-level Server's tools (listed with
+    ``wrapped_tool``) can't declare their events, so they use this.
+
+    A tool's description, for a tool that subscribes the calling
     conversation (``call.subscribe``), with sentences after it saying that the
     tool is how the app notifies the agent (``when``, if given), that the app
     delivers its notifications through Wakeshift, and what the result may ask
@@ -522,8 +577,11 @@ class WakeEvent:
         ``Recipient(user=u, subscription=id)`` (exactly that conversation's,
         the id call.subscribe returned) or ``Recipient(native=u)`` (only the
         user's own MCP Events subscriptions), one or a list, at most 1,000.
-        The payload is checked against the event's schema first. A retry with
-        the same id must name the same recipients: Wakeshift uses the first's."""
+        The payload is checked against the event's schema first. ``id`` makes
+        retries emit once for a day: a retry of the same emit (arguments,
+        recipients and payload) returns the first's result with
+        ``duplicate=True``; the id on a different emit raises IdReusedError
+        (``id_reused``) and sends nothing."""
         a_obj, a_json = self._parse_args(args)
         try:
             p_obj, p_json = self._payload.parse(payload)
@@ -1105,6 +1163,7 @@ def attach_events(
             # A wrapped tool's structured results carry Wakeshift's block in
             # wakeshift, so its output schema names it.
             attached._amend_list(result["tools"])
+            attached._describe_list(result["tools"])
             await attached._name_app(result["tools"])
             client, _, _ = _request_info(ctx)
             caps = _client_capabilities(ctx)

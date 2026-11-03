@@ -23,6 +23,7 @@ from wakeshift import (
     EventStatus,
     EventSubscriptionStatus,
     Identity,
+    IdReusedError,
     Recipient,
     Subscription,
     ToolCall,
@@ -55,6 +56,8 @@ class WakeCore:
         self.native: list[dict[str, Any]] = []
         #: Seconds each subscribe takes.
         self.delay = 0.0
+        #: GET /app's name, if set (otherwise /app is a 404).
+        self.app_name: str | None = None
 
     def paths(self) -> list[str]:
         return [p for p, _ in self.calls if p not in ("/manifest", "/manifest/merge")]
@@ -121,6 +124,8 @@ class WakeCore:
                     ]
                 },
             )
+        if path == "/app" and self.app_name is not None:
+            return httpx2.Response(200, json={"id": "cards", "name": self.app_name, "key": {"key_id": "k1", "name": "test"}})
         if path == "/events/publish-urls":
             return httpx2.Response(200, json={"id": "p1", "url": "https://x"})
         if path == "/events/emit":
@@ -696,7 +701,7 @@ async def test_identify_client() -> None:
 async def test_typed_output() -> None:
     w = Wrapped()
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.shared])
     async def join(table: str, call: ToolCall) -> View:
         await call.subscribe(w.shared, {"table": table})
         return View(table=table)
@@ -720,17 +725,17 @@ async def test_structured_output_carries_the_block() -> None:
     so a client that checks structuredContent against the schema takes it."""
     w = Wrapped()
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.shared])
     async def join_plain(table: str, call: ToolCall) -> PlainView:
         await call.subscribe(w.shared, {"table": table})
         return PlainView(table=table)
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.shared])
     async def join_strict(table: str, call: ToolCall) -> StrictView:
         await call.subscribe(w.shared, {"table": table})
         return StrictView(table=table)
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.shared])
     async def seats(table: str, call: ToolCall) -> list[str]:
         await call.subscribe(w.shared, {"table": table})
         return ["ada", "bo"]
@@ -766,12 +771,12 @@ async def test_str_tool_replies_with_text() -> None:
     MCPServer's {"result": …}, which carries the block too."""
     w = Wrapped()
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.shared])
     async def watch(table: str, call: ToolCall) -> str:
         await call.subscribe(w.shared, {"table": table})
         return f"Watching {table}."
 
-    @w.attached.tool(structured_output=True)
+    @w.attached.tool(structured_output=True, subscribes=[w.shared])
     async def watch_structured(table: str, call: ToolCall) -> str:
         await call.subscribe(w.shared, {"table": table})
         return f"Watching {table}."
@@ -867,6 +872,29 @@ async def test_emit_recipients_golden() -> None:
             "ended": [_plain(r) for r in out.ended],
         }
         assert got == c["emitted"], c["name"]
+    # An id used for a different emit: IdReusedError, a WakeshiftError.
+    reused = f["id_reused"]
+    http = httpx2.AsyncClient(
+        transport=httpx2.MockTransport(
+            lambda r: (
+                httpx2.Response(reused["status"], json={"error": {"code": reused["code"], "message": reused["message"]}})
+                if r.url.path.endswith("/emit")
+                else httpx2.Response(200, json={})
+            )
+        )
+    )
+    wake = Wakeshift(app_key("cards"), core="http://core.test", http=http)
+    ev = wake.define_event(
+        "game.turn", description="T.", args=TableArgs, payload=TurnMsg, text=lambda m, a: m.text, personal=True
+    )
+    with pytest.raises(IdReusedError) as reused_err:
+        await ev.emit({"table": "oak"}, {"text": "go"}, to="u1", id="m1")
+    assert isinstance(reused_err.value, WakeshiftError)
+    assert (reused_err.value.status, reused_err.value.code, reused_err.value.detail) == (
+        reused["status"],
+        reused["code"],
+        reused["message"],
+    )
     for c in f["refused"]:
         w.core.reset()
         with pytest.raises(WakeshiftError) as e:

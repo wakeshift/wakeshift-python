@@ -1,5 +1,5 @@
 {
-  "comment": "A multi-recipient emit (docs/subscribe-from-tools.md, \"Emitting to many\"): each case's to (a user, {user, subscription} or {native}) and the body's to it becomes (one plain user as a string, else a list), each name trimmed of the whitespace around it; response is /events/emit's answer and emitted what each SDK reads from it (unmatched and ended in to's forms, empty lists when the answer has none); refused are recipient lists a personal event refuses before asking Wakeshift, with refused_code, as Wakeshift would: a name that's empty once trimmed is refused. one_user is a personal event's status and publish URL to, trimmed the same way (refused: empty once trimmed, with refused_code). status_of is subscriptions to read by ID, each {user, subscription}, and the body's subscriptions they become, trimmed; refused ones, with its own refused_code. Every SDK's tests read it.",
+  "comment": "A multi-recipient emit (docs/subscribe-from-tools.md, \"Emitting to many\"): each case's to (a user, {user, subscription} or {native}) and the body's to it becomes (one plain user as a string, else a list), each name trimmed of the whitespace around it; response is /events/emit's answer and emitted what each SDK reads from it (unmatched and ended in to's forms, empty lists when the answer has none); refused are recipient lists a personal event refuses before asking Wakeshift, with refused_code, as Wakeshift would: a name that's empty once trimmed is refused. one_user is a personal event's status and publish URL to, trimmed the same way (refused: empty once trimmed, with refused_code). status_of is subscriptions to read by ID, each {user, subscription}, and the body's subscriptions they become, trimmed; refused ones, with its own refused_code. Every SDK's tests read it. id_reused is /events/emit's refusal of an id used for a different emit: each SDK throws its typed error for it (TypeScript and Python IdReusedError, Go an *APIError that errors.Is ErrIDReused), with that status, code and message.",
   "cases": [
     {
       "name": "one user",
@@ -164,6 +164,25 @@
       }
     },
     {
+      "name": "a single user nobody's subscribed",
+      "response": {
+        "matched": 0,
+        "duplicate": false,
+        "unmatched": [
+          "u1"
+        ],
+        "ended": []
+      },
+      "emitted": {
+        "matched": 0,
+        "duplicate": false,
+        "unmatched": [
+          "u1"
+        ],
+        "ended": []
+      }
+    },
+    {
       "name": "a single user's answer has neither",
       "response": {
         "matched": 0,
@@ -177,6 +196,11 @@
       }
     }
   ],
+  "id_reused": {
+    "status": 409,
+    "code": "id_reused",
+    "message": "game.turn: this id was already used within the last day for a different emit (another event, arguments, recipients, payload or text), so this one was not sent. Retry with exactly the same emit, or give a new occurrence a new id"
+  },
   "refused": [
     {
       "name": "no recipient",

@@ -104,30 +104,31 @@ class App:
         self.mcp.add_middleware(Observe())
         self.attached = self.wake.attach(self.mcp, identify=identify or identify_by_claim("sub"))
 
-        @self.attached.tool()
+        @self.attached.tool(subscribes=[self.turn])
         async def join(table: str, call: ToolCall) -> str:
             """Take a seat."""
             await call.subscribe(self.turn, {"table": table})
             return f"Seated at {table}."
 
-        @self.attached.tool()
+        @self.attached.tool(subscribes=[self.turn])
         async def sit(table: str, call: ToolCall) -> Seat:
             """Take a numbered seat."""
             await call.subscribe(self.turn, {"table": table})
             return Seat(table=table, seat=3)
 
-        @self.attached.tool()
+        @self.attached.tool(subscribes=[self.turn])
         async def boom(table: str, call: ToolCall) -> str:
             await call.subscribe(self.turn, {"table": table})
             raise ValueError("the table is full")
 
-        @self.attached.tool()
+        @self.attached.tool(subscribes=[self.turn])
         async def bad_output(table: str, call: ToolCall) -> Plain:
             await call.subscribe(self.turn, {"table": table})
             return {"seat": 3}  # type: ignore[return-value]  # no table: the output schema refuses it
 
         @self.attached.tool(
             name="peek",
+            subscribes=[self.turn],
             description="Look at a table.",
             tags={"cards"},
             annotations=ToolAnnotations(read_only_hint=True),
@@ -139,7 +140,7 @@ class App:
             await call.subscribe(self.turn, {"table": table})
             return f"{table}: {n} seats on {ctx.fastmcp.name}, request {ctx.request_id}."
 
-        @self.attached.tool()
+        @self.attached.tool(subscribes=[self.turn])
         async def current(table: str, call: ToolCall, ctx: Context = CurrentContext()) -> str:  # noqa: B008
             outer.contexts.append(ctx)
             await call.subscribe(self.turn, {"table": table})
@@ -272,7 +273,10 @@ async def test_wire_schemas_and_capabilities() -> None:
         assert tools["list_subscriptions"]["annotations"]["readOnlyHint"] is True
         # The decorator's options reach FastMCP; Context and Depends parameters are hidden.
         peek = tools["peek"]
-        assert peek["description"] == "Look at a table." and peek["annotations"]["readOnlyHint"] is True
+        assert peek["annotations"]["readOnlyHint"] is True
+        # It declares game.turn: the sentence follows its own description.
+        assert peek["description"].startswith("Look at a table. This tool is how ")
+        assert " notifies you in this conversation of this event: Your turn. " in peek["description"]
         assert peek["_meta"]["area"] == "lobby"
         assert set(peek["inputSchema"]["properties"]) == {"table", "session_key", "harness", "conversation_id"}
         assert set(tools["current"]["inputSchema"]["properties"]) == {"table", "session_key", "harness", "conversation_id"}

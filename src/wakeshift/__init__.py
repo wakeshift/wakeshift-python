@@ -8,7 +8,7 @@ the best way its client allows.
     message = wake.define_event("chat.message", description=..., args=..., payload=..., text=...)
     attached = wake.attach(server, identify=lambda ctx: Identity(user=user_of(ctx)))
 
-    @attached.tool()
+    @attached.tool(subscribes=[message])
     async def watch(channel: str, call: ToolCall) -> str:
         await call.subscribe(message, {"channel": channel})
         return f"Watching #{channel}."
@@ -33,7 +33,7 @@ from .client import (
     WakeLimit,
     Wakeshift,
 )
-from .errors import WakeshiftError, is_code
+from .errors import IdReusedError, WakeshiftError, is_code
 from .events import (
     BUILTIN_TOOLS,
     EVENT_TOOL_TEXT,
@@ -53,9 +53,9 @@ from .harness import harness_agent
 from .key import AppKey, parse_key, sign_assertion
 from .spec import EXTENSION_KEY, TEXT_META
 from .spec import REVISION as EVENTS_REVISION
-from .toolcall import Attached, CallEnded, EventsOptions, Subscription, ToolCall, WakeOutput, wrapped_tool
+from .toolcall import Attached, CallEnded, EventsOptions, Subscription, ToolCall, UndeclaredSubscribe, WakeOutput, wrapped_tool
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 __all__ = [
     "BUILTIN_TOOLS",
@@ -84,6 +84,7 @@ __all__ = [
     "Emitted",
     "EventsOptions",
     "Identity",
+    "IdReusedError",
     "Manifest",
     "PublishUrl",
     "Recipient",
@@ -92,6 +93,7 @@ __all__ = [
     "Subscriber",
     "Subscription",
     "ToolCall",
+    "UndeclaredSubscribe",
     "WakeEvent",
     "WakeLimit",
     "WakeOutput",

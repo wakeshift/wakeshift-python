@@ -12,7 +12,7 @@ FastMCP tool. This module holds the helpers that only make sense on FastMCP::
     message = wake.define_event("chat.message", ...)
     attached = wake.attach(mcp, identify=identify_by_claim("sub"))
 
-    @attached.tool()
+    @attached.tool(subscribes=[message])
     async def watch(channel: str, call: ToolCall) -> str:
         await call.subscribe(message, {"channel": channel})
         return f"Watching #{channel}."

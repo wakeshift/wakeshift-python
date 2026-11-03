@@ -9,7 +9,7 @@ appkit.Events (pkg/appkit/toolcall.go, attachcall.go)::
 
     attached = wake.attach(server, identify=lambda ctx: Identity(user=user_of(ctx)))
 
-    @attached.tool()
+    @attached.tool(subscribes=[turn])
     async def join(table: str, call: wakeshift.ToolCall) -> str:
         \"\"\"Take a seat at a table.\"\"\"
         sub = await call.subscribe(turn, {"table": table}, reason=f"Playing at {table}")
@@ -26,7 +26,7 @@ import dataclasses
 import inspect
 import json
 import typing
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Optional
 
@@ -74,6 +74,40 @@ CONVERSATION_META = (
 CONNECTOR_META_KEY = "wakeshift/connector"
 
 _MAX_NATIVE_LINES = 20
+
+
+#: What a subscribe the tool doesn't declare does: warns once per tool (this
+#: release), or raises UndeclaredSubscribe (True: the next release). Tests
+#: flip it.
+_UNDECLARED_IS_ERROR = False
+
+
+class UndeclaredSubscribe(RuntimeError):
+    """``call.subscribe`` for an event the tool doesn't declare
+    (``@attached.tool(subscribes=[...])``), once undeclared subscribes are an
+    error. The message says the fix."""
+
+
+def _event_ref(name: str) -> str:
+    return f"<{name}'s event>"
+
+
+def _undeclared_message(tool: str, event: str, declared: "list[str] | None", error: bool) -> str:
+    """The warning (or, once undeclared subscribes are an error, the error)
+    for a subscribe the tool doesn't declare."""
+    fix = "@attached.tool(subscribes=[" + ", ".join(_event_ref(n) for n in [*(declared or []), event]) + "])"
+    if declared is None:
+        what = f"the tool {tool} subscribed to {event} without declaring the events it subscribes to"
+    elif not declared:
+        what = f"the tool {tool} subscribed to {event}, but declares that it subscribes to nothing"
+    else:
+        what = f"the tool {tool} subscribed to {event}, which its subscribes doesn't list ({', '.join(declared)})"
+    if error:
+        return f"wakeshift: {what}, so the subscribe was refused. Fix: {fix}."
+    return (
+        f"wakeshift: {what}, so tools/list doesn't tell the agent that the tool is how this app notifies it. "
+        f"Fix: {fix}. It works for now; from the next release an undeclared subscribe raises."
+    )
 
 
 class CallEnded(RuntimeError):
@@ -125,7 +159,9 @@ def wrapped_tool(tool: Any) -> Any:
     with ``attached.call(ctx)``, as ``@attached.tool()`` would list it: its
     input schema gains session_key, harness and conversation_id (a parameter
     the tool names itself is kept), and an object output schema names
-    ``wakeshift``. Returns a copy::
+    ``wakeshift``. Such a tool can't declare the events it subscribes to,
+    so give it its sentence with ``notifies()`` in its description. Returns a
+    copy::
 
         TOOLS = [wrapped_tool(types.Tool(name="watch", input_schema={...}))]
     """
@@ -375,6 +411,8 @@ class ToolCall:
         harness: str | None,
         conversation: str | None,
         client: str | None = None,
+        declared: "list[WakeEvent] | None" = None,
+        checked: bool = False,
     ) -> None:
         if _token is not _SENTINEL:
             raise TypeError("wakeshift: a ToolCall is made by @attached.tool(): subscribe only from a wrapped tool")
@@ -401,6 +439,10 @@ class ToolCall:
         self.recognized: Recognized | None = None
         self._harness = harness
         self._conversation = conversation
+        # The events the tool declares (None: none declared), and whether its
+        # subscribes are checked against them (a low-level call can't declare).
+        self._declared = declared
+        self._checked = checked
         rc = getattr(context, "request_context", context)
         named, meta, headers = _request_info(rc)
         # The request's client name, else identify's.
@@ -451,6 +493,19 @@ class ToolCall:
                 404, "unknown_event", f"{getattr(event, 'name', event)} is another app's event: this app doesn't offer it"
             )
 
+    def _check_declared(self, event: "WakeEvent") -> None:
+        """Warns once per tool (or raises, once undeclared subscribes are an
+        error) when the tool doesn't declare event."""
+        if not self._checked:
+            return
+        d = self._declared
+        if d is not None and any(e is event or e.name == event.name for e in d):
+            return
+        names = [e.name for e in d] if d is not None else None
+        if _UNDECLARED_IS_ERROR:
+            raise UndeclaredSubscribe(_undeclared_message(self.tool, event.name, names, True))
+        self._scope.attached._warn_once("undeclared:" + self.tool, _undeclared_message(self.tool, event.name, names, False))
+
     async def resolve_session(self) -> str:
         """Finds or starts the calling conversation's session without
         subscribing it to anything (it doesn't make the conversation
@@ -484,10 +539,12 @@ class ToolCall:
         tool decides who may: authorize isn't consulted. A personal event
         needs a user (identify's). ttl: seconds or "30d"; reason: shown in the
         console (at most 200 characters); label: names a new session, for an
-        app acting for its agents."""
+        app acting for its agents. event is one the tool declares
+        (``@attached.tool(subscribes=[...])``)."""
         s = await self._enter()
         try:
             self._check_event(event)
+            self._check_declared(event)
             _, a_json = event._parse_args(args)
             if self.native:
                 s.add_native(event.name, a_json)
@@ -616,6 +673,8 @@ class Attached:
         self._identify = identify
         self._events = events or EventsOptions()
         self._wrapped: set[str] = set()
+        #: The events each wrapped tool declares (subscribes), by tool.
+        self._declared: dict[str, list[WakeEvent]] = {}
         self._checks: dict[str, Callable[[Any], str | None]] = {}
         self._warned: set[str] = set()
         self._tasks: set[asyncio.Task[Any]] = set()
@@ -627,7 +686,12 @@ class Attached:
         self._wake._warn(message)
 
     def tool(
-        self, name: str | None = None, description: str | None = None, **kwargs: Any
+        self,
+        name: str | None = None,
+        description: str | None = None,
+        *,
+        subscribes: "Sequence[WakeEvent] | None" = None,
+        **kwargs: Any,
     ) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
         """Registers an async tool on the server attach was given, as
         ``server.tool()`` would (its options pass through: on FastMCP,
@@ -635,7 +699,19 @@ class Attached:
         annotated ``ToolCall`` the SDK fills. The tool's schema gains
         session_key, harness and conversation_id, and hides ``call``. The
         reply gets Wakeshift's block; a call that fails ends the
-        subscriptions it made."""
+        subscriptions it made.
+
+        ``subscribes`` lists the events the tool subscribes the calling
+        conversation to (``[]``: none). tools/list then adds a sentence to the
+        tool's description saying the tool is how the app notifies the agent
+        of them, in their own descriptions' words, and that the result may ask
+        to start a listener and offer an install: agents set Wakeshift's part
+        of a result aside as unrequested unless the tool's description says
+        so. A ``call.subscribe`` for an event the tool doesn't declare works,
+        but warns once::
+
+            @attached.tool(subscribes=[build_finished])
+            async def watch_build(build: int, call: ToolCall) -> str: ..."""
         if callable(name):
             raise TypeError("wakeshift: use @attached.tool(), with the parentheses")
         if not self._host.registers_tools:
@@ -644,18 +720,36 @@ class Attached:
                 "and call attached.call(ctx) in your on_call_tool handler"
             )
 
+        declared = self._declared_of(name, subscribes)
+
         def decorator(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
-            self._register(fn, name, description, kwargs)
+            self._register(fn, name, description, kwargs, declared)
             return fn
 
         return decorator
+
+    def _declared_of(self, name: str | None, subscribes: Any) -> "list[WakeEvent] | None":
+        """The events a tool declares, each one of this app's (None: none declared)."""
+        if subscribes is None:
+            return None
+        what = f"@attached.tool({name!r}, subscribes=...)" if name else "@attached.tool(subscribes=...)"
+        if isinstance(subscribes, (str, bytes, Mapping)) or not isinstance(subscribes, (list, tuple)):
+            raise TypeError(f"wakeshift: {what} lists the events the tool subscribes to ([] for none)")
+        for e in subscribes:
+            if getattr(e, "_wake", None) is not self._wake:
+                raise TypeError(
+                    f"wakeshift: {what} lists {getattr(e, 'name', e)!r}, which isn't one of this app's events (wake.define_event)"
+                )
+        return list(subscribes)
 
     def call(self, ctx: Any) -> ToolCall:
         """The ToolCall for the tools/call being answered, for a tool attach
         didn't register: a low-level Server's on_call_tool handler passes its
         ctx. The call then gets Wakeshift's block and rolls back what it
         subscribed if it fails, as a wrapped tool's does; list the tool with
-        ``wrapped_tool`` so its schema takes Wakeshift's arguments. Called
+        ``wrapped_tool`` so its schema takes Wakeshift's arguments. Such a
+        tool can't declare the events it subscribes to, so tools/list adds no
+        sentence to its description: write it with ``notifies()``. Called
         again in the same call, it returns the same ToolCall::
 
             async def call_tool(ctx, params):
@@ -696,7 +790,14 @@ class Attached:
         scope.call = call
         return call
 
-    def _register(self, fn: Callable[..., Any], name: str | None, description: str | None, kwargs: dict[str, Any]) -> None:
+    def _register(
+        self,
+        fn: Callable[..., Any],
+        name: str | None,
+        description: str | None,
+        kwargs: dict[str, Any],
+        declared: "list[WakeEvent] | None" = None,
+    ) -> None:
         Context = self._host.context_type  # noqa: N806
 
         if not inspect.iscoroutinefunction(fn):
@@ -767,6 +868,8 @@ class Attached:
                 session=_str(wake_vals[SESSION_ARG]),
                 harness=_str(wake_vals[HARNESS_ARG]),
                 conversation=_str(wake_vals[CONVERSATION_ARG]),
+                declared=declared,
+                checked=True,
             )
             call.native, call.native_conversation = attached._native_of(context, rc, call._client)
             scope.call = call
@@ -791,6 +894,10 @@ class Attached:
         if check is not None:
             self._checks[tool_name] = check
         self._wrapped.add(tool_name)
+        if declared is not None:
+            self._declared[tool_name] = declared
+        else:
+            self._declared.pop(tool_name, None)
 
     # ── Who's calling ─────────────────────────────────────────────────────
 
@@ -987,6 +1094,23 @@ class Attached:
         for i, t in enumerate(tools):
             if has(t):
                 tools[i] = {**t, "description": t["description"].replace(first, named1, 1).replace(second, named2, 1)}
+
+    def _describe_list(self, tools: list[Any]) -> None:
+        """tools/list's tools with the subscribes sentence after each
+        declaring tool's description ("this app" until _name_app names it). A
+        tool's own notifies() sentence stays the only one."""
+        from .events import _with_subscribes
+
+        for i, t in enumerate(tools):
+            if not isinstance(t, Mapping):
+                continue
+            evs = self._declared.get(t.get("name"))  # type: ignore[arg-type]
+            if not evs:
+                continue
+            d = t.get("description") if isinstance(t.get("description"), str) else ""
+            described = _with_subscribes(d or "", [e.description for e in evs])
+            if described != d:
+                tools[i] = {**t, "description": described}
 
     def _amend_list(self, tools: list[Any]) -> None:
         """tools/list's tools with each wrapped tool's object output schema
