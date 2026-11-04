@@ -33,6 +33,7 @@ from wakeshift import (
     is_code,
 )
 from wakeshift.client import SESSION_DESCRIPTION
+from wakeshift.events import tool_choice
 from wakeshift.toolcall import CONVERSATION_META, conversation_key, merge_block, with_wakeshift_field
 
 from .conftest import FASTMCP
@@ -501,23 +502,55 @@ def test_decorator_refusals() -> None:
 
 async def test_attach_tools_option() -> None:
     """attach's tools picks which of its own tools it adds: all three by
-    default, the ones it names, or none; an unknown name is refused."""
+    default, each {"enabled"} of the mapping form, or (deprecated, with a
+    warning once) the ones a list names; anything it doesn't know is refused."""
     assert BUILTIN_TOOLS == ("subscribe_events", "unsubscribe_events", "list_subscriptions")
 
-    async def listed(tools: list[str] | None) -> list[str]:
-        wake = Wakeshift(app_key("cards"), core="http://core.test")
+    async def listed(tools: Any) -> tuple[list[str], list[str]]:
+        warnings: list[str] = []
+        wake = Wakeshift(app_key("cards"), core="http://core.test", on_warning=warnings.append)
         wake.define_event("table.news", description="News at a table.", args=TableArgs, payload=TurnMsg, text=lambda m, a: m.text)
         server = MCPServer("cards")
         wake.attach(server, tools=tools)
-        return sorted(t.name for t in await server.list_tools())
+        return sorted(t.name for t in await server.list_tools()), warnings
 
-    assert await listed(None) == ["list_subscriptions", "subscribe_events", "unsubscribe_events"]
-    assert await listed(["list_subscriptions", "unsubscribe_events"]) == ["list_subscriptions", "unsubscribe_events"]
-    assert await listed([]) == []
+    every = ["list_subscriptions", "subscribe_events", "unsubscribe_events"]
+    for tools in (
+        None,
+        {},
+        {"subscribe": {}},
+        {"list": {"enabled": True}},
+        {"wait": {"enabled": False}},
+        {"wait": {"enabled": True}},
+    ):
+        assert await listed(tools) == (every, []), tools
+    assert (await listed({"subscribe": {"enabled": False}}))[0] == ["list_subscriptions", "unsubscribe_events"]
+    off = {"enabled": False}
+    assert (await listed({"subscribe": off, "list": off, "unsubscribe": off}))[0] == []
+    names, warnings = await listed(["list_subscriptions", "unsubscribe_events"])
+    assert names == ["list_subscriptions", "unsubscribe_events"]
+    assert len(warnings) == 1 and "tools as a list of names is deprecated" in warnings[0]
+    assert (await listed([]))[0] == []
     wake = Wakeshift(app_key("cards"), core="http://core.test")
     wake.define_event("table.news", description="News at a table.", args=TableArgs, payload=TurnMsg, text=lambda m, a: m.text)
     with pytest.raises(ValueError, match="'subscribe'"):
         wake.attach(MCPServer("cards"), tools=["subscribe"])
+    with pytest.raises(ValueError, match="has 'subscribe_events'"):
+        wake.attach(MCPServer("cards"), tools={"subscribe_events": off})  # type: ignore[typeddict-unknown-key]
+    with pytest.raises(TypeError, match=r"tools\['wait'\] is a mapping"):
+        wake.attach(MCPServer("cards"), tools={"wait": True})  # type: ignore[typeddict-item]
+    with pytest.raises(TypeError, match="True or False"):
+        wake.attach(MCPServer("cards"), tools={"wait": {"enabled": "yes"}})  # type: ignore[typeddict-item]
+    with pytest.raises(ValueError, match="has 'hold_seconds'"):
+        wake.attach(MCPServer("cards"), tools={"wait": {"hold_seconds": 5}})  # type: ignore[typeddict-unknown-key]
+
+
+def test_tool_choice() -> None:
+    """The mapping form and the list form; the wait tool only when enabled, never from a list."""
+    assert tool_choice(None) == (set(BUILTIN_TOOLS), False)
+    assert tool_choice({"wait": {"enabled": True}}) == (set(BUILTIN_TOOLS), True)
+    assert tool_choice({"list": {"enabled": False}}) == ({"subscribe_events", "unsubscribe_events"}, False)
+    assert tool_choice(["subscribe_events"]) == ({"subscribe_events"}, False)
 
 
 async def test_schema_hides_call_and_adds_wake_args() -> None:

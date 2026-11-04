@@ -17,7 +17,7 @@ import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from mcp_types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -132,8 +132,82 @@ EVENT_TOOL_TEXT: dict[str, str] = {
     "webhook": "delivered to {host}",
 }
 
-#: The tools attach adds, unless its ``tools`` names fewer.
+#: The tools attach adds by default (deprecated as ``tools``' list form).
 BUILTIN_TOOLS: tuple[str, ...] = ("subscribe_events", "unsubscribe_events", "list_subscriptions")
+
+
+class ToolOptions(TypedDict, total=False):
+    """One of attach's own tools' options (AttachTools)."""
+
+    #: Whether attach adds it. Default: on, except the wait tool.
+    enabled: bool
+
+
+class WaitToolOptions(ToolOptions, total=False):
+    """The wait tool's options (AttachTools' ``wait``): Wakeshift's wait tool,
+    wakeshift_wait, Claude Code's wake path with nothing installed, where its
+    client takes MCP tasks (protocol 2026-07-28). Off by default: Claude Code
+    is then woken by its plugin or, after a no, a background Monitor, as
+    every other server's is. Enabled, a waiting conversation's Claude Code
+    holds a request to your server (tasks/get, about 20 seconds) and sends the
+    next about a second later, for as long as it waits: on a serverless host,
+    give the function a timeout of at least 30 seconds."""
+
+
+class AttachTools(TypedDict, total=False):
+    """Which of attach's own tools it adds (attach's ``tools``), each
+    ``{"enabled": bool}``: ``subscribe`` (subscribe_events), ``list``
+    (list_subscriptions) and ``unsubscribe`` (unsubscribe_events), on unless
+    disabled, and ``wait`` (wakeshift_wait, Claude Code's wait tool), off
+    unless enabled."""
+
+    wait: WaitToolOptions
+    subscribe: ToolOptions
+    list: ToolOptions
+    unsubscribe: ToolOptions
+
+
+_TOOL_KEYS = {"subscribe": "subscribe_events", "list": "list_subscriptions", "unsubscribe": "unsubscribe_events"}
+
+#: The warning for attach's ``tools`` as a list of names (deprecated).
+TOOLS_LIST_WARNING = (
+    "wakeshift: attach's tools as a list of names is deprecated: pass "
+    '{"subscribe", "list", "unsubscribe"}, each {"enabled": bool} '
+    '(and "wait": {"enabled": True} for Claude Code\'s wait tool)'
+)
+
+
+def tool_choice(tools: "Sequence[str] | AttachTools | None") -> tuple[set[str], bool]:
+    """attach's ``tools`` as the tools to add, and whether to serve the wait
+    tool: each ``{"enabled"}`` of the mapping form, or the names of the
+    deprecated list form (never the wait tool). Raises on a key, name or
+    value it doesn't know."""
+    if tools is None:
+        return set(BUILTIN_TOOLS), False
+    if isinstance(tools, str):
+        raise TypeError('wakeshift: attach\'s tools is a mapping, {"wait": {"enabled": True}, ...}, not a name')
+    if isinstance(tools, Mapping):
+        for key, value in tools.items():
+            if key != "wait" and key not in _TOOL_KEYS:
+                raise ValueError(
+                    f"wakeshift: attach's tools has {key!r}: its own tools are wait, subscribe, list and unsubscribe"
+                )
+            if value is None:
+                continue
+            if not isinstance(value, Mapping):
+                raise TypeError(f'wakeshift: attach\'s tools[{key!r}] is a mapping, {{"enabled": bool}}')
+            for opt, v in value.items():
+                if opt != "enabled":
+                    raise ValueError(f'wakeshift: attach\'s tools[{key!r}] has {opt!r}: its options are {{"enabled"}}')
+                if not isinstance(v, bool):
+                    raise TypeError(f'wakeshift: attach\'s tools[{key!r}]["enabled"] is True or False')
+        wanted = {name for key, name in _TOOL_KEYS.items() if (tools.get(key) or {}).get("enabled") is not False}
+        return wanted, (tools.get("wait") or {}).get("enabled") is True
+    for t in tools:
+        if t not in BUILTIN_TOOLS:
+            raise ValueError(f"wakeshift: attach's tools names {t!r}: its own tools are {', '.join(BUILTIN_TOOLS)}")
+    return set(tools), False
+
 
 SUBSCRIBE_TOOL_DESCRIPTION = EVENT_TOOL_TEXT["subscribe_description"]
 UNSUBSCRIBE_TOOL_DESCRIPTION = EVENT_TOOL_TEXT["unsubscribe_description"]
@@ -803,7 +877,7 @@ def attach_events(
     events: list[WakeEvent],
     *,
     identify: Callable[[Any], Identity | None] | None = None,
-    tools: Sequence[str] | None = None,
+    tools: "Sequence[str] | AttachTools | None" = None,
     events_options: "EventsOptions | None" = None,
 ) -> "Attached":
     """The events part of Wakeshift.attach, on an MCPServer
@@ -817,12 +891,10 @@ def attach_events(
 
     if not events:
         raise ValueError("wakeshift: attach needs at least one event (wake.define_event) defined first")
-    if isinstance(tools, str):
-        raise TypeError("wakeshift: attach's tools is a list of tool names, not one name")
-    for t in tools or ():
-        if t not in BUILTIN_TOOLS:
-            raise ValueError(f"wakeshift: attach's tools names {t!r}: its own tools are {', '.join(BUILTIN_TOOLS)}")
-    wanted = set(BUILTIN_TOOLS if tools is None else tools)
+    wanted, wait = tool_choice(tools)
+    if tools is not None and not isinstance(tools, Mapping) and not wake._tools_list_warned:
+        wake._tools_list_warned = True
+        wake._warn(TOOLS_LIST_WARNING)
     host = host_of(server)
     low = host.lowlevel
     # The Context type the framework fills in a tool (MCPServer's or FastMCP's).
@@ -1001,7 +1073,7 @@ def attach_events(
                 "POST",
                 "/event-subscriptions",
                 {
-                    "call": _call(rc, user=who, client=identified, args=wake_args, tool="subscribe_events").to_json(),
+                    "call": _call(rc, user=who, client=identified, args=wake_args, tool="subscribe_events", wait=wait).to_json(),
                     "name": ev.name,
                     "arguments": a_json,
                 },
@@ -1040,7 +1112,9 @@ def attach_events(
                 "POST",
                 "/event-subscriptions/unsubscribe",
                 {
-                    "call": _call(rc, user=who, client=identified, args=wake_args, tool="unsubscribe_events").to_json(),
+                    "call": _call(
+                        rc, user=who, client=identified, args=wake_args, tool="unsubscribe_events", wait=wait
+                    ).to_json(),
                     "name": ev.name,
                     "arguments": a_json,
                 },
@@ -1140,13 +1214,14 @@ def attach_events(
     # subscribe_events.
 
     attached = Attached(wake, host, identify, events_options)
+    attached._wait = wait
     # Clients that take MCP tasks (Claude Code): Wakeshift's wait tool,
-    # answered with a task (tasks.py).
-    task_server = TaskServer(wake, caller_of)
+    # answered with a task (tasks.py), if the app turns it on (wait).
+    task_server = TaskServer(wake, caller_of) if wait else None
 
     async def middleware(ctx: Any, call_next: Callable[[Any], Awaitable[Any]]) -> Any:
         method = getattr(ctx, "method", "")
-        if task_server.handles(ctx):
+        if task_server is not None and task_server.handles(ctx):
             return await task_server.answer(ctx)
         if method == "tools/call":
             # A wrapped tool's call (@attached.tool()) gets its block here,
@@ -1176,7 +1251,8 @@ def attach_events(
             # (SEP-2549): a public scope the server set becomes private.
             if result.get("cacheScope") == "public":
                 result["cacheScope"] = "private"
-        TaskServer.amend(ctx, method, result)
+        if task_server is not None:
+            TaskServer.amend(ctx, method, result)
         return result
 
     host.install(middleware, wake._warn)

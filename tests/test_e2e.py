@@ -535,7 +535,7 @@ async def test_fastmcp_against_a_real_core() -> None:
     )
     tokens = {f"tok-{u}": {"client_id": "cli", "scopes": [], "sub": f"fm-{u}"} for u in ("ada", "bo")}
     mcp = FastMCP("ci-bot", auth=StaticTokenVerifier(tokens=tokens))
-    attached = wake.attach(mcp, identify=identify_by_claim("sub"))
+    attached = wake.attach(mcp, identify=identify_by_claim("sub"), tools={"wait": {"enabled": True}})
 
     @attached.tool()
     async def watch(repo: str, call: ToolCall) -> str:

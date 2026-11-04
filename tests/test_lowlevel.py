@@ -94,7 +94,7 @@ class App:
         self.attached = self.wake.attach(
             self.server,
             identify=lambda ctx: Identity(user=ctx.request.headers.get("x-user") if ctx.request is not None else None),
-            tools=tools,
+            tools=tools if tools is not None else {"wait": {"enabled": True}},
         )
 
 
@@ -186,7 +186,9 @@ async def test_a_server_without_tool_handlers_gets_attachs_tools() -> None:
 
 
 async def test_no_own_tools_leaves_the_handlers_alone() -> None:
-    a = App(handlers=False, tools=[])
+    a = App(
+        handlers=False, tools={"subscribe": {"enabled": False}, "list": {"enabled": False}, "unsubscribe": {"enabled": False}}
+    )
     async with served(a.server) as (_, rpc):
         res = await rpc("tools/list", {})
         assert "error" in res  # no tools/list handler, as without attach

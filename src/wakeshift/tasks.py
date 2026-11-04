@@ -1,6 +1,7 @@
 """MCP Tasks as a wake path (docs/harnesses.md, "Claude Code: MCP tasks as a
 wake path"): for a client that takes MCP tasks on protocol 2026-07-28, attach
-serves Wakeshift's wait tool, wakeshift_wait. Its call is answered with a task
+with ``wait=True`` serves Wakeshift's wait tool, wakeshift_wait (off by
+default). Its call is answered with a task
 that completes when the conversation's next Wakeshift messages arrive; the
 client follows it in the background (tasks/get), and a completed task wakes
 an idle conversation. Wakeshift decides everything: the SDK passes the tool's
@@ -92,7 +93,7 @@ class TaskServer:
 
     def _wire(self, ctx: Any, args: Mapping[str, Any]) -> dict[str, Any]:
         user, client = self._caller_of(ctx)
-        return _call(ctx, user=user, client=client, args=args, tool=WAIT_TOOL).to_json()
+        return _call(ctx, user=user, client=client, args=args, tool=WAIT_TOOL, wait=True).to_json()
 
     def handles(self, ctx: Any) -> bool:
         method = getattr(ctx, "method", "")

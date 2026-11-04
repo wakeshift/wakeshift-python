@@ -671,6 +671,9 @@ class Attached:
         self._wake = wake
         self._host = host
         self._identify = identify
+        # attach serves the wait tool (wait=True): only then does a call say
+        # its client takes tasks.
+        self._wait = False
         self._events = events or EventsOptions()
         self._wrapped: set[str] = set()
         #: The events each wrapped tool declares (subscribes), by tool.
@@ -787,6 +790,7 @@ class Attached:
             conversation=_str(args.get(CONVERSATION_ARG)),
         )
         call.native, call.native_conversation = self._native_of(ctx, rc, call._client)
+        call._tasks = call._tasks and self._wait
         scope.call = call
         return call
 
@@ -872,6 +876,7 @@ class Attached:
                 checked=True,
             )
             call.native, call.native_conversation = attached._native_of(context, rc, call._client)
+            call._tasks = call._tasks and attached._wait
             scope.call = call
             scope.check = attached._checks.get(tool_name)
             try:

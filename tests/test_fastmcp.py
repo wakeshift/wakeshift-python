@@ -102,7 +102,9 @@ class App:
                 return out
 
         self.mcp.add_middleware(Observe())
-        self.attached = self.wake.attach(self.mcp, identify=identify or identify_by_claim("sub"))
+        self.attached = self.wake.attach(
+            self.mcp, identify=identify or identify_by_claim("sub"), tools={"wait": {"enabled": True}}
+        )
 
         @self.attached.tool(subscribes=[self.turn])
         async def join(table: str, call: ToolCall) -> str:

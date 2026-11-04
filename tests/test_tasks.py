@@ -39,13 +39,14 @@ class _Msg(BaseModel):
     text: str
 
 
-def _app(core: FakeCore) -> MCPServer:
+def _app(core: FakeCore, wait: bool = True) -> MCPServer:
     """The golden file's app: one event, identify naming u1, and a wrapped
-    tool, join, that subscribes nothing and returns "joined"."""
+    tool, join, that subscribes nothing and returns "joined". The wait tool
+    is on unless wait is False (attach's default is off)."""
     wake, _ = fake_wake(core)
     wake.define_event("chat.message", description="A new message", args=_Chat, payload=_Msg, text=lambda m: m.text)
     server = MCPServer("chat")
-    attached = wake.attach(server, identify=lambda _ctx: Identity(user="u1"))
+    attached = wake.attach(server, identify=lambda _ctx: Identity(user="u1"), tools={"wait": {"enabled": wait}})
 
     @attached.tool()
     async def join(call: ToolCall) -> str:
@@ -99,6 +100,38 @@ async def test_wire_format_matches_golden() -> None:
                 assert c["error"]["message"] in res["error"]["message"], (c["name"], res)
             elif "result" in c:
                 assert _without_meta(res.get("result")) == c["result"], (c["name"], res)
+
+
+async def test_without_wait_nothing_of_the_task_path() -> None:
+    """Off by default: no tasks extension, no wait tool, Wakeshift's task
+    requests not taken, and no call says its client takes tasks, so Wakeshift
+    gives Claude Code its plugin, or the Monitor."""
+    core = FakeCore(default_ok=True)
+    server = _app(core, wait=False)
+    meta = G["lists"][0]["meta"]
+    async with served(server) as (_, rpc):
+        d = await rpc("server/discover", {"_meta": meta}, headers=modern("server/discover"))
+        assert TASKS_EXTENSION not in d["result"]["capabilities"].get("extensions", {}), d
+        names = [t["name"] for t in (await rpc("tools/list", {"_meta": meta}, headers=modern("tools/list")))["result"]["tools"]]
+        assert WAIT_TOOL not in names, names
+        params = {"name": WAIT_TOOL, "arguments": {"session_key": "wsc_k"}, "_meta": meta}
+        with contextlib.suppress(AssertionError):
+            await rpc("tools/call", params, headers=modern("tools/call", params))
+        for method in ("tasks/get", "tasks/cancel"):
+            with contextlib.suppress(AssertionError):
+                await rpc(method, {"taskId": "wkt1_x", "_meta": meta}, headers=modern(method))
+        assert not any("/calls/task" in path for _, path, _ in core.requests), core.requests
+        params = {"name": "join", "arguments": {}, "_meta": meta}
+        await rpc("tools/call", params, headers=modern("tools/call", params))
+        params = {
+            "name": "subscribe_events",
+            "arguments": {"event": "chat.message", "arguments": {"channel": "c"}},
+            "_meta": meta,
+        }
+        await rpc("tools/call", params, headers=modern("tools/call", params))
+    calls = [b["call"] for _, _, b in core.requests if isinstance(b, dict) and isinstance(b.get("call"), dict)]
+    assert calls, core.requests
+    assert all("tasks" not in c for c in calls), calls
 
 
 def test_takes_tasks() -> None:

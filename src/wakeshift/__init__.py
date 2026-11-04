@@ -42,10 +42,13 @@ from .events import (
     SUBSCRIBE_TOOL_DESCRIPTION,
     UNSUBSCRIBE_TOOL_DESCRIPTION,
     ArgsError,
+    AttachTools,
     EventStatus,
     EventSubscriptionStatus,
     Identity,
     Subscriber,
+    ToolOptions,
+    WaitToolOptions,
     WakeEvent,
     notifies,
 )
@@ -55,10 +58,13 @@ from .spec import EXTENSION_KEY, TEXT_META
 from .spec import REVISION as EVENTS_REVISION
 from .toolcall import Attached, CallEnded, EventsOptions, Subscription, ToolCall, UndeclaredSubscribe, WakeOutput, wrapped_tool
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 __all__ = [
+    "AttachTools",
     "BUILTIN_TOOLS",
+    "ToolOptions",
+    "WaitToolOptions",
     "CONVERSATION_ARG",
     "DEFAULT_CORE",
     "EVENTS_REVISION",

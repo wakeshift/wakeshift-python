@@ -20,7 +20,7 @@ from .key import AppKey, is_test_key, parse_key, sign_assertion
 from .retry import RETRY_PAUSES, refused
 
 if TYPE_CHECKING:
-    from .events import Identity, WakeEvent
+    from .events import AttachTools, Identity, WakeEvent
     from .toolcall import Attached, EventsOptions
 
 #: Wakeshift's production core, the default for every key but a wst_test_ one. Override with ``core`` or WAKESHIFT_CORE.
@@ -401,11 +401,14 @@ def _takes_tasks(meta: Mapping[str, Any] | None, headers: Mapping[str, str] | No
     return isinstance(ext, Mapping) and TASKS_EXTENSION in ext
 
 
-def _call(ctx: Any, *, user: str | None, args: Mapping[str, Any] | None, tool: str, client: str | None = None) -> _Call:
+def _call(
+    ctx: Any, *, user: str | None, args: Mapping[str, Any] | None, tool: str, client: str | None = None, wait: bool = False
+) -> _Call:
     """Packs the tool call from an MCP request context: its _meta and
     User-Agent, the client's name (the request's, else client: identify's),
     the user, and session_key, harness and conversation_id from args (the
-    tool's arguments)."""
+    tool's arguments). It says the client takes tasks only if attach serves
+    the wait tool (wait)."""
     name, meta, headers = _request_info(ctx)
     return _call_of(
         client_name=name or client or "",
@@ -416,7 +419,7 @@ def _call(ctx: Any, *, user: str | None, args: Mapping[str, Any] | None, tool: s
         harness=_arg(args, HARNESS_ARG),
         conversation=_arg(args, CONVERSATION_ARG),
         tool=tool,
-        tasks=_takes_tasks(meta, headers),
+        tasks=wait and _takes_tasks(meta, headers),
     )
 
 
@@ -454,6 +457,8 @@ class Wakeshift:
         self._http = http
         self._retry_pauses = RETRY_PAUSES
         self._warn_fn = on_warning or (lambda m: print(m, file=sys.stderr))
+        # attach's tools as a list (deprecated) warns once per client.
+        self._tools_list_warned = False
         self._events: dict[str, WakeEvent] = {}
         # What publish_manifest was last given (None: nothing yet); whether
         # this process serves the app's tools (attach: only then is the
@@ -629,7 +634,7 @@ class Wakeshift:
         server: Any,
         *,
         identify: Callable[[Any], Identity | None] | None = None,
-        tools: Sequence[str] | None = None,
+        tools: Sequence[str] | AttachTools | None = None,
         events: EventsOptions | None = None,
     ) -> Attached:
         """Attaches Wakeshift to an MCPServer, a low-level Server
@@ -644,11 +649,20 @@ class Wakeshift:
         (``call.subscribe``). ``events`` configures the event features
         (EventsOptions: native, an override of native detection).
 
-        ``tools`` names which of its own tools attach adds (BUILTIN_TOOLS:
-        subscribe_events, unsubscribe_events, list_subscriptions); None, the
-        default, adds all three, and ``[]`` none. Leave out
-        unsubscribe_events or list_subscriptions only if your own tools let a
-        person see and stop their subscriptions.
+        ``tools`` picks which of its own tools attach adds (AttachTools),
+        each ``{"enabled": bool}``: ``subscribe`` (subscribe_events),
+        ``list`` (list_subscriptions) and ``unsubscribe``
+        (unsubscribe_events), on unless disabled, and ``wait``
+        (wakeshift_wait, Claude Code's wait tool), off unless enabled:
+        ``tools={"wait": {"enabled": True}}``. With the wait tool on, a
+        waiting conversation's Claude Code holds a request to your server
+        (tasks/get, about 20 seconds) and sends the next about a second
+        later, for as long as it waits: on a serverless host, give the
+        function a timeout of at least 30 seconds. Disable ``list`` or
+        ``unsubscribe`` only if your own tools let a person see and stop
+        their subscriptions. Deprecated: a list of names (BUILTIN_TOOLS)
+        still works for now, adding only the tools it names, and never the
+        wait tool.
 
         identify tells who is behind a request (it gets the request context) as
         an Identity, from the app's own sign-in. Without it, requests have no
