@@ -67,6 +67,8 @@ async def test_wire_format_matches_golden() -> None:
     assert G["extension"] == TASKS_EXTENSION
     assert G["hold_seconds"] == TASK_HOLD_SECONDS
     assert G["wait_tool"] == WAIT_TOOL_DEFINITION
+    # Its annotations are the ones every SDK gives it (tool-annotations.json).
+    assert G["wait_tool"]["annotations"] == golden_file("tool-annotations.json")[WAIT_TOOL]
 
     answers: dict[str, Any] = {}
     core = FakeCore(default_ok=True)

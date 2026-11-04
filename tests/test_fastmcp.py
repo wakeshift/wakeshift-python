@@ -30,7 +30,7 @@ from wakeshift.fastmcp import access_token, identify_by_claim  # noqa: E402
 from wakeshift.spec import EXTENSION_KEY  # noqa: E402
 from wakeshift.tasks import TASKS_EXTENSION, WAIT_TOOL  # noqa: E402
 
-from .helpers import Rpc, app_key  # noqa: E402
+from .helpers import Rpc, app_key, golden_file  # noqa: E402
 from .test_toolcall import TRAILER, WOKEN, WakeCore  # noqa: E402
 
 TOKENS = {
@@ -272,7 +272,10 @@ async def test_wire_schemas_and_capabilities() -> None:
         assert "wakeshift" in tools["sit"]["outputSchema"]["properties"]
         assert "wakeshift" not in tools["plain"]["outputSchema"]["properties"]
         assert tools["subscribe_events"]["inputSchema"]["properties"]["event"]["enum"] == ["game.turn"]
-        assert tools["list_subscriptions"]["annotations"]["readOnlyHint"] is True
+        # attach's tools and the wait tool carry every SDK's annotations (tool-annotations.json).
+        annotations = golden_file("tool-annotations.json")
+        for name in ("subscribe_events", "unsubscribe_events", "list_subscriptions", WAIT_TOOL):
+            assert tools[name]["annotations"] == annotations[name], name
         # The decorator's options reach FastMCP; Context and Depends parameters are hidden.
         peek = tools["peek"]
         assert peek["annotations"]["readOnlyHint"] is True

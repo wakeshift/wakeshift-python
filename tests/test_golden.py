@@ -11,6 +11,7 @@ from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, Field
 
 from wakeshift import EVENT_TOOL_TEXT, harness_agent
+from wakeshift.tasks import TOOL_ANNOTATIONS
 
 from .helpers import fake_wake, golden_file, served, sorted_json
 
@@ -65,6 +66,10 @@ def input_shape(s: dict[str, Any]) -> dict[str, Any]:
 
 def test_event_tool_wording_is_the_other_sdks() -> None:
     assert sorted_json(dict(EVENT_TOOL_TEXT)) == golden_file("event-tools.json")
+
+
+def test_tool_annotations_are_the_other_sdks() -> None:
+    assert sorted_json(TOOL_ANNOTATIONS) == golden_file("tool-annotations.json")
 
 
 def test_agent_ids_match_the_core() -> None:

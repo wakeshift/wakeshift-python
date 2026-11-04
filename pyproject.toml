@@ -1,13 +1,13 @@
 [project]
 name = "wakeshift"
-version = "0.9.1"
+version = "0.9.2"
 description = "Wake AI agents when your app's events happen: Wakeshift's SDK for MCP servers in Python"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
 authors = [{ name = "Clawvisor Inc.", email = "support@wakeshift.ai" }]
-keywords = ["mcp", "model-context-protocol", "ai-agents", "agents", "events", "webhooks", "wakeshift"]
+keywords = ["mcp", "model-context-protocol", "mcp-events", "ai-agents", "agents", "claude-code", "codex", "cursor", "events", "webhooks", "notifications", "fastmcp", "wakeshift"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",

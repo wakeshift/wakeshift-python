@@ -296,10 +296,12 @@ async def test_bridged_clients_get_subscribe_events_every_client_gets_unsubscrib
         assert "session_key" in sub["inputSchema"]["properties"]
         assert tools["unsubscribe_events"]["description"] == UNSUBSCRIBE_TOOL_DESCRIPTION
         assert tools["list_subscriptions"]["description"] == LIST_TOOL_DESCRIPTION
-        # Only list_subscriptions only reads, and says so.
+        # Each with every SDK's annotations (tool-annotations.json): only
+        # list_subscriptions only reads, and says so.
+        annotations = golden_file("tool-annotations.json")
+        for name, tool in tools.items():
+            assert tool["annotations"] == annotations[name], name
         assert tools["list_subscriptions"]["annotations"]["readOnlyHint"] is True
-        assert not (tools["subscribe_events"].get("annotations") or {}).get("readOnlyHint")
-        assert not (tools["unsubscribe_events"].get("annotations") or {}).get("readOnlyHint")
 
         r = await rpc(
             "tools/call",

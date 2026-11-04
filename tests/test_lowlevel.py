@@ -19,7 +19,7 @@ from wakeshift._hosts import LowLevelHost, host_of
 from wakeshift.spec import EXTENSION_KEY
 from wakeshift.tasks import TASKS_EXTENSION, WAIT_TOOL
 
-from .helpers import app_key, served
+from .helpers import app_key, golden_file, served
 from .test_toolcall import TRAILER, WOKEN, WakeCore
 
 UA = {"User-Agent": "claude-code/2.1.314"}
@@ -119,7 +119,10 @@ async def test_tools_list_has_the_apps_tools_and_attachs() -> None:
         assert "session_key" not in tools["plain"]["inputSchema"].get("properties", {})
         assert "wakeshift" in tools["sit"]["outputSchema"]["properties"]
         assert tools["subscribe_events"]["inputSchema"]["properties"]["event"]["enum"] == ["game.turn"]
-        assert tools["list_subscriptions"]["annotations"]["readOnlyHint"] is True
+        # attach's tools carry every SDK's annotations (tool-annotations.json).
+        annotations = golden_file("tool-annotations.json")
+        for name in ("subscribe_events", "unsubscribe_events", "list_subscriptions"):
+            assert tools[name]["annotations"] == annotations[name], name
         # attach's tools are on the first page only.
         later = (await rpc("tools/list", {"cursor": "p2"}))["result"]["tools"]
         assert [t["name"] for t in later] == ["later"]
@@ -208,7 +211,8 @@ async def test_protocol_2026_07_28() -> None:
         assert set(d["capabilities"]["extensions"]) >= {EXTENSION_KEY, TASKS_EXTENSION}
         lr = (await rpc("tools/list", {"_meta": meta}, headers={**h, "Mcp-Method": "tools/list"}))["result"]
         assert lr["resultType"] == "complete" and lr["cacheScope"] == "private"
-        assert WAIT_TOOL in [t["name"] for t in lr["tools"]]
+        wait = next(t for t in lr["tools"] if t["name"] == WAIT_TOOL)
+        assert wait["annotations"] == golden_file("tool-annotations.json")[WAIT_TOOL]
         res = await rpc(
             "tools/call",
             {"name": "join", "arguments": {"table": "oak"}, "_meta": meta},

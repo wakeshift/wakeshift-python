@@ -48,7 +48,7 @@ from .spec import (
     dialect_of,
     header_value,
 )
-from .tasks import TaskServer
+from .tasks import TOOL_ANNOTATIONS, TaskServer
 
 if TYPE_CHECKING:
     from .client import Wakeshift
@@ -1195,10 +1195,9 @@ def attach_events(
     for name, fn, description, properties, required in own_tools:
         if name not in wanted:
             continue
-        # list_subscriptions only reads: marked so (readOnlyHint), clients
-        # that approve read-only tools without asking (Codex, by default)
-        # don't ask; and idempotent, as in every SDK (events-list.json).
-        annotations = ToolAnnotations(read_only_hint=True, idempotent_hint=True) if name == "list_subscriptions" else None
+        # A title and all four hints, as in every SDK (TOOL_ANNOTATIONS,
+        # tool-annotations.json).
+        annotations = ToolAnnotations.model_validate(TOOL_ANNOTATIONS[name])
         # The advertised input schema is written out: the enum of event names,
         # an object of arguments, and the same descriptions as the other SDKs.
         schema: dict[str, Any] = {"type": "object", "properties": properties}

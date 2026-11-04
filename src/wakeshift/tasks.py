@@ -56,6 +56,56 @@ TASK_ID_PREFIX = "wkt1_"
 #: How long Wakeshift holds a tasks/get for a working task, in seconds.
 TASK_HOLD_SECONDS = 20
 
+# The MCP annotations of attach's own tools and the wait tool, as tools/list
+# gives them: a title and all four hints, so app stores (ChatGPT's) and clients
+# see each stated rather than the spec's defaults (destructive, open world).
+# Every SDK gives the same: sdk/typescript/test/tool-annotations.json.
+TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
+    # Idempotent: the core keeps one subscription per conversation, event and
+    # arguments, so a second call renews that one ("renewed") rather than
+    # making another.
+    "subscribe_events": {
+        "title": "Subscribe to events",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+    # Not destructive (MCP: "may perform destructive updates"): it ends only
+    # the caller's own subscriptions, and ending one is reversible. The
+    # conversation's own come back with subscribe_events; one ended by id may
+    # deliver to a webhook or be polled, which whoever made it can make again.
+    # The record is marked ended, not deleted. Idempotent: a second call ends
+    # nothing and says so (not_subscribed, no_such_id), without an error.
+    "unsubscribe_events": {
+        "title": "Unsubscribe from events",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+    # Only reads: clients that approve read-only tools without asking (Codex,
+    # by default) don't ask.
+    "list_subscriptions": {
+        "title": "List subscriptions",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+    # Not read-only or idempotent: each call confirms (acks) the messages the
+    # previous wait handed over and starts a new wait in its place, so a second
+    # call differs from the first. Not destructive: it confirms only messages
+    # already given to this conversation, and drops none.
+    WAIT_TOOL: {
+        "title": "Wait for messages",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+}
+
 #: The wait tool as tools/list lists it.
 WAIT_TOOL_DEFINITION: dict[str, Any] = {
     "name": WAIT_TOOL,
@@ -69,6 +119,7 @@ WAIT_TOOL_DEFINITION: dict[str, Any] = {
         },
         "additionalProperties": False,
     },
+    "annotations": dict(TOOL_ANNOTATIONS[WAIT_TOOL]),
 }
 
 

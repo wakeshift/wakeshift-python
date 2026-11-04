@@ -1,0 +1,30 @@
+{
+  "list_subscriptions": {
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false,
+    "readOnlyHint": true,
+    "title": "List subscriptions"
+  },
+  "subscribe_events": {
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false,
+    "readOnlyHint": false,
+    "title": "Subscribe to events"
+  },
+  "unsubscribe_events": {
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false,
+    "readOnlyHint": false,
+    "title": "Unsubscribe from events"
+  },
+  "wakeshift_wait": {
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": false,
+    "readOnlyHint": false,
+    "title": "Wait for messages"
+  }
+}

@@ -23,6 +23,13 @@
         }
       },
       "additionalProperties": false
+    },
+    "annotations": {
+      "title": "Wait for messages",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   "lists": [
