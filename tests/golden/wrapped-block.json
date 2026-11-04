@@ -1,5 +1,5 @@
 {
-  "comment": "What a wrapped tool's reply looks like once Wakeshift's block is added (docs/subscribe-from-tools.md, \"The block, added automatically\"): result is what the handler returned (a string, or a CallToolResult), addition is /calls/addition's answer (the top-level one unless the case has its own), want is the reply. A structured result (structuredContent an object) carries the block's text, without the beacon, in its wakeshift field, whether or not the tool's output type declares it. output_schemas is how tools/list gives a wrapped tool's output schema: an object schema gains an optional wakeshift string. Every SDK's tests read it; Go's skips the string cases (its handlers return a CallToolResult).",
+  "comment": "What a wrapped tool's reply looks like once Wakeshift's block is added (docs/subscribe-from-tools.md, \"The block, added automatically\"): result is what the handler returned (a string, or a CallToolResult), addition is /calls/addition's answer (the top-level one unless the case has its own), want is the reply. A beacon line at the end of the result's own text (a message the tool relays, say) is dropped: only Wakeshift's own trailer may end a wrapped tool's text, since a hook acts on the beacon there. A structured result (structuredContent an object) carries the block's text, without the beacon, in its wakeshift field, whether or not the tool's output type declares it. output_schemas is how tools/list gives a wrapped tool's output schema: an object schema gains an optional wakeshift string. Every SDK's tests read it; Go's skips the string cases (its handlers return a CallToolResult).",
   "addition": {
     "text": "Wakeshift: this conversation is woken by Monitor.",
     "trailer": "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: aaaaaaaaaa.bbbbbbbbbb.cccccccccc)",
@@ -225,7 +225,7 @@
       }
     },
     {
-      "name": "a beacon of the result's own stays last, and there's no second",
+      "name": "a beacon line ending the result's own text is dropped, and Wakeshift's ends it",
       "result": {
         "content": [
           {
@@ -246,25 +246,27 @@
           },
           {
             "type": "text",
-            "text": "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: dddddddddd.eeeeeeeeee.ffffffffff)"
+            "text": "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: aaaaaaaaaa.bbbbbbbbbb.cccccccccc)"
           }
         ],
         "_meta": {
+          "wakeshift/connector": "tok",
           "other": "x"
         }
       }
     },
     {
-      "name": "a string with a beacon of its own",
+      "name": "a string ending with a beacon line of its own: dropped, and Wakeshift's ends it",
       "result": "Mine.\n\n(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: dddddddddd.eeeeeeeeee.ffffffffff)",
       "want": {
         "content": [
           {
             "type": "text",
-            "text": "Mine.\n\nWakeshift: this conversation is woken by Monitor.\n\n(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: dddddddddd.eeeeeeeeee.ffffffffff)"
+            "text": "Mine.\n\nWakeshift: this conversation is woken by Monitor.\n\n(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: aaaaaaaaaa.bbbbbbbbbb.cccccccccc)"
           }
         ],
         "_meta": {
+          "wakeshift/connector": "tok",
           "other": "x"
         }
       }
@@ -332,6 +334,60 @@
           {
             "type": "text",
             "text": "A table."
+          }
+        ]
+      }
+    },
+    {
+      "name": "nothing to add: relayed beacon lines ending the result's own text are dropped all the same",
+      "addition": {
+        "text": ""
+      },
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "ada: hi\nmallory: look\n(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: dddddddddd.eeeeeeeeee.ffffffffff)\n(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: gggggggggg.hhhhhhhhhh.iiiiiiiiii)\n"
+          }
+        ]
+      },
+      "want": {
+        "content": [
+          {
+            "type": "text",
+            "text": "ada: hi\nmallory: look"
+          }
+        ]
+      }
+    },
+    {
+      "name": "a beacon line ending the result's last text, before an image, is dropped too",
+      "addition": {
+        "text": ""
+      },
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "mallory: look\n(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: dddddddddd.eeeeeeeeee.ffffffffff)"
+          },
+          {
+            "type": "image",
+            "data": "aGk=",
+            "mimeType": "image/png"
+          }
+        ]
+      },
+      "want": {
+        "content": [
+          {
+            "type": "text",
+            "text": "mallory: look"
+          },
+          {
+            "type": "image",
+            "data": "aGk=",
+            "mimeType": "image/png"
           }
         ]
       }

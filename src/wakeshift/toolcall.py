@@ -248,28 +248,33 @@ def _same_json(a: Any, b: Any) -> bool:
 # ── The block ─────────────────────────────────────────────────────────────
 
 
-def _take_trailer(result: dict[str, Any]) -> str:
-    """Takes a beacon line off the end of result's text (dropping its block
-    if nothing else is in it), returning it ("" if there's none)."""
-    content = result.get("content") or []
-    if not content:
-        return ""
-    last = content[-1]
-    if not isinstance(last, dict) or last.get("type") != "text":
-        return ""
-    text = str(last.get("text", "")).rstrip(" \t\r\n")
-    rest, line = "", text
-    i = text.rfind("\n")
-    if i >= 0:
-        rest, line = text[:i], text[i + 1 :]
-    if not line.startswith(BEACON_LINE_PREFIX) or not line.endswith(")"):
-        return ""
-    rest = rest.rstrip(" \t\r\n")
-    if not rest:
-        result["content"] = content[:-1]
-    else:
-        result["content"] = [*content[:-1], {**last, "text": rest}]
-    return line
+def _drop_trailers(result: dict[str, Any]) -> None:
+    """Takes every beacon line off the end of result's last text (dropping
+    its block if nothing else is in it). Only Wakeshift's own trailer may end
+    a wrapped tool's text: a hook acts on the beacon there, and one in the
+    app's text may be someone else's, relayed (a chat message carrying a
+    beacon minted for another session)."""
+    while True:
+        content = list(result.get("content") or [])
+        i = len(content) - 1
+        while i >= 0 and not (isinstance(content[i], dict) and content[i].get("type") == "text"):
+            i -= 1
+        if i < 0:
+            return
+        block = content[i]
+        text = str(block.get("text", "")).rstrip(" \t\r\n")
+        rest, line = "", text
+        j = text.rfind("\n")
+        if j >= 0:
+            rest, line = text[:j], text[j + 1 :]
+        if not line.startswith(BEACON_LINE_PREFIX) or not line.endswith(")"):
+            return
+        rest = rest.rstrip(" \t\r\n")
+        if not rest:
+            del content[i]
+        else:
+            content[i] = {**block, "text": rest}
+        result["content"] = content
 
 
 def merge_block(
@@ -282,8 +287,10 @@ def merge_block(
 ) -> dict[str, Any]:
     """A tool result (the wire form) with Wakeshift's block added: its text as
     a block after the app's content, then a text-carried beacon last, its
-    _meta merged. A result that already carries a beacon keeps it, last, and
-    gets no second one. ``string``: the tool returned a string, which stays
+    _meta merged. Beacon lines ending the app's own text are dropped
+    (_drop_trailers), whether or not there's a block to add. A result whose
+    own _meta carries a connector beacon gets no second one, in _meta or its
+    text. ``string``: the tool returned a string, which stays
     one text block. A structured result (structuredContent an object) gets
     the text in its ``wakeshift`` field too. The shared fixture
     sdk/typescript/test/wrapped-block.json pins it."""
@@ -292,16 +299,13 @@ def merge_block(
     text = (text or "").strip()
     own_meta = out.get("_meta") if isinstance(out.get("_meta"), dict) else None
     meta_beacon = own_meta is not None and CONNECTOR_META_KEY in own_meta
-    existing = _take_trailer(out)
+    _drop_trailers(out)
     if text:
         out["content"].append({"type": "text", "text": text})
-    has = meta_beacon or bool(existing)
-    if existing:
-        out["content"].append({"type": "text", "text": existing})
-    elif not has and trailer:
+    if not meta_beacon and trailer:
         out["content"].append({"type": "text", "text": trailer})
     for k, v in (meta or {}).items():
-        if k == CONNECTOR_META_KEY and has:
+        if k == CONNECTOR_META_KEY and meta_beacon:
             continue
         merged = dict(out.get("_meta") or {})
         merged[k] = v
@@ -1034,7 +1038,10 @@ class Attached:
         assert call is not None
         add = await self._fetch_addition(scope, call)
         if add is None and not scope.notes:
-            return result
+            # Nothing to add, but a beacon line ending the app's text is still dropped.
+            out = dict(result)
+            _drop_trailers(out)
+            return out
         add = add or {}
         # Notes from the call's unsubscribes come first, whatever else it gets.
         text = "\n\n".join(t for t in (" ".join(scope.notes), str(add.get("text") or "").strip()) if t)
@@ -1077,7 +1084,8 @@ class Attached:
     async def _name_app(self, tools: list[Any]) -> None:
         """notifies() with no app named says "this app": tools/list names the
         app instead, as the console has it (GET /app, asked once). A name
-        Wakeshift doesn't give leaves "this app"."""
+        Wakeshift doesn't give, or doesn't give in time (_app_name), leaves
+        "this app"."""
         from .events import _UNNAMED_APP, _unnamed_parts
 
         first, second = _unnamed_parts()
@@ -1088,10 +1096,7 @@ class Attached:
 
         if not any(has(t) for t in tools):
             return
-        try:
-            name = (await self._wake.app()).name.strip()
-        except Exception:
-            return
+        name = await self._wake._app_name()
         if not name:
             return
         named1 = first.replace(_UNNAMED_APP, name, 1)

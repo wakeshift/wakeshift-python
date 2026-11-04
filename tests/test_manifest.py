@@ -14,7 +14,7 @@ import httpx2
 import pytest
 from mcp.server.mcpserver import MCPServer
 
-from wakeshift import WakeEvent, Wakeshift
+from wakeshift import WakeEvent, Wakeshift, WakeshiftError
 
 from .helpers import app_key, golden_file, sorted_json
 from .test_golden import ChatArgs, ChatMessage, Run, RunArgs, Turn, TurnArgs
@@ -147,3 +147,30 @@ async def test_concurrent_unknown_emits_merge_once() -> None:
     assert len(results) == 5
     assert merges == 1
     assert emits == 10
+
+
+async def test_failed_send_is_shared_by_the_calls_waiting_for_it() -> None:
+    """Calls about events that wait for one manifest send share its outcome:
+    when it fails, they raise its error rather than each sending again, one
+    after another (with Wakeshift slow, each up to a timeout). The next call
+    sends again."""
+    merges = 0
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        nonlocal merges
+        path = request.url.path.removeprefix("/api/apps/v1")
+        if path == "/manifest/merge":
+            merges += 1
+            await asyncio.sleep(0.05)
+            return httpx2.Response(503, json={"error": {"code": "unavailable", "message": "down"}})
+        return httpx2.Response(200, json={"ended": True})
+
+    wake = Wakeshift(app_key(), core="http://core.test", http=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
+    chat = define_sample(wake, "chat.message")
+    wake._serving = True  # as after attach
+    results = await asyncio.gather(*(chat.end("ada", "s1") for _ in range(5)), return_exceptions=True)
+    assert all(isinstance(r, WakeshiftError) and r.code == "unavailable" for r in results), results
+    assert merges == 1
+    with pytest.raises(WakeshiftError):
+        await chat.end("ada", "s1")
+    assert merges == 2

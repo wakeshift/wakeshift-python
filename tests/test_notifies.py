@@ -25,6 +25,9 @@ class _Wake:
     async def app(self) -> AppInfo:
         return AppInfo(id="app_test", name=self.name, key_id="k", key_name="test")
 
+    async def _app_name(self) -> str:
+        return (await self.app()).name.strip()
+
 
 class _At:
     def __init__(self, wake: _Wake) -> None:

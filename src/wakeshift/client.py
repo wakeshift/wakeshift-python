@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -25,6 +26,11 @@ if TYPE_CHECKING:
 
 #: Wakeshift's production core, the default for every key but a wst_test_ one. Override with ``core`` or WAKESHIFT_CORE.
 DEFAULT_CORE = "https://app.wakeshift.ai"
+
+#: How long tools/list waits for the app's name (GET /app) before saying
+#: "this app" ("wait", seconds), and how long after a failed or unanswered
+#: fetch it doesn't ask again ("retry"). Tests shorten them.
+_NAME_FETCH: dict[str, float] = {"wait": 3.0, "retry": 60.0}
 
 #: The tool argument an agent passes its session key in (a result gives it one).
 SESSION_ARG = "session_key"
@@ -444,6 +450,8 @@ class Wakeshift:
         self._app_id: str | None = self._key.app_id
         self._app: AppInfo | None = None
         self._app_lock: asyncio.Lock | None = None
+        #: When the name fetch for tools/list last failed or went unanswered (monotonic).
+        self._name_failed_at: float | None = None
         # Test keys come from staging and local consoles, and one sent to
         # production fails in a way that's hard to read: ask for the core.
         c = core or os.environ.get("WAKESHIFT_CORE") or ("" if is_test_key(key) else DEFAULT_CORE)
@@ -472,6 +480,10 @@ class Wakeshift:
         self._manifest_version = 0
         self._sends = 0
         self._manifest_lock: asyncio.Lock | None = None
+        #: _ensure_events' sends that failed, and the last one's error: a call
+        #: that waited for a send that failed raises it, rather than sending again.
+        self._ensure_failures = 0
+        self._ensure_error: Exception | None = None
 
     # ── The app ────────────────────────────────────────────────────────────
 
@@ -508,6 +520,21 @@ class Wakeshift:
                     self._app_id = info.id
                 self._app = info
             return self._app
+
+    async def _app_name(self) -> str:
+        """The app's name for tools/list (app()'s), or "" when Wakeshift
+        doesn't answer within _NAME_FETCH["wait"]: tools/list doesn't wait
+        longer for it, and after a failure doesn't ask again for
+        _NAME_FETCH["retry"], so a slow or failing Wakeshift neither stalls
+        nor multiplies tools/list."""
+        failed = self._name_failed_at
+        if failed is not None and time.monotonic() - failed < _NAME_FETCH["retry"]:
+            return ""
+        try:
+            return (await asyncio.wait_for(self.app(), _NAME_FETCH["wait"])).name.strip()
+        except Exception:  # an error, or no answer in time
+            self._name_failed_at = time.monotonic()
+            return ""
 
     def _assertion(self) -> str:
         return sign_assertion(self._key, self.core, app_id=self._app_id)
@@ -681,14 +708,26 @@ class Wakeshift:
         define_event), from a process that serves the app's tools (attach). A
         process that only emits sends it only when Wakeshift doesn't know an
         event it emits (_emit_event): its events may be fewer, or older, than
-        its server's, and a merge never removes an event it leaves out."""
+        its server's, and a merge never removes an event it leaves out.
+
+        Calls that wait for one send share its outcome: if it fails, they
+        raise its error rather than each sending again, one after another
+        (as the TypeScript SDK's share one send). The next call sends again."""
         if self._published or not self._serving:
             return
+        seen = self._ensure_failures
         async with self._manifest_send_lock():
             if self._published:
                 return  # sent while this one waited
+            if self._ensure_failures != seen and self._ensure_error is not None:
+                raise self._ensure_error  # the send this one waited for failed
             version = self._manifest_version
-            await self._send_manifest()
+            try:
+                await self._send_manifest()
+            except Exception as err:
+                self._ensure_failures += 1
+                self._ensure_error = err
+                raise
             if self._manifest_version == version:
                 self._published = True
 

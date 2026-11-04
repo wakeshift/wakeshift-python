@@ -3,10 +3,12 @@ the app notifies the agent, from its events' own descriptions (the shared
 fixture subscribes.json), and a subscribe the tool doesn't declare warns
 once per tool, or, once undeclared subscribes are an error, is refused."""
 
+import time
 from typing import Any
 
 import pytest
 
+import wakeshift.client as client
 import wakeshift.toolcall as toolcall
 from wakeshift import ToolCall, UndeclaredSubscribe, notifies
 from wakeshift.events import _with_subscribes
@@ -86,6 +88,33 @@ async def test_tools_list_says_this_app_without_a_name() -> None:
     async with w.served() as (_, rpc):
         listed = await _listed(w, rpc)
         assert listed["watch"] == "Watch a table. " + sentence("this app", f"of this event: {NEWS}")
+
+
+async def test_tools_list_waits_only_so_long_for_the_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(client._NAME_FETCH, "wait", 0.1)
+    monkeypatch.setitem(client._NAME_FETCH, "retry", 60.0)
+    # Wakeshift doesn't answer in time: "this app", and no wait (or ask) again within retry.
+    w = _app()
+    w.core.app_name = "Shipyard"
+    w.core.app_delay = 5.0
+    async with w.served() as (_, rpc):
+        for _ in range(3):
+            t0 = time.monotonic()
+            listed = await _listed(w, rpc)
+            assert time.monotonic() - t0 < 2.0
+            assert listed["watch"] == "Watch a table. " + sentence("this app", f"of this event: {NEWS}")
+        assert w.core.paths().count("/app") == 1
+    # Wakeshift fails (a 404: no name): asked once within retry, then again after it.
+    w = _app()
+    async with w.served() as (_, rpc):
+        await _listed(w, rpc)
+        await _listed(w, rpc)
+        assert w.core.paths().count("/app") == 1
+        monkeypatch.setitem(client._NAME_FETCH, "retry", 0.0)
+        w.core.app_name = "Shipyard"
+        listed = await _listed(w, rpc)
+        assert listed["watch"] == "Watch a table. " + sentence("Shipyard", f"of this event: {NEWS}")
+        assert w.core.paths().count("/app") == 2
 
 
 def _undeclared() -> Wrapped:
