@@ -240,6 +240,17 @@ class Emitted:
     #: The subscription recipients no longer live (or not that user's, or
     #: this event's): forget them. A duplicate reports the first emit's.
     ended: list[Recipient] = field(default_factory=list)
+    #: The text was over 1000 bytes, so Wakeshift trimmed it to 1000 (ending
+    #: with "…") and sent the occurrence. on_warning hears it once per event.
+    text_trimmed: bool = False
+
+
+def _text_trimmed_warning(event: str) -> str:
+    """The warning when Wakeshift trimmed an event's text (once per event)."""
+    return (
+        f"wakeshift: {event}'s text was over 1000 bytes, so Wakeshift trimmed it: "
+        "keep text to a short headline and put the details in the payload"
+    )
 
 
 def _recipient_wire(r: Recipient) -> str | dict[str, str]:
@@ -465,6 +476,8 @@ class Wakeshift:
         self._http = http
         self._retry_pauses = RETRY_PAUSES
         self._warn_fn = on_warning or (lambda m: print(m, file=sys.stderr))
+        # _warn_once's kinds, each warned once per client.
+        self._warned: set[str] = set()
         # attach's tools as a list (deprecated) warns once per client.
         self._tools_list_warned = False
         self._events: dict[str, WakeEvent] = {}
@@ -543,6 +556,13 @@ class Wakeshift:
 
     def _warn(self, message: str) -> None:
         """Reports a problem through on_warning, every time."""
+        self._warn_fn(message)
+
+    def _warn_once(self, kind: str, message: str) -> None:
+        """Reports a warning through on_warning, once per kind."""
+        if kind in self._warned:
+            return
+        self._warned.add(kind)
         self._warn_fn(message)
 
     # ── Publish URLs, users and the manifest ───────────────────────────────
@@ -769,11 +789,15 @@ class Wakeshift:
             if e.status == 409 and e.code == "id_reused":
                 raise IdReusedError(e.detail) from e
             raise
+        trimmed = out.get("text_trimmed") is True
+        if trimmed:
+            self._warn_once("text-trimmed:" + name, _text_trimmed_warning(name))
         return Emitted(
             matched=int(out["matched"]),
             duplicate=bool(out.get("duplicate")),
             unmatched=_recipients_of(out.get("unmatched")),
             ended=_recipients_of(out.get("ended")),
+            text_trimmed=trimmed,
         )
 
     async def _request_app(self, method: str, path: str, body: Any = None, *, timeout: float | None = None) -> dict[str, Any]:

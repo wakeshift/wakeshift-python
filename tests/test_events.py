@@ -240,6 +240,28 @@ async def test_a_personal_event_is_emitted_to_one_subscriber() -> None:
     assert body["payload"] == {"hole": ["As", "Kd"], "toCall": 2}
 
 
+async def test_a_trimmed_text_says_text_trimmed_and_warns_once_per_event() -> None:
+    # Wakeshift trims a text over 1000 bytes rather than refusing it: the SDK
+    # sends the text as rendered, however long, and warns once per event.
+    warnings: list[str] = []
+    core = FakeCore(default_ok=True)
+    reply: dict[str, object] = {"matched": 1, "duplicate": False, "text_trimmed": True}
+    core.on("POST", "/events/emit", lambda b: (200, reply))
+    wake, _ = fake_wake(core, on_warning=warnings.append)
+    chat, turn = chat_event(wake), turn_event(wake)
+    long = "x" * 5000
+    for _ in range(3):
+        out = await chat.emit({"channel": "eng"}, {"from": "ada", "text": long})
+        assert out.text_trimmed is True
+    assert core.bodies("/events/emit")[0]["text"].endswith(long)
+    assert len(warnings) == 1 and re.search(r"chat\.message's text was over 1000 bytes", warnings[0])
+    assert (await turn.emit({"table": "juniper"}, {"hole": ["As"], "toCall": 2}, to="ada")).text_trimmed is True
+    assert len(warnings) == 2
+    del reply["text_trimmed"]
+    assert (await chat.emit({"channel": "eng"}, {"from": "ada", "text": "hi"})).text_trimmed is False
+    assert len(warnings) == 2
+
+
 def test_speaks_events_the_extension_or_chatgpt_not_the_older_key() -> None:
     assert _speaks_events({"extensions": {EXTENSION_KEY: {}}}, "x")
     assert not _speaks_events({"events": {}}, "x")

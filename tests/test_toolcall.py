@@ -916,7 +916,7 @@ async def test_emit_recipients_golden() -> None:
                 lambda r, resp=resp: httpx2.Response(200, json=resp if r.url.path.endswith("/emit") else {})
             )
         )
-        wake = Wakeshift(app_key("cards"), core="http://core.test", http=http)
+        wake = Wakeshift(app_key("cards"), core="http://core.test", http=http, on_warning=lambda m: None)
         ev = wake.define_event(
             "game.turn", description="T.", args=TableArgs, payload=TurnMsg, text=lambda m, a: m.text, personal=True
         )
@@ -927,6 +927,7 @@ async def test_emit_recipients_golden() -> None:
             "duplicate": out.duplicate,
             "unmatched": [_plain(r) for r in out.unmatched],
             "ended": [_plain(r) for r in out.ended],
+            "text_trimmed": out.text_trimmed,
         }
         assert got == c["emitted"], c["name"]
     # An id used for a different emit: IdReusedError, a WakeshiftError.

@@ -58,7 +58,7 @@ from .spec import EXTENSION_KEY, TEXT_META
 from .spec import REVISION as EVENTS_REVISION
 from .toolcall import Attached, CallEnded, EventsOptions, Subscription, ToolCall, UndeclaredSubscribe, WakeOutput, wrapped_tool
 
-__version__ = "0.9.2"
+__version__ = "0.9.3"
 
 __all__ = [
     "AttachTools",

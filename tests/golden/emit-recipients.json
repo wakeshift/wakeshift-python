@@ -1,5 +1,5 @@
 {
-  "comment": "A multi-recipient emit (docs/subscribe-from-tools.md, \"Emitting to many\"): each case's to (a user, {user, subscription} or {native}) and the body's to it becomes (one plain user as a string, else a list), each name trimmed of the whitespace around it; response is /events/emit's answer and emitted what each SDK reads from it (unmatched and ended in to's forms, empty lists when the answer has none); refused are recipient lists a personal event refuses before asking Wakeshift, with refused_code, as Wakeshift would: a name that's empty once trimmed is refused. one_user is a personal event's status and publish URL to, trimmed the same way (refused: empty once trimmed, with refused_code). status_of is subscriptions to read by ID, each {user, subscription}, and the body's subscriptions they become, trimmed; refused ones, with its own refused_code. Every SDK's tests read it. id_reused is /events/emit's refusal of an id used for a different emit: each SDK throws its typed error for it (TypeScript and Python IdReusedError, Go an *APIError that errors.Is ErrIDReused), with that status, code and message.",
+  "comment": "A multi-recipient emit (docs/subscribe-from-tools.md, \"Emitting to many\"): each case's to (a user, {user, subscription} or {native}) and the body's to it becomes (one plain user as a string, else a list), each name trimmed of the whitespace around it; response is /events/emit's answer and emitted what each SDK reads from it (unmatched and ended in to's forms, empty lists when the answer has none; text_trimmed, false when the answer leaves it out, says Wakeshift trimmed a text over 1000 bytes, and each SDK warns once per event when it's true); refused are recipient lists a personal event refuses before asking Wakeshift, with refused_code, as Wakeshift would: a name that's empty once trimmed is refused. one_user is a personal event's status and publish URL to, trimmed the same way (refused: empty once trimmed, with refused_code). status_of is subscriptions to read by ID, each {user, subscription}, and the body's subscriptions they become, trimmed; refused ones, with its own refused_code. Every SDK's tests read it. id_reused is /events/emit's refusal of an id used for a different emit: each SDK throws its typed error for it (TypeScript and Python IdReusedError, Go an *APIError that errors.Is ErrIDReused), with that status, code and message.",
   "cases": [
     {
       "name": "one user",
@@ -136,7 +136,8 @@
             "user": "u2",
             "subscription": "s2"
           }
-        ]
+        ],
+        "text_trimmed": false
       }
     },
     {
@@ -160,7 +161,8 @@
             "user": "u2",
             "subscription": "s2"
           }
-        ]
+        ],
+        "text_trimmed": false
       }
     },
     {
@@ -179,7 +181,8 @@
         "unmatched": [
           "u1"
         ],
-        "ended": []
+        "ended": [],
+        "text_trimmed": false
       }
     },
     {
@@ -192,7 +195,25 @@
         "matched": 0,
         "duplicate": false,
         "unmatched": [],
-        "ended": []
+        "ended": [],
+        "text_trimmed": false
+      }
+    },
+    {
+      "name": "text trimmed",
+      "response": {
+        "matched": 1,
+        "duplicate": false,
+        "unmatched": [],
+        "ended": [],
+        "text_trimmed": true
+      },
+      "emitted": {
+        "matched": 1,
+        "duplicate": false,
+        "unmatched": [],
+        "ended": [],
+        "text_trimmed": true
       }
     }
   ],
