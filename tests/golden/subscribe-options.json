@@ -1,0 +1,32 @@
+{
+  "_comment": "call.subscribe's replay and once (TypeScript { replay, once }, Python replay=, once=, Go wakeshift.Replay, wakeshift.Once) and what they add to POST /event-subscriptions: replay in seconds (each SDK's duration as a number), once as true, nothing when left out. Shared by the three SDKs.",
+  "cases": [
+    { "name": "neither", "body": {} },
+    { "name": "replay", "replay_seconds": 300, "body": { "replay": 300 } },
+    { "name": "once", "once": true, "body": { "once": true } },
+    { "name": "both", "replay_seconds": 86400, "once": true, "body": { "once": true, "replay": 86400 } },
+    { "name": "context", "context": { "token": "context-canary" }, "body": {} }
+  ],
+  "_context_comment": "context (TypeScript { context }, Python context=, Go wakeshift.Context(v)) is the app's own value for the event's onSubscribe (Subscribed.context): it never reaches Wakeshift, so it adds nothing to the body, and context-canary appears in no request and no log line.",
+  "_next_comment": "Next release (design §2.5, CR L8, PR 6). replay_bounds: 0 < replay <= 24 hours, checked before sending with the same error in every SDK: UsageError, code bad_arguments, the message containing says; Wakeshift isn't asked. A case with body is accepted and adds that body, as cases does. replay_seconds is the duration in seconds: TypeScript passes it as a number (seconds, as today) or as the Duration string in replay_string where one is given; Python as an int or float of seconds, a timedelta, or replay_string; Go as time.Duration. Run each case through every form the SDK accepts. duration_strings: the Duration strings TypeScript and Python accept (a number, then s, m, h or d) and the seconds each sends; a string with want_error is refused the same way. Renewal (the same arguments again) applies replay only on creation (CR L9): not checked here.",
+  "replay_bounds": [
+    { "name": "zero", "replay_seconds": 0, "replay_string": "0s", "error": "bad_arguments", "says": "replay" },
+    { "name": "negative", "replay_seconds": -60, "replay_string": "-1m", "error": "bad_arguments", "says": "replay" },
+    { "name": "25 hours", "replay_seconds": 90000, "replay_string": "25h", "error": "bad_arguments", "says": "replay" },
+    { "name": "one second over 24 hours", "replay_seconds": 86401, "error": "bad_arguments", "says": "replay" },
+    { "name": "exactly 24 hours", "replay_seconds": 86400, "replay_string": "24h", "body": { "replay": 86400 } },
+    { "name": "one second", "replay_seconds": 1, "replay_string": "1s", "body": { "replay": 1 } }
+  ],
+  "duration_strings": [
+    { "string": "30s", "seconds": 30 },
+    { "string": "30m", "seconds": 1800 },
+    { "string": "1h", "seconds": 3600 },
+    { "string": "1.5h", "seconds": 5400 },
+    { "string": "1d", "seconds": 86400 },
+    { "string": "", "want_error": "bad_arguments" },
+    { "string": "30", "want_error": "bad_arguments" },
+    { "string": "30 m", "want_error": "bad_arguments" },
+    { "string": "1w", "want_error": "bad_arguments" },
+    { "string": "h", "want_error": "bad_arguments" }
+  ]
+}

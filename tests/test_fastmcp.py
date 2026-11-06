@@ -4,7 +4,6 @@ with WAKESHIFT_TEST_SERVER=fastmcp (conftest.py)."""
 
 from __future__ import annotations
 
-import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -24,13 +23,18 @@ from fastmcp.tools.tool_transform import ToolTransformConfig  # noqa: E402
 from mcp_types import ToolAnnotations  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-from wakeshift import Identity, ToolCall, WakeOutput, Wakeshift  # noqa: E402
+from wakeshift import (  # noqa: E402
+    Identity,
+    Request,  # noqa: E402
+    ToolCall,
+    Wakeshift,
+)
 from wakeshift._hosts import FastMCPHost, host_of  # noqa: E402
-from wakeshift.fastmcp import access_token, identify_by_claim  # noqa: E402
-from wakeshift.spec import EXTENSION_KEY  # noqa: E402
-from wakeshift.tasks import TASKS_EXTENSION, WAIT_TOOL  # noqa: E402
+from wakeshift._spec import EXTENSION_KEY  # noqa: E402
+from wakeshift._tasks import TASKS_EXTENSION, WAIT_TOOL  # noqa: E402
+from wakeshift.fastmcp import identify_by_claim  # noqa: E402
 
-from .helpers import Rpc, app_key, golden_file  # noqa: E402
+from .helpers import Logged, Rpc, app_key, golden_file  # noqa: E402
 from .test_toolcall import TRAILER, WOKEN, WakeCore  # noqa: E402
 
 TOKENS = {
@@ -66,7 +70,7 @@ class TurnMsg(BaseModel):
     text: str
 
 
-class Seat(WakeOutput):
+class Seat(BaseModel):
     table: str
     seat: int
 
@@ -85,8 +89,8 @@ class App:
     def __init__(self, identify: Any = None, **server_kw: Any) -> None:
         self.core = WakeCore()
         http = httpx2.AsyncClient(transport=httpx2.MockTransport(self.core.handler))
-        self.warnings: list[str] = []
-        self.wake = Wakeshift(app_key("cards"), core="http://core.test", http=http, on_warning=self.warnings.append)
+        self.warnings = Logged()
+        self.wake = Wakeshift(app_key("cards"), core="https://core.test", http_client=http)
         self.turn = self.wake.define_event(
             "game.turn", description="Your turn.", args=TableArgs, payload=TurnMsg, text=lambda m, a: m.text, personal=True
         )
@@ -102,9 +106,7 @@ class App:
                 return out
 
         self.mcp.add_middleware(Observe())
-        self.attached = self.wake.attach(
-            self.mcp, identify=identify or identify_by_claim("sub"), tools={"wait": {"enabled": True}}
-        )
+        self.attached = self.wake.attach(self.mcp, identify=identify or identify_by_claim("sub"), builtin_tools={"wait": True})
 
         @self.attached.tool(subscribes=[self.turn])
         async def join(table: str, call: ToolCall) -> str:
@@ -232,9 +234,20 @@ async def test_identify_by_claim_names_the_client_too() -> None:
         assert call["user"] == "bo" and call["client"] == "bo-agent"
 
 
-def test_identify_by_claim_without_a_request() -> None:
-    assert access_token() is None
-    assert identify_by_claim("sub")(None) is None
+async def test_a_sync_tool_runs_with_its_call() -> None:
+    a = App()
+
+    @a.attached.tool
+    def whoami(table: str, call: ToolCall, ctx: Context) -> str:
+        return f"{call.user} at {table} on {ctx.fastmcp.name}"
+
+    async with serve(a.app()) as s:
+        res = await call_tool(s.rpc("tok-bo"), "whoami", {"table": "oak", "session_key": "wsc_s1"})
+    assert texts(res)[0].startswith("bo at oak on cards"), res
+
+
+def test_identify_by_claim_without_a_token() -> None:
+    assert identify_by_claim("sub")(Request()) == Identity()
     assert Identity() == Identity(user=None)
 
 
@@ -276,6 +289,9 @@ async def test_wire_schemas_and_capabilities() -> None:
         annotations = golden_file("tool-annotations.json")
         for name in ("subscribe_events", "unsubscribe_events", "list_subscriptions", WAIT_TOOL):
             assert tools[name]["annotations"] == annotations[name], name
+        schemas = golden_file("tool-output-schemas.json")
+        for name in ("subscribe_events", "unsubscribe_events", "list_subscriptions"):
+            assert tools[name]["outputSchema"] == schemas[name], name
         # The decorator's options reach FastMCP; Context and Depends parameters are hidden.
         peek = tools["peek"]
         assert peek["annotations"]["readOnlyHint"] is True
@@ -286,11 +302,16 @@ async def test_wire_schemas_and_capabilities() -> None:
         assert set(peek["inputSchema"]["properties"]) == {"table", "session_key", "harness", "conversation_id"}
         assert set(tools["current"]["inputSchema"]["properties"]) == {"table", "session_key", "harness", "conversation_id"}
         # A client that declares MCP Events isn't offered subscribe_events, or the wait tool without tasks.
+        native = modern_meta(extensions={EXTENSION_KEY: {}})
+        native["io.modelcontextprotocol/clientInfo"] = {"name": "acme-agent", "version": "1"}
+        res = await rpc("tools/list", {"_meta": native}, headers=modern_headers("tools/list"))
+        names = [t["name"] for t in res["result"]["tools"]]
+        assert "subscribe_events" not in names and WAIT_TOOL not in names and "join" in names
+        # Claude Code declaring it is still offered subscribe_events: a harness Wakeshift wakes itself isn't native.
         res = await rpc(
             "tools/list", {"_meta": modern_meta(extensions={EXTENSION_KEY: {}})}, headers=modern_headers("tools/list")
         )
-        names = [t["name"] for t in res["result"]["tools"]]
-        assert "subscribe_events" not in names and WAIT_TOOL not in names and "join" in names
+        assert "subscribe_events" in [t["name"] for t in res["result"]["tools"]]
 
 
 async def test_a_public_cache_scope_becomes_private_on_tools_list_only() -> None:
@@ -445,21 +466,132 @@ async def test_in_memory_client() -> None:
 # ── Which servers attach takes ────────────────────────────────────────────
 
 
-def test_older_fastmcp_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sdk_bounds_are_checked_at_attach(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The extras' bounds hold only where pip resolved them, so attach checks
+    them (design §5): FastMCP before 2.12 is refused, never told to install
+    [mcp]; FastMCP 2.12+ and 3.x pass on their own mcp 1.x
+    (test_fastmcp23.py serves on them)."""
+    from wakeshift import _hosts
 
-    class FastMCP:  # a FastMCP 3 server, as attach sees it
+    class FastMCP:  # a FastMCP 2 or 3 server, as the check sees it
         pass
 
     FastMCP.__module__ = "fastmcp.server.server"
-    monkeypatch.setattr(sys.modules["fastmcp"], "__version__", "3.4.11")
-    with pytest.raises(TypeError, match=r"FastMCP 4 .*3\.4\.11.*mcp 1\.x"):
-        host_of(FastMCP())
-    monkeypatch.setattr(sys.modules["fastmcp"], "__version__", "5.0.0")
-    with pytest.raises(TypeError, match="5.0.0"):
-        host_of(FastMCP())
+    versions: dict[str, tuple[int, ...] | None] = {"fastmcp": (2, 11, 4), "mcp": (1, 12, 0)}
+    monkeypatch.setattr(_hosts, "_version", lambda d: versions[d])
+    with pytest.raises(ImportError, match=r"FastMCP 2\.12 and later 2\.x, 3\.x, and 4\.1 and later 4\.x, not 2\.11\.4") as e:
+        _hosts.check_sdks(FastMCP())
+    assert "[mcp]" not in str(e.value)
+    for ok in ((2, 12, 0), (3, 4, 11)):
+        versions.update(fastmcp=ok, mcp=(1, 30, 0))
+        _hosts.check_sdks(FastMCP())  # mcp 1.x is FastMCP's own: not checked
+    versions.update(fastmcp=(5, 0, 0))
+    wake = Wakeshift(app_key("cards"), core="https://core.test")
+    with pytest.raises(ImportError, match=r"not 5\.0\.0"):
+        wake.attach(FastMCP())
+    versions.update(mcp=None)
+    with pytest.raises(ImportError, match=r"pip install 'wakeshift\[mcp\]'"):
+        wake.attach(object())
+    versions.update(mcp=(3, 0, 0))
+    with pytest.raises(ImportError, match=r"mcp 2\.3 or later, below 3, and this is mcp 3\.0\.0"):
+        wake.attach(object())
 
 
 def test_other_servers_are_refused() -> None:
-    with pytest.raises(TypeError, match="MCPServer .* or a FastMCP 4 server"):
+    with pytest.raises(TypeError, match="MCPServer .* or a FastMCP server"):
         host_of(object())
     assert isinstance(host_of(FastMCP("x")), FastMCPHost)
+
+
+async def test_a_logging_middleware_added_after_attach_never_sees_wakeshifts_arguments() -> None:
+    a = App()
+    logged: list[Any] = []
+
+    class Logging(Middleware):
+        async def on_call_tool(self, context: Any, call_next: Any) -> Any:
+            logged.append(dict(context.message.arguments or {}))
+            return await call_next(context)
+
+    a.mcp.add_middleware(Logging())
+    wake_args = {"session_key": "wsc_canary", "harness": "claude-code", "conversation_id": "c1"}
+    async with serve(a.app()) as s:
+        rpc = s.rpc()
+        for tool in ("join", "plain"):
+            res = await call_tool(rpc, tool, {"table": "oak", **wake_args})
+            assert not res["result"].get("isError"), res
+    assert logged == [{"table": "oak"}, {"table": "oak"}]
+    assert a.core.bodies("/event-subscriptions")[0]["call"]["session"] == "wsc_canary"
+
+
+async def test_wrap_on_fastmcp() -> None:
+    a = App()
+    wrapped = FastMCP("wrapped", auth=StaticTokenVerifier(tokens=TOKENS))
+    wake = a.wake
+    wake.attach(wrapped, identify=identify_by_claim("sub"), wrap={"watch": [a.turn]})
+
+    @wrapped.tool
+    async def watch(table: str) -> str:
+        """Watch a table."""
+        await wake.current_call().subscribe(a.turn, {"table": table})
+        return f"Watching {table}."
+
+    app = wrapped.http_app(path="/mcp", stateless_http=True, json_response=True)
+    async with serve(app) as s:
+        rpc = s.rpc()
+        tools = {t["name"]: t for t in (await rpc("tools/list", {}))["result"]["tools"]}
+        assert {"session_key", "harness", "conversation_id"} <= set(tools["watch"]["inputSchema"]["properties"])
+        res = await call_tool(rpc, "watch", {"table": "oak", "session_key": "wsc_s1"})
+        assert texts(res)[0].startswith("Watching oak.") and texts(res)[-1] == TRAILER, res
+    assert a.core.bodies("/event-subscriptions")[0]["call"]["tool"] == "watch"
+
+
+async def test_a_vendors_own_server_discover_gains_events() -> None:
+    import mcp_types as types
+
+    a = App()
+
+    async def discover(ctx: Any, params: Any) -> types.DiscoverResult:
+        return types.DiscoverResult(
+            supported_versions=[MODERN],
+            capabilities=types.ServerCapabilities(extensions={"com.vendor/thing": {"v": 1}}),
+            instructions="The vendor's own.",
+        )
+
+    a.mcp._mcp_server.add_request_handler("server/discover", types.RequestParams, discover)
+    async with serve(a.app()) as s:
+        d = await s.rpc()("server/discover", {"_meta": modern_meta()}, headers=modern_headers("server/discover"))
+    r = d["result"]
+    assert r["capabilities"]["events"] == {"listChanged": False}
+    exts = r["capabilities"]["extensions"]
+    assert exts["com.vendor/thing"] == {"v": 1} and exts[EXTENSION_KEY] == {"listChanged": False}
+    assert r["instructions"] == "The vendor's own."
+
+
+async def test_wrap_as_a_function_names_tools_at_run_time() -> None:
+    core = WakeCore()
+    wake = Wakeshift(
+        app_key("cards"), core="https://core.test", http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(core.handler))
+    )
+    news = wake.define_event("table.news", description="News at a table", args=TableArgs, payload=TurnMsg, public=True)
+    mcp = FastMCP("cards")
+    wake.attach(mcp, wrap=lambda tool: [news] if tool.startswith("watch_") else None)
+
+    @mcp.tool
+    async def watch_oak(table: str) -> str:
+        """Watch a table."""
+        await wake.current_call().subscribe(news, {"table": table})
+        return f"watching {table}"
+
+    @mcp.tool
+    async def peek(table: str) -> str:
+        return f"peek {table}"
+
+    async with serve(mcp.http_app(path="/mcp", stateless_http=True, json_response=True)) as s:
+        rpc = s.rpc(None)
+        tools = {t["name"]: t for t in (await rpc("tools/list", {}))["result"]["tools"]}
+        res = await call_tool(rpc, "watch_oak", {"table": "oak", "session_key": "wsc_s1"})
+    assert "session_key" in tools["watch_oak"]["inputSchema"]["properties"]
+    assert "News at a table" in tools["watch_oak"]["description"]
+    assert "session_key" not in tools["peek"]["inputSchema"]["properties"]
+    assert texts(res) == ["watching oak", WOKEN, TRAILER]
+    assert core.bodies("/event-subscriptions")[0]["call"]["tool"] == "watch_oak"

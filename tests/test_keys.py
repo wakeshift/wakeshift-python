@@ -12,8 +12,8 @@ from typing import Any
 import httpx2
 import pytest
 
-from wakeshift import AppInfo, Wakeshift, parse_key, sign_assertion
-from wakeshift.key import b64url_decode, public_key_of
+from wakeshift import AppInfo, UsageError, Wakeshift
+from wakeshift._key import b64url_decode, parse_key, public_key_of, sign_assertion
 
 from .helpers import format_key, golden_file
 
@@ -74,7 +74,7 @@ def test_assertions_name_the_key_by_kid_and_the_app_when_known() -> None:
 
 def test_only_a_test_key_needs_a_core(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("WAKESHIFT_CORE", raising=False)
-    with pytest.raises(ValueError, match="no core URL for this test key: set WAKESHIFT_CORE"):
+    with pytest.raises(UsageError, match="a test key has no default core: set WAKESHIFT_CORE"):
         Wakeshift(OLD_KEY)
     assert Wakeshift(NEW_KEY).core == "https://app.wakeshift.ai"
     assert Wakeshift(OLD_KEY.replace("wst_test_", "wst_live_")).core == "https://app.wakeshift.ai"
@@ -100,7 +100,7 @@ class Core:
         return httpx2.Response(200, json={"workspace": "w-1"})
 
     def wake(self, key: str = NEW_KEY) -> Wakeshift:
-        return Wakeshift(key, core="http://core.test", http=httpx2.AsyncClient(transport=httpx2.MockTransport(self)))
+        return Wakeshift(key, core="https://core.test", http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(self)))
 
     def paths(self) -> list[str]:
         return [r.url.path for r in self.sent]
@@ -109,7 +109,7 @@ class Core:
 async def test_a_current_keys_app_id_is_wakeshifts_to_say() -> None:
     core = Core()
     wake = core.wake()
-    with pytest.raises(RuntimeError, match=r"^wakeshift: call await wake.app\(\) first: this key doesn't name its app"):
+    with pytest.raises(UsageError, match=r"call await wake.app\(\) first"):
         _ = wake.app_id
     # Concurrent first calls ask once.
     infos = await asyncio.gather(wake.app(), wake.app(), wake.app())

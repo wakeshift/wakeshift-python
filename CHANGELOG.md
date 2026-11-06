@@ -2,6 +2,175 @@
 
 What changed in each release of `wakeshift`. 0.4.0 is the first published release: to start with it, read the [README](README.md). Its notes below, and the earlier releases', are for apps that ran the preview builds.
 
+## 0.10.0 (unreleased)
+
+One release with TypeScript 0.11.0 and Go v0.10.0, per the SDK design (docs/sdk-design-next.md). It breaks APIs where that makes them simpler. Read "Who may subscribe" first.
+
+### Breaking
+
+**Who may subscribe (read this first).** An event that declares neither `personal`, `authorize` nor `public` is now subscribed only by your own tools: `subscribe_events` and native (MCP Events) subscriptions stop for it, and Wakeshift ends the ones made that way when your new manifest arrives (`event_closed` in your logs says how many). If that's what you meant (it usually is: job IDs, crawls, runs), do nothing. To keep other paths open, add `authorize` (gated) or `public=True` (anyone). Apps that haven't upgraded see no change.
+
+```python
+# Before: anyone could subscribe through subscribe_events or natively
+wake.define_event("chat.message", description="A message", args=Channel, payload=Message, text=...)
+# After: say so, if that's what you want
+wake.define_event("chat.message", description="A message", args=Channel, payload=Message, public=True)
+```
+
+**Install.** `mcp` is an extra now, so an emit-only process installs nothing it doesn't need, and plain `wakeshift` installs beside FastMCP 2 or 3 (where `attach` works too, below).
+
+```sh
+pip install wakeshift            # before
+pip install 'wakeshift[mcp]'     # after: MCPServer or the low-level Server
+pip install 'wakeshift[fastmcp]' # after: FastMCP 4 (unchanged)
+```
+
+**Construction.** The key comes from `WAKESHIFT_KEY`; a missing key gives a disabled client instead of raising.
+
+```python
+wake = Wakeshift(os.environ["WAKESHIFT_KEY"])  # before
+wake = Wakeshift.optional(os.environ.get("WAKESHIFT_KEY"))  # before, where Wakeshift was optional
+wake = Wakeshift()  # after: disabled without a key
+wake = Wakeshift(required=True)  # after: raise without one
+wake = Wakeshift(http_client=httpx2.AsyncClient())  # after: was http=
+```
+
+**identify takes a `wakeshift.Request`,** may be async, and runs only when Wakeshift needs it. If it raises or takes over 10 seconds, Wakeshift's part of the request is refused.
+
+```python
+wake.attach(server, identify=lambda ctx: Identity(user=user_of(ctx.request.headers)))  # before
+wake.attach(server, identify=lambda r: Identity(user=user_of(r.headers)))  # after
+wake.attach(server, identify=identify, require_user=True)  # after: refuse anonymous callers
+```
+
+**Tools that subscribe declare their events; subscribing to an undeclared one raises.**
+
+```python
+@attached.tool()  # before: an undeclared subscribe warned
+async def watch(room: str, call: ToolCall) -> str: ...
+
+
+@attached.tool(subscribes=[ping])  # after: UsageError undeclared_subscribe otherwise
+async def watch(room: str, call: ToolCall) -> str: ...
+```
+
+**Tools registered elsewhere use `wrap`.**
+
+```python
+TOOLS = [wrapped_tool(types.Tool(name="watch", ...))]            # before
+await attached.call(ctx).subscribe(ping, {"room": room})
+
+TOOLS = [types.Tool(name="watch", ...)]                           # after
+wake.attach(server, wrap={"watch": [ping]})
+await wake.current_call().subscribe(ping, {"room": room})
+```
+
+**`attached.call(ctx)` in an `MCPServer` tool** is `wake.current_call()`, with the tool named in `wrap` (or registered with `@attached.tool`).
+
+**Built-in tools.** attach's `tools=` is now `builtin_tools=`, and each tool takes a `bool`.
+
+```python
+wake.attach(server, tools={"subscribe": {"enabled": False}, "wait": {"enabled": True}})  # before
+wake.attach(server, builtin_tools={"subscribe": False, "wait": True})  # after
+wake.attach(server, events=EventsOptions(native=f))  # before
+wake.attach(server, is_native_client=f)  # after: f takes a Request
+```
+
+**Subscription.**
+
+```python
+if sub.created: ...          # before
+if sub.native: ...
+if sub.state == "created":   # after: created, renewed, native, unavailable (with reason) or disabled
+if sub.state == "native":
+```
+
+`sub.session` and `call.session` are `SessionKey`s, which never print; `.reveal()` gives the key.
+
+**Errors.**
+
+```python
+except WakeshiftError as err:          # before
+    if is_code(err, "id_reused"): ...
+    if err.status == 0: ...            # unreachable
+except ArgsError: ...
+
+except IdReusedError: ...              # after
+except APIConnectionError: ...         # unreachable or timeout; an APIError, status None
+except UsageError as err:              # caught before sending (also a ValueError): err.code, err.issues
+    ...
+```
+
+`CallEnded` and `UndeclaredSubscribe` are `UsageError`s with codes `call_ended` and `undeclared_subscribe`.
+
+**Names.** `Attached` is `Attachment`, `PublishUrl` is `PublishURL`, `PublishUrlSigning` is `PublishURLSigning`, `EventSubscriptionStatus` is `SubscriptionStatus`, and `event.publish_url(args)` is `event.create_publish_url(args)`.
+
+**Warnings** go through `logging.getLogger("wakeshift")`, with a code in `extra`; `on_warning` is gone.
+
+**Custom sentences.** `notifies(...)` is gone: the sentence comes from `subscribes`, always. Delete it from your descriptions.
+
+**Removed from the public surface:** `wrapped_tool`, `notifies`, `is_code`, `ArgsError`, `CallEnded`, `UndeclaredSubscribe`, `EventsOptions`, `AttachTools`, `ToolOptions`, `WaitToolOptions`, `WakeOutput`, `AppKey`, `parse_key`, `sign_assertion`, `harness_agent`, `BUILTIN_TOOLS`, `EVENT_TOOL_TEXT`, `TOOL_OUTPUT_SCHEMAS` and every other exported constant, `Wakeshift.optional`, `wakeshift.fastmcp.access_token` (use `Request.token`). The modules behind `wakeshift` are private.
+
+**tools/list is compact.** Wakeshift's argument descriptions are short; all three of its arguments appear only on tools that subscribe to something and `subscribe_events`, `session_key` alone on other tools that subscribe and `unsubscribe_events`, none on `list_subscriptions` (every tool still accepts all three); the built-ins' descriptions are short and their output schemas carry no descriptions; a tool's `wakeshift` output field is `{"type": "string"}`.
+
+### Added
+
+- **Subscribe vouchers: ChatGPT can subscribe to tools-only events.** When Wakeshift offers it (its manifest answer reports `subscribe_vouchers`), `call.subscribe` of a tools-only event from an MCP Events client (ChatGPT) returns `native` instead of `unavailable`, and the result's block hands the client a one-time voucher for exactly that event and those arguments. The client writes it back as the event argument `wakeshift_voucher`, which the SDK takes out of the arguments before anything reads them and passes to Wakeshift; `on_subscribe` then runs with `via="tool"` and your tool's name. `events/list` lists tools-only events, with a required `wakeshift_voucher`, only to native clients and only while Wakeshift offers vouchers, and the events capability is advertised whenever the server has an event. `native` may now come with no user (`user=""`) for an anonymous caller. Nothing to write. `wakeshift_voucher` is now a reserved argument name (`define_event` refuses it), `redact_secrets` redacts `wsv_` vouchers, and a call whose only Wakeshift work is native lines returns your result unchanged when Wakeshift can't add its line (logged as `native_unavailable`).
+- **`event.watch(args, check, every=, timeout=, max_errors=, is_final=, id=, to=)`**, for services with no usable webhook: it calls `check` (async, or a plain function run in a worker thread) until it returns the payload (`None`: keep waiting), then emits once. The first check runs at once, then one every `every` (default 30 seconds, at least 1); a check that raises is retried with backoff (`every` × 2ⁿ, at most 5 minutes), failing after `max_errors` in a row (default 5) or at once on an error `is_final(err)` marks final; `timeout` (default 1 hour) covers the checks and the emit. The emit carries `id` (default: one per watch), the same on every retry, and is retried only while that can help (no answer, 429, 5xx); `id_reused` (a webhook got there first) counts as emitted. At most 10 checks run at once per client. A watch of the same event and arguments while one runs returns that one. It returns an `asyncio.Task` of a **`WatchResult`** (`outcome`: `emitted`, `timeout`, `stopped`, `skipped` or `failed`, with `emitted`, `reason` and `error`), which never raises unless you cancel it. It does nothing on a disabled client, or in a tool call whose subscription to those arguments came back unavailable; a watch a failed call started for a subscription it made stops when the call's subscriptions are rolled back. `wake.aclose()` stops every watch. In-process only: a restart or a serverless freeze loses it. New log codes `watch_failed` and `watch_timeout`.
+- **`on_subscribe=` on `define_event`**: runs once for each new subscription, made by a tool (after the call succeeds), `subscribe_events` or a native client (`events/subscribe`, or the `events/poll` that started it), in the background, with a **`Subscribed`** (`args`, `user`, `via`, `tool`). Start `event.watch` there and every path is covered. An error logs `on_subscribe_failed`; the subscription stands. `wake.aclose()` cancels what's still running.
+- **`wakeshift.testing`**: `TestClient(app="Test app")`, a client that's enabled and offline (a fake of Wakeshift in memory; it never reads `WAKESHIFT_KEY`), recording `emits`, `subscriptions`, `unsubscribes` and `publish_urls`; `tool_call(tool=, user=, session=, native=, context=, events=, wake=)`, a stand-in `ToolCall` (a subclass, so `call: ToolCall` type-checks) whose `subscribe` returns a real `Subscription` and records it; and `with_call(wake, call)`, inside which `wake.current_call()` returns `call`. `Wakeshift("")` stays off whatever the environment says.
+- **`context=` on `call.subscribe`, and `Subscribed.context`.** Pass any value of yours (the caller's credential, say) and the event's `on_subscribe` gets it, so a watch started there can poll with the caller's credentials: no map of IDs to credentials of your own. It's never sent to Wakeshift, logged or shown. For a voucher redemption (ChatGPT), `on_subscribe` gets the context of the call that handed the voucher out while this process still holds it (in memory, by the voucher's hash, until it's redeemed or expires, at most 1,000); a redemption on another instance, `subscribe_events` and native subscriptions get `None`, so a watch that needs the caller's credentials can't run there: log it, or fall back to your status tool. `on_subscribe` for a tool's subscription now runs in a copy of the contextvars the subscribe ran in.
+- **`wakeshift.testing`, round 3:** `wake.fail_next("subscribe" | "unsubscribe", "unreachable" | "refused")` and `call.fail_next(...)` make the next one fail (no answer: `APIConnectionError`; or Wakeshift refusing the key: `APIError` `unauthenticated`); the test client hands out subscribe vouchers as Wakeshift does (to a ChatGPT-shaped request, or a stand-in made with `native=True, wake=` a `TestClient`, recorded on `call.vouchers` as `TestVoucher`s), and `await wake.redeem(voucher, webhook_url)` subscribes with one as ChatGPT would, through the SDK's own redemption (a `TestRedemption`: the same webhook again refreshes, anything else raises `bad_voucher`); `await call.finish()` runs `on_subscribe` (with each subscribe's `context`) for what a stand-in call created, as after a real call, and `async with with_call(wake, call)` runs it for you (a plain `with` can't wait for it, so it doesn't, and warns with a `RuntimeWarning` when the call subscribed to an event with `on_subscribe`); each `TestSubscription` a stand-in call records carries its subscribe's `context`; `await wake.aclose()` waits for the watch checks in flight and their emits first, so an async check's emit shows in `emits`.
+- **`event.authorize`** (and `event.on_subscribe`): the function `define_event` was given, for unit tests.
+- **`BUILTIN_TOOL_NAMES`**: `("subscribe_events", "unsubscribe_events", "list_subscriptions", "wakeshift_wait")`.
+- **`builtin_tools=False`** turns every built-in tool off.
+- **FastMCP 2.12+ and 3.x.** `wake.attach` takes a FastMCP 2 or 3 server, with plain `wakeshift` installed beside it (never `[mcp]`): `@attached.tool(subscribes=...)`, `wrap=` with `current_call()`, the built-in tools and `identify` work as on FastMCP 4, and Wakeshift's arguments are taken out of every call before any middleware (added before `attach` or after), FastMCP's own logging or any handler sees them. Native MCP Events, protocol 2026-07-28 and the wait tool need FastMCP 4: on 2 and 3 every client gets the built-in tools and the block, and `builtin_tools={"wait": True}` raises `UsageError` `config`. Served through another server (`mount`), an attached server's tools that subscribe refuse to run, as on FastMCP 4. FastMCP before 2.12 raises `ImportError`.
+- **The disabled client.** Without a key, `define_event` and `attach` work and add nothing, `emit` and `call.subscribe` run their checks and send nothing (`state="disabled"`), and calls that need Wakeshift's answer raise `UsageError` `disabled`.
+- **`public=True`** on `define_event`, and the manifest's `subscribe` setting, which the core enforces too.
+- **`wrap=`** on `MCPServer`, FastMCP 4 and the low-level `Server`, and **`wake.current_call(request=None)`**. `wrap` may be a function of a tool's name returning its events (or `None`), asked on every tools/list and tools/call, for tools named at run time. A function that returns anything but a list of this client's events for a tool logs `wrap_bad_event` (once per tool) and serves that tool unwrapped.
+- **Sync tools.** `@attached.tool` takes a plain `def` that subscribes to nothing; it runs in a worker thread, as `MCPServer` and FastMCP run one. A tool that subscribes must be `async def`.
+- **A `title` on Wakeshift's own tools**, the same as their annotations' title.
+- **`require_user=True`** and **`wakeshift.Request`** (`headers`, the verified `token`, `client_name`, `raw`). `token` is an `mcp.server.auth.provider.AccessToken` (or FastMCP's subclass of it), or None.
+- **`SessionKey`**, **`redact_secrets`**, **`encode_arg_value`** and **`decode_arg_value`**. `encode_arg_value` keeps `a-z 0-9 - _` as they are (so `dep-abc123` stays `dep-abc123`) and escapes with `.`: a capital becomes `.` and its lowercase letter, any other byte `..` and two hex digits, and a result over 100 characters `..h` and 40 hex digits of SHA-256, which doesn't decode.
+- **`await wake.aclose()`** and `async with Wakeshift() as wake`; one client may be shared across threads and event loops.
+- **`max_retries=`** (default 2): a request that never reached Wakeshift is sent again, and an emit without an `id` gets one of the SDK's, so a retry wakes nobody twice.
+- **`replay=` and `once=` on `call.subscribe`**, with `replay` checked before sending (above zero, at most 24 hours); `replay` and `ttl` take a `timedelta`, seconds or `"30m"`.
+- **`signing_secret=` on `create_publish_url`**, whose `signing` has the secret's fingerprint.
+- **Output schemas on Wakeshift's own tools**, with matching `structuredContent`.
+- `@attached.tool` without parentheses; it returns the function typed as itself. `WakeEvent` is generic, and `define_event` is typed for pydantic models and for JSON Schema dicts.
+- `text` is optional: without it, the agent reads the description and the arguments.
+
+### Changed
+
+- **A tool without `subscribes` is a plain registration**, with or without a key: `@attached.tool()` no longer needs a `ToolCall` parameter (it's still filled in if the function takes one), and never raises for its absence. With a key it still takes `session_key`, so a tool that only unsubscribes (`call.unsubscribe`, or `wake.current_call().unsubscribe`) works as with `subscribes=[]`. A configuration error `attach` or `@attached.tool` raises is also logged, with the new code `config` (a framework may turn the raise into a bare 500).
+- **Watches never keep a process alive.** A sync `check` runs in a daemon thread of its own (it ran in the default executor, which a stdio server waited for after stdin ended); an async one is cancelled with the event loop, as before. Call `await wake.aclose()` if your process keeps running after the server returns.
+- **Log codes:** `identify_failed` is split into `identify_error` (identify raised, returned something else or took over 10 seconds; its fix now says to raise only when the upstream can't answer) and `user_required` (info: `require_user` refused a caller identify gave no user). `call.subscribe` raises the same code as the line: `identify_failed` when identify raised, failed or timed out, and the new error code `user_required` when `require_user` refused the caller (`identify_failed` before). Log lines and error messages use Python's names (`require_user=False`, `define_event`, `on_subscribe`, `builtin_tools`, `resolve_session`, "raise"). New `monitor_line_long` (warn, once per event): an emit's text over 200 bytes leaves the payload no room on Claude Code's 480-byte Monitor line. `watch_failed` no longer says "stopped without emitting" twice. A watch stopped by an error `is_final` marks final logs the new `watch_stopped` at info instead of a `watch_failed` warning: it stopped as asked (its result is still `failed`, reason `check`).
+- **The SDK's own requests no longer log through `httpx2`** (one INFO line per request); the app's own requests, and how it configured those loggers, are untouched.
+- **`events/list` lists a tools-only event with `delivery: ["webhook"]`**, and `events/poll` of one is refused with "… can't be polled: it's subscribed to only through this app's tools, with a webhook" (it named the voucher, which can't help a poll).
+- **Built-in tools carry no `execution`** unless one of the server's own tools does.
+- **A Wakeshift failure never changes your tool's result.** When Wakeshift's addition to a result of a tool that subscribes fails (an error answer, a timeout, the core unreachable, a refused key), the agent gets the result exactly as your tool gave it, with no error and nothing asking it to call again: the tool may have started paid or visible work. Before, the call failed with "...Try again.". What the call subscribed is still rolled back, and the new `block_failed` code logs it (warn, at most once per five minutes). The built-in tools' answers for no answer from Wakeshift say only what happened ("Wakeshift didn't answer in time", "Wakeshift couldn't be reached"), and the `timeout` error's fix no longer says to retry: "The outcome is unknown; an emit sent again with the same id emits once."
+- **Claude Code is never an MCP Events client**, nor is any other harness Wakeshift wakes through a path of its own (a Monitor, hooks, a connector, a plugin or a background command; Capy's and Muse's clients included), recognized by its client name or `User-Agent`: its calls get Wakeshift's block even when they declare the MCP Events capability. ChatGPT is recognized by `openai-mcp` in its client name or `User-Agent`, `openai-mcp/1.0.0 (Codex)` from Work chats included.
+- **`list_subscriptions` works without `identify`**: with no user it lists the calling conversation's subscriptions (its `session_key`, which `tools/list` now lists for it), and `unsubscribe_events` by `id` ends one of them; with a user, both work as before.
+- **`list_subscriptions` and `unsubscribe_events` are listed only where something can subscribe**: a tool whose `subscribes` names an event, or an event open to `subscribe_events`.
+- **The built-in tools go through your own `tools/list` pipeline**: they're added inside the server's `tools/list` handler (`MCPServer`, the low-level `Server`) or put in FastMCP's tool registry (FastMCP 2, 3 and 4), so middleware that amends every listed tool (`securitySchemes`, `_meta`) amends them too. Their calls are still answered by Wakeshift.
+- **FastMCP 2/3: attach in any order.** A `tools/call` handler set on the low-level server after `attach` (your own validator, an instrumentation wrapper) gets Wakeshift's strip too, so it never sees `session_key`.
+- **A call that subscribes and then unsubscribes the same thing** gets no Wakeshift block.
+- **`call.session` is None until Wakeshift resolved the conversation** (a subscribe that reached it, or `resolve_session`); it's never the raw `session_key` argument, which a caller can forge.
+- **`await call.resolve_session()` returns None when nothing names the conversation** (no `session_key`, no `conversation_id` and no harness conversation in the call's `_meta`, such as a Codex thread), without a request to Wakeshift; before, it started a new session. Call it directly to find your own record of the conversation: a passed key is checked first.
+- **A one-line description without a final period gets one** before the subscribes sentence ("…information. This tool is how…").
+- **Quieter logs**: `no_key` at debug, so a stdio server without a key prints nothing; `events_capability_kept` at info. `identify_failed` names the error's type once and ends with one fix clause.
+- **A refused caller reads the same words as in every SDK**: "This app needs you to sign in before it can subscribe you to anything." (`require_user`) or "This app couldn't verify who you are, so it can't subscribe you to anything now." (identify failed).
+- **attach works at the protocol layer.** Wakeshift's arguments are taken out of every tool call, before your middleware or the host sees them; its own tools are served by its middleware, so a handler set again after attach keeps them; a server that serves its own MCP Events keeps them.
+- Registering a tool named like a built-in, one whose input names `session_key`, `harness` or `conversation_id`, or one whose output names `wakeshift`, raises `UsageError` `config`. One attach per server.
+- The core URL must be `https://` (plain `http` only to localhost, 127.0.0.1 or ::1).
+- A cancellation during a failed call's rollback reaches the caller.
+- MCP Events (the `events` capability and its extension) is advertised whenever the server defines an event, tools-only ones included (an MCP Events client subscribes to those with the voucher a tool's result hands it), unless the server serves its own MCP Events; a server with no events advertises none. On mcp 2.x hosts (MCPServer, FastMCP 4, the low-level Server); FastMCP 2 and 3 serve no MCP Events.
+- `no_identify` and `no_key` log at debug, not info.
+- The subscribes sentence names your app exactly as its name is written ("shipyard", not "Shipyard").
+- `subscribe_events`' and `unsubscribe_events`' `arguments` schema is `{"type": "object", "additionalProperties": true}` with its description, never `additionalProperties: {}`.
+- A tool that subscribes whose description is over 2048 characters with Wakeshift's sentence logs `description_too_long` once per tool: Claude Code keeps only the first 2048.
+- A tool's description keeps its whitespace (markdown, JSON examples): only trailing whitespace is dropped, and the subscribes sentence follows a blank line when the description has more than one line, else a space.
+
 ## 0.9.3 (2026-11-05)
 
 ### Changed

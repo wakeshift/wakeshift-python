@@ -11,8 +11,8 @@ from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel
 
 from wakeshift import Identity, ToolCall
-from wakeshift.client import _takes_tasks
-from wakeshift.tasks import TASK_HOLD_SECONDS, TASKS_EXTENSION, WAIT_TOOL, WAIT_TOOL_DEFINITION
+from wakeshift._client import _takes_tasks
+from wakeshift._tasks import TASK_HOLD_SECONDS, TASKS_EXTENSION, WAIT_TOOL, WAIT_TOOL_DEFINITION
 
 from .helpers import FakeCore, fake_wake, golden_file, served
 
@@ -44,9 +44,9 @@ def _app(core: FakeCore, wait: bool = True) -> MCPServer:
     tool, join, that subscribes nothing and returns "joined". The wait tool
     is on unless wait is False (attach's default is off)."""
     wake, _ = fake_wake(core)
-    wake.define_event("chat.message", description="A new message", args=_Chat, payload=_Msg, text=lambda m: m.text)
+    wake.define_event("chat.message", description="A new message", args=_Chat, payload=_Msg, text=lambda m: m.text, public=True)
     server = MCPServer("chat")
-    attached = wake.attach(server, identify=lambda _ctx: Identity(user="u1"), tools={"wait": {"enabled": wait}})
+    attached = wake.attach(server, identify=lambda _ctx: Identity(user="u1"), builtin_tools={"wait": wait})
 
     @attached.tool()
     async def join(call: ToolCall) -> str:
@@ -179,7 +179,7 @@ async def test_a_public_tools_list_cache_scope_becomes_private() -> None:
     from mcp.server.mcpserver import MCPServer as OfficialMCPServer
 
     wake, _ = fake_wake(FakeCore(default_ok=True))
-    wake.define_event("chat.message", description="A new message", args=_Chat, payload=_Msg, text=lambda m: m.text)
+    wake.define_event("chat.message", description="A new message", args=_Chat, payload=_Msg, text=lambda m: m.text, public=True)
     hint = CacheHint(ttl_ms=60_000, scope="public")
     server = OfficialMCPServer("chat", cache_hints={"tools/list": hint, "server/discover": hint})
     wake.attach(server)

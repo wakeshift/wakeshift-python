@@ -1,5 +1,5 @@
 {
-  "_about": "The MCP Events wire format every SDK (pkg/appkit, sdk/typescript, sdk/python) serves for chat.message ({channel}), as a client that speaks the draft (SEP-3415) sees it: events/list's delivery modes, and for events/subscribe and events/poll, the client's params, what the SDK asks Wakeshift (core_request: the body without call and dialect), what Wakeshift answers (core_response) and the JSON-RPC result the client gets.",
+  "_about": "The MCP Events wire format every SDK (pkg/wakeshift, sdk/typescript, sdk/python) serves for chat.message ({channel}), as a client that speaks the draft (SEP-3415) sees it: events/list's delivery modes, and for events/subscribe and events/poll, the client's params, what the SDK asks Wakeshift (core_request: the body without call and dialect), what Wakeshift answers (core_response) and the JSON-RPC result the client gets.",
   "revision": "SEP-3415 (2026-10-27)",
   "delivery": [
     "webhook",
@@ -233,5 +233,994 @@
         "nextPollMs": 0
       }
     }
-  ]
+  ],
+  "next": {
+    "_comment": "Next release (design §3, PR 6): who may subscribe, on the MCP Events wire and through a tool. Loaders that predate it ignore this key. Under the next release, chat.message in subscribe and poll above is defined with public: true (otherwise it's tools-only and those cases are refused); each case above still holds unchanged. Two more events: crawl.finished, tools-only (declares neither personal, authorize nor public), arguments {job: string, required}, payload {pages: number}; deploy.finished, with an authorize that allows only user u1, arguments {env: string, required}, payload {status: string}. user is what identify returns (null: no user). Every refusal is answered by the SDK itself: Wakeshift isn't asked (no request to /events/subscribe or /events/poll), and the error is the dialect's forbidden code, its message from event-tools.json, data null. A draft client is any client name (some-draft-client); chatgpt is ChatGPT's dialect, as in errors.json rpc.",
+    "_c1_dependent": "The core refuses the same requests (C1) for events whose manifest says subscribe: \"tools\", so an old SDK instance can't reopen them; these SDK fixtures check only the SDK's own refusal and that it never asks the core. Without C1 deployed, the SDK's refusal still holds.",
+    "events_list": [
+      "chat.message",
+      "deploy.finished"
+    ],
+    "_events_list_comment": "events/list names only events a native client may subscribe to; crawl.finished (tools-only) is absent.",
+    "precedence": [
+      "Mcp-Name header mismatch",
+      "unknown event (not found)",
+      "tools-only (forbidden, native_tools_only; events/poll native_tools_only_poll)",
+      "delivery mode (unsupported)",
+      "arguments (invalid params)",
+      "no user (forbidden, native_no_user)",
+      "authorize (forbidden, native_refused)"
+    ],
+    "_precedence_comment": "The order an SDK checks events/subscribe and events/poll in; events/unsubscribe skips tools-only, no-delivery-mode and authorize checks.",
+    "refused": [
+      {
+        "name": "subscribe to a tools-only event",
+        "method": "events/subscribe",
+        "user": "u1",
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null,
+          "ttlMs": 3600000
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "crawl.finished can be subscribed only through this app's tools, or with the voucher one of them handed you",
+          "data": null
+        }
+      },
+      {
+        "name": "poll a tools-only event, no cursor",
+        "method": "events/poll",
+        "user": "u1",
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1"
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "crawl.finished can't be polled: it's subscribed to only through this app's tools, with a webhook",
+          "data": null
+        }
+      },
+      {
+        "name": "poll a tools-only event with a cursor (a forged cursor proves nothing)",
+        "method": "events/poll",
+        "user": "u1",
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1"
+          },
+          "cursor": "c1.99"
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "crawl.finished can't be polled: it's subscribed to only through this app's tools, with a webhook",
+          "data": null
+        }
+      },
+      {
+        "name": "subscribe to a tools-only event, no user: tools-only is refused first",
+        "method": "events/subscribe",
+        "user": null,
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "crawl.finished can be subscribed only through this app's tools, or with the voucher one of them handed you",
+          "data": null
+        }
+      },
+      {
+        "name": "subscribe to a tools-only event with an unsupported delivery mode: tools-only is refused first",
+        "method": "events/subscribe",
+        "user": "u1",
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1"
+          },
+          "delivery": {
+            "mode": "push"
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "crawl.finished can be subscribed only through this app's tools, or with the voucher one of them handed you",
+          "data": null
+        }
+      },
+      {
+        "name": "subscribe to a tools-only event with arguments that don't match: tools-only is refused first",
+        "method": "events/subscribe",
+        "user": "u1",
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": 5
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "crawl.finished can be subscribed only through this app's tools, or with the voucher one of them handed you",
+          "data": null
+        }
+      },
+      {
+        "name": "subscribe to a public event, no user",
+        "method": "events/subscribe",
+        "user": null,
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "this app couldn't tell who you are, so it can't hold a subscription for you: sign in to it first",
+          "data": null
+        }
+      },
+      {
+        "name": "poll a public event, no user",
+        "method": "events/poll",
+        "user": null,
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "this app couldn't tell who you are, so it can't hold a subscription for you: sign in to it first",
+          "data": null
+        }
+      },
+      {
+        "name": "subscribe to an event whose authorize refuses this caller",
+        "method": "events/subscribe",
+        "user": "u2",
+        "params": {
+          "name": "deploy.finished",
+          "arguments": {
+            "env": "prod"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "you may not subscribe to deploy.finished with these arguments",
+          "data": null
+        }
+      },
+      {
+        "name": "poll with a cursor an event whose authorize refuses this caller (asked on every poll)",
+        "method": "events/poll",
+        "user": "u2",
+        "params": {
+          "name": "deploy.finished",
+          "arguments": {
+            "env": "prod"
+          },
+          "cursor": "c1.3"
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "you may not subscribe to deploy.finished with these arguments",
+          "data": null
+        }
+      }
+    ],
+    "unsubscribe_tools_only": {
+      "name": "unsubscribing from a tools-only event stays allowed on every path",
+      "method": "events/unsubscribe",
+      "user": "u1",
+      "params": {
+        "name": "crawl.finished",
+        "arguments": {
+          "job": "j1"
+        },
+        "delivery": {
+          "mode": "webhook",
+          "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+          "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+        }
+      },
+      "core_request": {
+        "name": "crawl.finished",
+        "arguments": {
+          "job": "j1"
+        },
+        "delivery": {
+          "mode": "webhook",
+          "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+          "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+        }
+      },
+      "core_response": {
+        "ended": true
+      },
+      "result": {
+        "resultType": "complete"
+      }
+    },
+    "builtin_calls": [
+      {
+        "name": "subscribe_events asked for a tools-only event",
+        "tool": "subscribe_events",
+        "user": "u1",
+        "arguments": {
+          "event": "crawl.finished",
+          "arguments": {
+            "job": "j1"
+          }
+        },
+        "isError": true,
+        "text": "crawl.finished can be subscribed only through this app's tools.",
+        "core_asked": false,
+        "note": "event-tools.json tools_only; crawl.finished isn't in subscribe_events' enum, but a client may send it anyway"
+      },
+      {
+        "name": "unsubscribe_events for a tools-only event is allowed",
+        "tool": "unsubscribe_events",
+        "user": "u1",
+        "arguments": {
+          "event": "crawl.finished",
+          "arguments": {
+            "job": "j1"
+          }
+        },
+        "isError": false,
+        "core_asked": true,
+        "note": "asks Wakeshift as unsubscribe_events does today"
+      }
+    ],
+    "tool_subscribe_states": {
+      "_comment": "call.subscribe(event, args) from a tool that declares the event, per access and caller: the Subscription's state (and reason), whether the block carries a native line telling the client what to subscribe to, and whether the SDK asks Wakeshift (POST /event-subscriptions). access: tools (crawl.finished-like, no setting), personal, public, authorize_allows / authorize_refuses (deploy.finished, allowing only u1). caller: bridged (Claude Code: recognized as a conversation the SDK subscribes) or native (an MCP Events client that subscribes itself). Arguments: crawl.finished {job: j1}, deploy.finished {env: prod}, a personal event {table: oak}, a public event {channel: eng}. error: call.subscribe throws UsageError with that code. logs: the warnings.json code logged (once per tool and reason). created has id, user, session (redacted when printed) and recognized; native has user and recognized; unavailable has reason; disabled has nothing. On a disabled client every row is state disabled with nothing asked (disabled-client.json).",
+      "rows": [
+        {
+          "access": "tools",
+          "caller": "bridged",
+          "user": "u1",
+          "want": {
+            "state": "created"
+          },
+          "native_line": false,
+          "core_asked": true
+        },
+        {
+          "access": "tools",
+          "caller": "bridged",
+          "user": null,
+          "want": {
+            "state": "created"
+          },
+          "native_line": false,
+          "core_asked": true
+        },
+        {
+          "access": "personal",
+          "caller": "bridged",
+          "user": "u1",
+          "want": {
+            "state": "created"
+          },
+          "native_line": false,
+          "core_asked": true
+        },
+        {
+          "access": "personal",
+          "caller": "bridged",
+          "user": null,
+          "want": {
+            "error": "bad_arguments",
+            "says": "is personal"
+          },
+          "native_line": false,
+          "core_asked": false
+        },
+        {
+          "access": "authorize_refuses",
+          "caller": "bridged",
+          "user": "u2",
+          "want": {
+            "state": "created"
+          },
+          "native_line": false,
+          "core_asked": true,
+          "note": "call.subscribe runs no authorize for bridged agents: the tool checks ownership itself"
+        },
+        {
+          "access": "authorize_allows",
+          "caller": "bridged",
+          "user": "u1",
+          "want": {
+            "state": "created"
+          },
+          "native_line": false,
+          "core_asked": true
+        },
+        {
+          "access": "public",
+          "caller": "bridged",
+          "user": null,
+          "want": {
+            "state": "created"
+          },
+          "native_line": false,
+          "core_asked": true
+        },
+        {
+          "access": "tools",
+          "caller": "native",
+          "user": "u1",
+          "want": {
+            "state": "unavailable",
+            "reason": "client_unsupported"
+          },
+          "native_line": false,
+          "core_asked": false,
+          "logs": "native_unavailable"
+        },
+        {
+          "access": "tools",
+          "caller": "native",
+          "user": null,
+          "want": {
+            "state": "unavailable",
+            "reason": "client_unsupported"
+          },
+          "native_line": false,
+          "core_asked": false,
+          "logs": "native_unavailable",
+          "note": "tools-only is decided first"
+        },
+        {
+          "access": "personal",
+          "caller": "native",
+          "user": "u1",
+          "want": {
+            "state": "native"
+          },
+          "native_line": true,
+          "core_asked": false
+        },
+        {
+          "access": "personal",
+          "caller": "native",
+          "user": null,
+          "want": {
+            "state": "unavailable",
+            "reason": "no_user"
+          },
+          "native_line": false,
+          "core_asked": false,
+          "logs": "native_unavailable"
+        },
+        {
+          "access": "authorize_allows",
+          "caller": "native",
+          "user": "u1",
+          "want": {
+            "state": "native"
+          },
+          "native_line": true,
+          "core_asked": false,
+          "authorize_called_with": {
+            "user": "u1",
+            "native": true,
+            "args": {
+              "env": "prod"
+            }
+          }
+        },
+        {
+          "access": "authorize_refuses",
+          "caller": "native",
+          "user": "u2",
+          "want": {
+            "state": "unavailable",
+            "reason": "refused"
+          },
+          "native_line": false,
+          "core_asked": false,
+          "logs": "native_unavailable",
+          "note": "authorize runs before the native line, with the subscriber and arguments the client's follow-up will use (SEC M5)"
+        },
+        {
+          "access": "authorize_allows",
+          "caller": "native",
+          "user": null,
+          "want": {
+            "state": "unavailable",
+            "reason": "no_user"
+          },
+          "native_line": false,
+          "core_asked": false,
+          "logs": "native_unavailable",
+          "note": "authorize isn't called without a user"
+        },
+        {
+          "access": "public",
+          "caller": "native",
+          "user": "u1",
+          "want": {
+            "state": "native"
+          },
+          "native_line": true,
+          "core_asked": false
+        },
+        {
+          "access": "public",
+          "caller": "native",
+          "user": null,
+          "want": {
+            "state": "unavailable",
+            "reason": "no_user"
+          },
+          "native_line": false,
+          "core_asked": false,
+          "logs": "native_unavailable"
+        }
+      ]
+    }
+  },
+  "vouchers": {
+    "_comment": "Subscribe vouchers (docs/subscribe-vouchers.md §4.3, §4.4, §7.3). The events are next's: crawl.finished tools-only, chat.message public, deploy.finished authorize (only u1). feature: whether the core's manifest answer (PUT /manifest, POST /manifest/merge) reports features [\"subscribe_vouchers\"]; absent means true. A client writes the voucher a tool result handed it as the argument wakeshift_voucher. The SDK takes it out of arguments before anything else reads them (parsing, authorize, onSubscribe, logs, the subscription key) and, for a tools-only event while the feature is on, sends it to Wakeshift as the top-level voucher, skipping the no-user refusal (user null: identify gave none; the core then decides). core_request is the body without call and dialect; call_user is call.user on the wire (null: none sent). An open event ignores a voucher; events/poll of a tools-only event is refused, voucher or not; with the feature off a voucher is never forwarded. on_subscribe: what onSubscribe gets (null: it doesn't run); it runs when Wakeshift answers created with via tool:<name>. core_refused: Wakeshift's answer (status and body) and the JSON-RPC error the client gets. The voucher is a fake.",
+    "voucher": "wsv_fakefakefakefakefakefakefakefake",
+    "subscribe": [
+      {
+        "name": "an anonymous redemption: no user, the voucher goes to Wakeshift, onSubscribe runs as the tool's",
+        "user": null,
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1",
+            "wakeshift_voucher": "wsv_fakefakefakefakefakefakefakefake"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null,
+          "ttlMs": 3600000
+        },
+        "core_request": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "ttl_ms": 3600000,
+          "voucher": "wsv_fakefakefakefakefakefakefakefake"
+        },
+        "call_user": null,
+        "core_response": {
+          "id": "sub_5f1d2a0c9e8b7a6f5e4d3c2b",
+          "refresh_before": "2026-10-29T13:00:00Z",
+          "cursor": "c1.0",
+          "truncated": false,
+          "created": true,
+          "via": "tool:start_crawl",
+          "tool": "start_crawl"
+        },
+        "result": {
+          "resultType": "complete",
+          "id": "sub_5f1d2a0c9e8b7a6f5e4d3c2b",
+          "refreshBefore": "2026-10-29T13:00:00Z",
+          "cursor": "c1.0",
+          "truncated": false
+        },
+        "on_subscribe": {
+          "args": {
+            "job": "j1"
+          },
+          "user": null,
+          "via": "tool",
+          "tool": "start_crawl"
+        }
+      },
+      {
+        "name": "a signed-in redemption: the user goes too",
+        "user": "u1",
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1",
+            "wakeshift_voucher": "wsv_fakefakefakefakefakefakefakefake"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null,
+          "ttlMs": 3600000
+        },
+        "core_request": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "ttl_ms": 3600000,
+          "voucher": "wsv_fakefakefakefakefakefakefakefake"
+        },
+        "call_user": "u1",
+        "core_response": {
+          "id": "sub_5f1d2a0c9e8b7a6f5e4d3c2b",
+          "refresh_before": "2026-10-29T13:00:00Z",
+          "cursor": "c1.0",
+          "truncated": false,
+          "created": true,
+          "via": "tool:start_crawl",
+          "tool": "start_crawl"
+        },
+        "result": {
+          "resultType": "complete",
+          "id": "sub_5f1d2a0c9e8b7a6f5e4d3c2b",
+          "refreshBefore": "2026-10-29T13:00:00Z",
+          "cursor": "c1.0",
+          "truncated": false
+        },
+        "on_subscribe": {
+          "args": {
+            "job": "j1"
+          },
+          "user": "u1",
+          "via": "tool",
+          "tool": "start_crawl"
+        }
+      },
+      {
+        "name": "a refresh repeating the voucher: Wakeshift says it's not new, so onSubscribe doesn't run",
+        "user": null,
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1",
+            "wakeshift_voucher": "wsv_fakefakefakefakefakefakefakefake"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null,
+          "ttlMs": 3600000
+        },
+        "core_request": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "ttl_ms": 3600000,
+          "voucher": "wsv_fakefakefakefakefakefakefakefake"
+        },
+        "call_user": null,
+        "core_response": {
+          "id": "sub_5f1d2a0c9e8b7a6f5e4d3c2b",
+          "refresh_before": "2026-10-29T13:00:00Z",
+          "cursor": "c1.0",
+          "truncated": false,
+          "created": false,
+          "via": "tool:start_crawl",
+          "tool": "start_crawl"
+        },
+        "result": {
+          "resultType": "complete",
+          "id": "sub_5f1d2a0c9e8b7a6f5e4d3c2b",
+          "refreshBefore": "2026-10-29T13:00:00Z",
+          "cursor": "c1.0",
+          "truncated": false
+        },
+        "on_subscribe": null
+      },
+      {
+        "name": "an open event ignores a voucher: dropped, and the subscription is an ordinary native one",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng",
+            "wakeshift_voucher": "wsv_fakefakefakefakefakefakefakefake"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null,
+          "ttlMs": 3600000
+        },
+        "core_request": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "ttl_ms": 3600000
+        },
+        "call_user": "u1",
+        "core_response": {
+          "id": "sub_5f1d2a0c9e8b7a6f5e4d3c2b",
+          "refresh_before": "2026-10-29T13:00:00Z",
+          "cursor": "c1.0",
+          "truncated": false,
+          "created": true
+        },
+        "result": {
+          "resultType": "complete",
+          "id": "sub_5f1d2a0c9e8b7a6f5e4d3c2b",
+          "refreshBefore": "2026-10-29T13:00:00Z",
+          "cursor": "c1.0",
+          "truncated": false
+        },
+        "on_subscribe": {
+          "args": {
+            "channel": "eng"
+          },
+          "user": "u1",
+          "via": "native",
+          "tool": null
+        }
+      }
+    ],
+    "unsubscribe": [
+      {
+        "name": "an anonymous unsubscribe with the voucher and the callback URL",
+        "user": null,
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1",
+            "wakeshift_voucher": "wsv_fakefakefakefakefakefakefakefake"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          }
+        },
+        "core_request": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "voucher": "wsv_fakefakefakefakefakefakefakefake"
+        },
+        "call_user": null,
+        "core_response": {
+          "ended": true
+        },
+        "result": {
+          "resultType": "complete"
+        }
+      }
+    ],
+    "refused": [
+      {
+        "name": "poll a tools-only event with a voucher: no voucher polling",
+        "method": "events/poll",
+        "user": "u1",
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1",
+            "wakeshift_voucher": "wsv_fakefakefakefakefakefakefakefake"
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "crawl.finished can't be polled: it's subscribed to only through this app's tools, with a webhook",
+          "data": null
+        }
+      },
+      {
+        "name": "subscribe to a tools-only event without a voucher, the feature on",
+        "method": "events/subscribe",
+        "user": null,
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null,
+          "ttlMs": 3600000
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "crawl.finished can be subscribed only through this app's tools, or with the voucher one of them handed you",
+          "data": null
+        }
+      },
+      {
+        "name": "a voucher while the core doesn't report the feature: never forwarded",
+        "method": "events/subscribe",
+        "user": "u1",
+        "feature": false,
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1",
+            "wakeshift_voucher": "wsv_fakefakefakefakefakefakefakefake"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null,
+          "ttlMs": 3600000
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "crawl.finished can be subscribed only through this app's tools, or with the voucher one of them handed you",
+          "data": null
+        }
+      },
+      {
+        "name": "a voucher under another name isn't one: Wakeshift_Voucher is an unknown argument, dropped as any is, so tools-only is refused",
+        "method": "events/subscribe",
+        "user": "u1",
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1",
+            "Wakeshift_Voucher": "wsv_fakefakefakefakefakefakefakefake"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null,
+          "ttlMs": 3600000
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "crawl.finished can be subscribed only through this app's tools, or with the voucher one of them handed you",
+          "data": null
+        },
+        "_note": "No voucher was given, so tools-only is refused first, as today; the core fails closed on such a name too (an arguments_key mismatch)"
+      }
+    ],
+    "core_refused": [
+      {
+        "name": "Wakeshift refuses the voucher (used, expired, other arguments, another app's: one answer)",
+        "method": "events/subscribe",
+        "user": null,
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1",
+            "wakeshift_voucher": "wsv_fakefakefakefakefakefakefakefake"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null,
+          "ttlMs": 3600000
+        },
+        "core_status": 403,
+        "core_body": {
+          "error": {
+            "code": "bad_voucher",
+            "message": "This voucher can't subscribe to this event: it was used, it expired, or it's for other arguments."
+          }
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "this voucher can't subscribe to crawl.finished: it was used, it expired, or it's for other arguments",
+          "data": null
+        }
+      },
+      {
+        "name": "an anonymous redeemer's callback failed: one generic reason",
+        "method": "events/subscribe",
+        "user": null,
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1",
+            "wakeshift_voucher": "wsv_fakefakefakefakefakefakefakefake"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null,
+          "ttlMs": 3600000
+        },
+        "core_status": 400,
+        "core_body": {
+          "error": {
+            "code": "callback_failed",
+            "message": "callback verification failed",
+            "reason": "callback_failed"
+          }
+        },
+        "error": {
+          "code": {
+            "draft": -32027,
+            "chatgpt": -32015
+          },
+          "message": "callback verification failed",
+          "data": {
+            "reason": "callback_failed"
+          }
+        }
+      }
+    ],
+    "events_list": {
+      "_comment": "events/list's names, sorted, for each case: native is ChatGPT (clientInfo openai-mcp); bridged is claude-code.",
+      "native_feature": [
+        "chat.message",
+        "crawl.finished",
+        "deploy.finished"
+      ],
+      "bridged_feature": [
+        "chat.message",
+        "deploy.finished"
+      ],
+      "native_no_feature": [
+        "chat.message",
+        "deploy.finished"
+      ]
+    },
+    "tool_subscribe_states": {
+      "_comment": "call.subscribe(crawl.finished, {job: j1}) from a native caller (openai-mcp): with the feature on, a native line and state native (user \"\" without one), nothing logged; off, unavailable as today (next.tool_subscribe_states).",
+      "rows": [
+        {
+          "feature": true,
+          "user": "u1",
+          "want": {
+            "state": "native",
+            "user": "u1"
+          },
+          "native_line": true,
+          "logs": null
+        },
+        {
+          "feature": true,
+          "user": null,
+          "want": {
+            "state": "native",
+            "user": ""
+          },
+          "native_line": true,
+          "logs": null
+        },
+        {
+          "feature": false,
+          "user": "u1",
+          "want": {
+            "state": "unavailable",
+            "reason": "client_unsupported"
+          },
+          "native_line": false,
+          "logs": "native_unavailable"
+        }
+      ]
+    }
+  }
 }

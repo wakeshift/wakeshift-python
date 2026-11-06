@@ -25,7 +25,7 @@ import pytest
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel
 
-from wakeshift import Identity, Recipient, Subscription, ToolCall, Wakeshift, WakeshiftError, harness_agent, is_code
+from wakeshift import APIError, Identity, Recipient, Request, Subscription, ToolCall, UsageError, Wakeshift
 
 from .helpers import Rpc, initialize, served
 
@@ -190,9 +190,7 @@ async def test_events_defined_served_emitted_bridged_and_native() -> None:
 
     # One server; each connection's user comes from a header here (an app's own sign-in in practice).
     server = MCPServer("ci-bot")
-    wake.attach(
-        server, identify=lambda ctx: Identity(user=ctx.request.headers.get("x-user") if ctx.request is not None else None)
-    )
+    wake.attach(server, identify=lambda r: Identity(user=r.headers.get("x-user")))
     lines: list[Lines] = []
     try:
         async with served(server, stateless=False) as (client, _):
@@ -229,7 +227,7 @@ async def test_events_defined_served_emitted_bridged_and_native() -> None:
             m = re.search(r'session_key="(wsc_[a-z2-7]+)"', text_of(p2_sub))
             assert m, text_of(p2_sub)
             p2_session = m.group(1)
-            with pytest.raises(WakeshiftError, match="personal"):
+            with pytest.raises(UsageError, match="personal"):
                 await turn.emit({"table": "t1"}, {"hole": ["As", "Kd"], "toCall": 2})
             assert (await turn.emit({"table": "t1"}, {"hole": ["As", "Kd"], "toCall": 2}, to="p1")).matched == 1
             assert (await p1_lines.expect("Your move: As Kd, 2 to call"))["data"]["hole"] == ["As", "Kd"]
@@ -241,21 +239,22 @@ async def test_events_defined_served_emitted_bridged_and_native() -> None:
             # An event's publish URL: a POST's body is the payload, checked against
             # the schema; a personal event's goes to the one subscriber it's for.
             async with httpx2.AsyncClient() as web:
-                build_url = await build.publish_url({"repo": "acme"})
+                build_url = await build.create_publish_url({"repo": "acme"})
                 assert build_url.event == "ci.build" and build_url.url.startswith(core + "/v1/publish/")
                 posted = await web.post(build_url.url, json={"conclusion": "success", "url": "https://ci.example/2"})
                 assert posted.status_code == 202 and posted.json()["matched"] == 1
-                via_url = await bob.expect('ci.build: {"conclusion":"success","url":"https://ci.example/2"}')
+                via_url = await bob.expect("A CI run on a repo finished (repo acme)")  # the default text: text doesn't run
                 assert via_url["data"]["url"] == "https://ci.example/2"
                 bad = await web.post(build_url.url, json={"conclusion": 1})
                 assert bad.status_code == 400 and bad.json()["error"]["code"] == "bad_payload"
                 await wake.revoke_publish_url(build_url.id)
                 assert (await web.post(build_url.url, json={"conclusion": "success", "url": "x"})).status_code == 410
-                with pytest.raises(WakeshiftError, match="personal"):
-                    await turn.publish_url({"table": "t1"})
-                p2_url = await turn.publish_url({"table": "t1"}, to="p2")
+                with pytest.raises(UsageError, match="personal"):
+                    await turn.create_publish_url({"table": "t1"})
+                p2_url = await turn.create_publish_url({"table": "t1"}, to="p2")
                 assert (await web.post(p2_url.url, json={"hole": ["8c", "8d"], "toCall": 1})).json()["matched"] == 1
-                await p2_lines.expect('game.turn: {"hole":["8c","8d"],"toCall":1}')
+                via_turn = await p2_lines.expect("It's your move at a table (table t1)")
+                assert via_turn["data"] == {"hole": ["8c", "8d"], "toCall": 1}
                 await p1_lines.expect_nothing()
                 await wake.revoke_publish_url(p2_url.id)
 
@@ -329,13 +328,12 @@ async def test_an_apps_own_users_against_a_real_core() -> None:
     # The app's own sign-in: a bearer token names one of its users.
     users: dict[str, str] = {}
 
-    def user_of(ctx: Any) -> str | None:
-        req = ctx.request
-        return users.get(req.headers.get("authorization", "").removeprefix("Bearer ")) if req is not None else None
+    def user_of(r: Request) -> str | None:
+        return users.get(r.headers.get("authorization", "").removeprefix("Bearer "))
 
-    attached = wake.attach(server, identify=lambda ctx: Identity(user=user_of(ctx)))
+    attached = wake.attach(server, identify=lambda r: Identity(user=user_of(r)))
 
-    @attached.tool()
+    @attached.tool(subscribes=[builds])
     async def watch(repo: str, call: ToolCall) -> str:
         """Wake me when a build of a repo finishes."""
         await call.subscribe(builds, {"repo": repo})
@@ -369,14 +367,13 @@ async def test_an_apps_own_users_against_a_real_core() -> None:
             {"accounts": "wakeshift"},
             {"agent": {"wake": scope, "post": scope, "ttl_days": 30, "redirect_uris": ["http://127.0.0.1:8000/cb"]}},
         ):
-            with pytest.raises(WakeshiftError) as e:
+            with pytest.raises(APIError) as e:
                 await wake.publish_manifest(refused)
-            assert is_code(e.value, "bad_manifest")
+            assert e.value.code == "bad_manifest"
         # With an agent scope in the manifest, the app adds its users' agents, each with a grant.
         m = await wake.publish_manifest({"agent": {"wake": scope, "post": scope, "ttl_days": 30}})
         assert m["agent"]["ttl_days"] == 30
-        agent = harness_agent("codex-mcp-client")
-        assert agent == "codex"
+        agent = "codex"
         ws2 = await wake.workspace("user-" + secrets.token_hex(6), "Grace")
         assert await wake.add_agent(ws2, agent, "Codex")
         await wake.check_agent(ws2, agent)  # the grant is live
@@ -390,7 +387,7 @@ async def test_a_current_key_asks_wakeshift_which_app_it_is() -> None:
     with open(HARNESS) as f:
         new_key = json.load(f)["new_key"]
     wake = Wakeshift(new_key, core=core)
-    with pytest.raises(RuntimeError, match="call await wake.app"):
+    with pytest.raises(UsageError, match="call await wake.app"):
         _ = wake.app_id
     before = await wake.workspace("new-key", "New key")
     info = await wake.app()
@@ -401,6 +398,14 @@ async def test_a_current_key_asks_wakeshift_which_app_it_is() -> None:
 
 class Hand(BaseModel):
     to_call: str
+
+
+class Job(BaseModel):
+    job: str
+
+
+class Pages(BaseModel):
+    pages: int
 
 
 async def test_wrapped_tools_against_a_real_core() -> None:
@@ -420,19 +425,24 @@ async def test_wrapped_tools_against_a_real_core() -> None:
         personal=True,
     )
     server = MCPServer("cards")
-    attached = wake.attach(
-        server, identify=lambda ctx: Identity(user=ctx.request.headers.get("x-user") if ctx.request is not None else None)
-    )
+    crawl = wake.define_event("crawl.finished", description="A crawl finished", args=Job, payload=Pages)
+    attached = wake.attach(server, identify=lambda r: Identity(user=r.headers.get("x-user")))
     subs: dict[str, list[Subscription]] = {}
 
-    @attached.tool()
+    @attached.tool(subscribes=[turn])
     async def join(table: str, call: ToolCall) -> str:
         """Join a table (and the lobby): two subscribes, one block."""
         got = [await call.subscribe(turn, {"table": t}, reason=f"Playing at {t}") for t in (table, "lobby")]
         subs[call.user or ""] = got
         return f"Seated at {table}."
 
-    @attached.tool()
+    @attached.tool(subscribes=[crawl])
+    async def start_crawl(job: str, call: ToolCall) -> str:
+        """Crawl a site: the tool subscribes to an event only the app's tools may."""
+        subs[call.user or ""] = [await call.subscribe(crawl, {"job": job}, once=True)]
+        return f"Crawl {job} started."
+
+    @attached.tool(subscribes=[turn])
     async def fails(table: str, call: ToolCall) -> str:
         await call.subscribe(turn, {"table": table})
         raise ValueError("that table is full")
@@ -463,13 +473,14 @@ async def test_wrapped_tools_against_a_real_core() -> None:
         assert (res.get("_meta") or {}).get("wakeshift/connector"), res
         assert text(res).count("wakeshift-beacon") <= 1
         first = subs["ada"]
-        assert len(first) == 2 and all(s.created for s in first) and first[0].session == first[1].session != ""
+        assert len(first) == 2 and all(s.state == "created" for s in first)
+        assert first[0].session is not None and first[0].session == first[1].session
         assert first[0].user == "ada" and first[0].recognized.harness == "codex"
         assert len(await listed("ada")) == 2
         # The next call in the thread: renewals, and the short form.
         again = await tool("ada", "codex_exec/0.50.0", "join", {"table": "oak"}, codex)
         assert len(text(again)) < len(text(res)), (text(res), text(again))
-        assert not subs["ada"][0].created and subs["ada"][0].id == first[0].id
+        assert subs["ada"][0].state == "renewed" and subs["ada"][0].id == first[0].id
 
         # A failed call ends what it made, and its reply has no block.
         failed = await tool("bo", "claude-code/2.1.280", "fails", {"table": "oak"})
@@ -480,8 +491,42 @@ async def test_wrapped_tools_against_a_real_core() -> None:
         native = await tool("cy", "openai-mcp/1.0.0", "join", {"table": "oak"}, {"openai/session": "chat-1"})
         for t in ("oak", "lobby"):
             assert f'To be woken by game.turn with {{"table":"{t}"}}, subscribe to it (MCP Events).' in text(native), text(native)
-        assert subs["cy"][0].native and subs["cy"][0].id == ""
+        assert subs["cy"][0].state == "native" and subs["cy"][0].id == ""
         assert await listed("cy") == []
+
+        # An event only the app's tools may subscribe to: the tool subscribes
+        # (the core records how), an MCP Events client is told it can't, and
+        # subscribe_events and native subscribes are refused.
+        made = await tool("eve", "claude-code/2.1.280", "start_crawl", {"job": "j-py"})
+        assert not made.get("isError") and subs["eve"][0].state == "created", made
+        assert [s["event"] for s in await listed("eve")] == ["crawl.finished"]
+        gpt = await tool("fay", "openai-mcp/1.0.0", "start_crawl", {"job": "j-py"})
+        assert not gpt.get("isError"), gpt
+        if await wake._vouchers_offered():
+            # A core that hands out subscribe vouchers: the block carries one
+            # for exactly this event and these arguments.
+            assert subs["fay"][0].state == "native" and subs["fay"][0].user == "fay"
+            assert re.search(
+                r'To be woken by crawl\.finished with \{"job":"j-py"\}, subscribe to it \(MCP Events\) with wakeshift_voucher '
+                r"set to wsv_[a-z2-7]{32} in its arguments\. It works once, for these arguments\.",
+                text(gpt),
+            ), text(gpt)
+        else:
+            assert subs["fay"][0].state == "unavailable" and subs["fay"][0].reason == "client_unsupported"
+        refused = await tool(
+            "eve", "claude-code/2.1.280", "subscribe_events", {"event": "crawl.finished", "arguments": {"job": "j-py"}}
+        )
+        assert refused["isError"] and "only through this app's tools" in text(refused)
+        native_sub = await rpc(
+            "events/poll",
+            {"name": "crawl.finished", "arguments": {"job": "j-py"}},
+            headers={"X-User": "fay", "User-Agent": "openai-mcp/1.0.0"},
+        )
+        assert (
+            native_sub["error"]["message"]
+            == "crawl.finished can't be polled: it's subscribed to only through this app's tools, with a webhook"
+        )
+        assert (await crawl.emit({"job": "j-py"}, {"pages": 3})).matched == 1
 
         # One emit to the stored conversations: by subscription, a user with
         # nothing (unmatched), and natively.
@@ -520,8 +565,8 @@ async def test_fastmcp_against_a_real_core() -> None:
     from fastmcp import FastMCP
     from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
+    from wakeshift._tasks import TASKS_EXTENSION, WAIT_TOOL
     from wakeshift.fastmcp import identify_by_claim
-    from wakeshift.tasks import TASKS_EXTENSION, WAIT_TOOL
 
     core, key = harness()
     wake = Wakeshift(key, core=core)
@@ -535,9 +580,9 @@ async def test_fastmcp_against_a_real_core() -> None:
     )
     tokens = {f"tok-{u}": {"client_id": "cli", "scopes": [], "sub": f"fm-{u}"} for u in ("ada", "bo")}
     mcp = FastMCP("ci-bot", auth=StaticTokenVerifier(tokens=tokens))
-    attached = wake.attach(mcp, identify=identify_by_claim("sub"), tools={"wait": {"enabled": True}})
+    attached = wake.attach(mcp, identify=identify_by_claim("sub"), builtin_tools={"wait": True})
 
-    @attached.tool()
+    @attached.tool(subscribes=[builds])
     async def watch(repo: str, call: ToolCall) -> str:
         """Wake me when a build of a repo finishes."""
         await call.subscribe(builds, {"repo": repo})
@@ -622,3 +667,119 @@ async def test_fastmcp_against_a_real_core() -> None:
             finally:
                 if monitor is not None:
                     monitor.stop()
+
+
+async def test_a_chatgpt_shaped_client_redeems_a_subscribe_voucher() -> None:
+    """A ChatGPT-shaped client against a real core with subscribe vouchers
+    (docs/subscribe-vouchers.md §11.3): openai-mcp, a stateless server (no
+    Mcp-Session-Id), _meta["openai/session"] on tool calls, a webhook on
+    127.0.0.1. The tool's result hands out the voucher; an emit lands before
+    the subscribe and is replayed. Skipped on a core without vouchers."""
+    core, key = harness()
+    wake = Wakeshift(key, core=core)
+    subscribed: list[tuple[str | None, str, str | None]] = []
+    crawl = wake.define_event(
+        "crawl.finished",
+        description="A crawl finished",
+        args=Job,
+        payload=Pages,
+        on_subscribe=lambda s: subscribed.append((s.user, s.via, s.tool)),
+    )
+    server = MCPServer("crawler")
+    attached = wake.attach(server)
+
+    @attached.tool(subscribes=[crawl])
+    async def start_crawl(job: str, call: ToolCall) -> str:
+        await call.subscribe(crawl, {"job": job})
+        return f"Crawl {job} started."
+
+    got: list[dict[str, Any]] = []
+
+    class Hook(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            m = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            out = {"challenge": m["challenge"]} if m.get("type") == "verification" else {}
+            if m.get("name"):
+                got.append({"name": m["name"], "data": m.get("data")})
+            b = json.dumps(out).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+
+        def log_message(self, *a: Any) -> None:
+            pass
+
+    hook = ThreadingHTTPServer(("127.0.0.1", 0), Hook)
+    threading.Thread(target=hook.serve_forever, daemon=True).start()
+    delivery = {
+        "mode": "webhook",
+        "url": f"http://127.0.0.1:{hook.server_address[1]}/hook",
+        "secret": "whsec_" + base64.b64encode(secrets.token_bytes(32)).decode(),
+    }
+    gpt = {"User-Agent": "openai-mcp/1.0.0"}
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "openai-mcp", "version": "1.0.0"},
+    }
+
+    async def arrived(n: int) -> None:
+        for _ in range(100):
+            if len(got) >= n:
+                return
+            await asyncio.sleep(0.1)
+        raise AssertionError(f"{len(got)} deliveries, want {n}")
+
+    job = "j" + secrets.token_hex(4)
+    try:
+        async with served(server) as (_, rpc):
+            r = await rpc(
+                "tools/call",
+                {"name": "start_crawl", "arguments": {"job": job}, "_meta": {**meta, "openai/session": "chat-1"}},
+                headers=gpt,
+            )
+            assert "result" in r and not r["result"].get("isError"), r
+            if not await wake._vouchers_offered():
+                pytest.skip("the core doesn't hand out subscribe vouchers")
+            said = "\n".join(c.get("text", "") for c in r["result"]["content"])
+            m = re.search(
+                r'To be woken by crawl\.finished with \{"job":"'
+                + job
+                + r'"\}, subscribe to it \(MCP Events\) with wakeshift_voucher '
+                r"set to (wsv_[a-z2-7]{32}) in its arguments\. It works once, for these arguments\.",
+                said,
+            )
+            assert m, said
+            voucher = m.group(1)
+            assert (await crawl.emit({"job": job}, {"pages": 1})).matched == 0
+            listed = (await rpc("events/list", {"_meta": meta}, headers=gpt))["result"]["events"]
+            entry = next(e for e in listed if e["name"] == "crawl.finished")
+            assert entry["inputSchema"]["required"] == ["job", "wakeshift_voucher"]
+            params = {
+                "name": "crawl.finished",
+                "arguments": {"job": job, "wakeshift_voucher": voucher},
+                "delivery": delivery,
+                "ttlMs": 3600000,
+                "_meta": meta,
+            }
+            sub = await rpc("events/subscribe", params, headers=gpt)
+            assert "result" in sub, sub
+            await arrived(1)
+            assert got[0] == {"name": "crawl.finished", "data": {"pages": 1}}
+            assert (await crawl.emit({"job": job}, {"pages": 2})).matched == 1
+            await arrived(2)
+            again = await rpc("events/subscribe", params, headers=gpt)
+            assert again["result"]["id"] == sub["result"]["id"], again
+            other = await rpc(
+                "events/subscribe",
+                {**params, "arguments": {"job": job}, "delivery": {**delivery, "url": delivery["url"] + "2"}},
+                headers=gpt,
+            )
+            assert other["error"]["code"] == -32012, other
+            await asyncio.sleep(0.1)
+            assert subscribed == [(None, "tool", "start_crawl")]
+            await rpc("events/unsubscribe", {**params, "_meta": meta}, headers=gpt)
+    finally:
+        hook.shutdown()
+        await wake.aclose()

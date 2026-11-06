@@ -4,7 +4,8 @@ official SDK's MCPServer, its low-level Server, and FastMCP 4 (the
 ``Server`` (``mcp`` 2.x), so the native ``events/*`` handlers, the wait tool
 and attach's middleware are the same for each; only registering a tool, the
 Context type a tool asks for and where the middleware goes differ
-(docs/fastmcp.md).
+(docs/fastmcp.md). FastMCP 2.12+ and 3.x sit on ``mcp`` 1.x: their host is
+in _fastmcp23.py, with the same middleware and no MCP Events.
 """
 
 from __future__ import annotations
@@ -12,7 +13,10 @@ from __future__ import annotations
 import contextvars
 import sys
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
+
+from ._log import warn
 
 Middleware = Callable[[Any, Callable[[Any], Awaitable[Any]]], Awaitable[Any]]
 
@@ -24,6 +28,89 @@ _NEGOTIATION = ("initialize", "server/discover")
 #: The Host whose attach middleware is serving the current request: a FastMCP
 #: server reached through another one (mounted) sees another, or none.
 _SERVING: contextvars.ContextVar[Host | None] = contextvars.ContextVar("wakeshift_serving", default=None)
+
+
+@dataclass(frozen=True)
+class Added:
+    """What registering a tool gave: a check of a successful wire result
+    against its output schema, for a framework that doesn't check one itself;
+    and whether that schema names wakeshift (the tool is then refused)."""
+
+    check: Callable[[Any], str | None] | None = None
+    output_names_wakeshift: bool = False
+
+
+def _props(schema: Any) -> set[str]:
+    p = schema.get("properties") if isinstance(schema, Mapping) else None
+    return set(p) if isinstance(p, Mapping) else set()
+
+
+def _insert_after_sdk(chain: list[Any], middleware: Middleware) -> None:
+    """Puts middleware just inside the MCP SDK's own (OpenTelemetry, request
+    state), ahead of every middleware the app added, before attach or after."""
+    i = 0
+    while i < len(chain) and (getattr(type(chain[i]), "__module__", "") or "").startswith("mcp."):
+        i += 1
+    chain.insert(i, middleware)
+
+
+def _inject_into_handler(low: Any, attached: Any) -> str:
+    """Wraps an mcp 2.x low-level Server's tools/list handler so it adds
+    attach's own tools to its first page, inside every middleware."""
+    entry = low.get_request_handler("tools/list")
+    if entry is None:
+        return ""
+    orig = entry.handler
+
+    async def list_tools(ctx: Any, params: Any) -> Any:
+        result = await orig(ctx, params)
+        if getattr(params, "cursor", None) is None:
+            result = attached._inject_builtins(result)
+        return result
+
+    low.add_request_handler("tools/list", entry.params_type, list_tools)
+    return "handler"
+
+
+def _register_with_fastmcp(server: Any, attached: Any, tool_cls: Any) -> str:
+    """Puts attach's own tools in a FastMCP server's registry, listed as any
+    tool is (its calls never reach FastMCP: attach answers them first), where
+    no tool of the server's has the name."""
+    from mcp.types import ToolAnnotations
+
+    taken = set()
+    try:
+        for c in server._local_provider._components.values():
+            if str(getattr(c, "key", "")).startswith("tool:"):
+                taken.add(getattr(c, "name", None))
+    except Exception:
+        tools = getattr(getattr(server, "_tool_manager", None), "_tools", None)
+        if not isinstance(tools, dict):
+            return ""
+        taken = set(tools)
+    for name, (_, e) in attached._builtins.items():
+        if name in taken:
+            continue  # the server's own tool keeps the name in its registry; attach's is served
+        server.add_tool(
+            tool_cls(
+                name=name,
+                title=e.get("title"),
+                description=e["description"],
+                parameters=e["inputSchema"],
+                output_schema=e.get("outputSchema"),
+                annotations=ToolAnnotations(**e["annotations"]),
+            )
+        )
+        attached._registered_builtins.add(name)
+    return "registry"
+
+
+def _without_builtins(tools: Any, attached: Any) -> Any:
+    """A mounted server's listing without the built-ins attach registered:
+    served through another server, they'd be listed but couldn't be called."""
+    if attached is None or not attached._registered_builtins:
+        return tools
+    return [t for t in tools if getattr(t, "name", None) not in attached._registered_builtins]
 
 
 class Host:
@@ -38,6 +125,9 @@ class Host:
     framework: str
     #: Whether @attached.tool() can register a tool on it.
     registers_tools = True
+    #: Whether it serves MCP Events (events/*), server/discover and MCP
+    #: tasks: not on mcp 1.x (FastMCP 2/3).
+    native_events = True
 
     def add_tool(
         self,
@@ -45,29 +135,47 @@ class Host:
         *,
         name: str,
         description: str | None,
-        annotations: Any = None,
-        input_schema: dict[str, Any] | None = None,
         text: bool = False,
         options: Mapping[str, Any] | None = None,
-    ) -> Callable[[Any], str | None] | None:
-        """Registers fn as a tool. input_schema replaces the schema the
-        framework derives; text: the tool replies with text only (no output
-        schema or structuredContent), unless options say otherwise. Returns a
-        check of a successful wire result against the tool's output schema
-        (the reason it fails, or None), for a framework that doesn't check
-        one itself."""
+        wake_args: bool | None = None,
+    ) -> Added:
+        """Registers fn as a tool: text, the tool replies with text only (no
+        output schema or structuredContent) unless options say otherwise;
+        wake_args, whether its listed input schema gains Wakeshift's
+        arguments for a tool that subscribes to something (True) or nothing
+        (False), or none (None)."""
         raise NotImplementedError
 
-    def install(self, middleware: Middleware, warn: Callable[[str], None]) -> None:
-        """Puts attach's middleware on every inbound request (warn: the
-        app's on_warning)."""
+    def remove_tool(self, name: str) -> None:
+        """Removes a tool add_tool registered."""
+
+    def own_input_props(self, name: str) -> set[str] | None:
+        """The properties a tool's own input schema names, where the framework
+        keeps a record of its tools (None: unknown)."""
+        return None
+
+    def ensure_tool_handlers(self) -> None:
+        """Gives a server without tool handlers empty ones (the low-level Server)."""
+
+    def list_builtins(self, attached: Any) -> str:
+        """Makes the server list attach's own tools itself, innermost, so
+        the app's own tools/list middleware sees them as it sees its tools:
+        "handler" (its tools/list handler adds them on each request), or
+        "registry" (they're in its tool registry); "" where it can't, and
+        attach's middleware adds them."""
+        return ""
+
+    def install(self, middleware: Middleware) -> None:
+        """Puts attach's middleware on every inbound request."""
         raise NotImplementedError
+
+    def install_attachment(self, attached: Any) -> None:
+        """Puts the attachment on the server: its middleware, by default."""
+        self.install(attached._middleware)
 
     def misplaced(self, tool: str) -> str:
         """Why a wrapped tool ran without its attach's middleware in front."""
-        return (
-            f"wakeshift: {tool} ran without its attach's middleware in front: register it with the Attached of the server it's on"
-        )
+        return f"wakeshift: {tool} ran without its attach's middleware in front: register it with the Attachment (wake.attach) of the server it's on"
 
 
 class MCPServerHost(Host):
@@ -80,22 +188,34 @@ class MCPServerHost(Host):
         self.lowlevel = server._lowlevel_server
         self.context_type = Context
 
-    def add_tool(self, fn, *, name, description, annotations=None, input_schema=None, text=False, options=None):
+    def add_tool(self, fn, *, name, description, text=False, options=None, wake_args=None):
+        from ._toolcall import _with_wake_args
+
         opts = dict(options or {})
         if text and "structured_output" not in opts:
             # MCPServer would give a str tool an output schema and
             # structuredContent {"result": …}, which some hosts show the
             # model instead of the text.
             opts["structured_output"] = False
-        if annotations is not None:
-            opts["annotations"] = annotations
         self.server.add_tool(fn, name=name, description=description, **opts)
-        if input_schema is not None:
-            self.server._tool_manager.get_tool(name).parameters = input_schema
-        return None  # MCPServer checks a result against its output schema itself
+        tool = self.server._tool_manager.get_tool(name)
+        if wake_args is not None:
+            tool.parameters = _with_wake_args(tool.parameters, wake_args)
+        # MCPServer checks a result against its output schema itself.
+        return Added(None, "wakeshift" in _props(tool.output_schema))
 
-    def install(self, middleware: Middleware, warn: Callable[[str], None]) -> None:
-        self.server.middleware.append(middleware)
+    def remove_tool(self, name: str) -> None:
+        self.server._tool_manager.remove_tool(name)
+
+    def own_input_props(self, name: str) -> set[str] | None:
+        tool = self.server._tool_manager.get_tool(name)
+        return None if tool is None else _props(tool.parameters)
+
+    def install(self, middleware: Middleware) -> None:
+        _insert_after_sdk(self.server.middleware, middleware)
+
+    def list_builtins(self, attached: Any) -> str:
+        return _inject_into_handler(self.lowlevel, attached)
 
 
 class FastMCPHost(Host):
@@ -117,12 +237,12 @@ class FastMCPHost(Host):
         self.lowlevel = low
         self.context_type = Context
         self._warned_mount = False
-        self._warn: Callable[[str], None] = lambda _m: None
+        self.attached: Any = None
 
-    def add_tool(self, fn, *, name, description, annotations=None, input_schema=None, text=False, options=None):
+    def add_tool(self, fn, *, name, description, text=False, options=None, wake_args=None):
         from fastmcp.tools import Tool
 
-        from .toolcall import with_wakeshift_field
+        from ._toolcall import _with_wake_args, with_wakeshift_field
 
         opts = dict(options or {})
         if opts.get("task"):
@@ -140,25 +260,27 @@ class FastMCPHost(Host):
             # under an output schema, as MCPServer does.
             opts["output_schema"] = None
         # Tool.from_function, not server.tool: that returns the function, and
-        # the schemas are replaced on the Tool.
-        if annotations is not None:
-            opts["annotations"] = annotations
+        # the schemas are amended on the Tool, so a FastMCP transform that
+        # renames the tool keeps them.
         tool = Tool.from_function(fn, name=name, description=description, **opts)
-        if input_schema is not None:
-            tool.parameters = input_schema
         schema = tool.output_schema
+        if "wakeshift" in _props(schema):
+            return Added(None, True)  # refused before it's registered
+        if wake_args is not None:
+            tool.parameters = _with_wake_args(tool.parameters, wake_args)
+        if wake_args is None:
+            self.server.add_tool(tool)  # a disabled client's: as written
+            return Added()
         # The block goes in structuredContent's wakeshift field, so the output
-        # schema names it here, on the tool: a FastMCP transform that renames
-        # the tool keeps it.
+        # schema names it.
         if isinstance(schema, Mapping):
             tool.output_schema = with_wakeshift_field(schema)
         self.server.add_tool(tool)
-        return _output_check(schema) if isinstance(schema, Mapping) else None
+        return Added(_output_check(schema) if isinstance(schema, Mapping) else None)
 
-    def install(self, middleware: Middleware, warn: Callable[[str], None]) -> None:
+    def install(self, middleware: Middleware) -> None:
         low = self.lowlevel
         host = self
-        self._warn = warn
 
         async def negotiation(ctx: Any, call_next: Callable[[Any], Awaitable[Any]]) -> Any:
             if getattr(ctx, "method", "") not in _NEGOTIATION:
@@ -191,6 +313,22 @@ class FastMCPHost(Host):
         low.middleware.append(requests)
         self.server.add_middleware(_mount_guard(self))
 
+    def list_builtins(self, attached: Any) -> str:
+        from fastmcp.tools import Tool
+
+        self.attached = attached
+        return _register_with_fastmcp(self.server, attached, Tool)
+
+    def own_input_props(self, name: str) -> set[str] | None:
+        # FastMCP's registry is async to read; its local provider's isn't.
+        try:
+            for c in self.server._local_provider._components.values():
+                if getattr(c, "name", None) == name and str(getattr(c, "key", "")).startswith("tool:"):
+                    return _props(c.parameters)
+        except Exception:  # a FastMCP whose internals moved: unknown
+            return None
+        return None
+
     def misplaced(self, tool: str) -> str:
         return (
             f"wakeshift: {tool} ran without its attach's middleware in front. On FastMCP, attach the server you run, "
@@ -201,8 +339,8 @@ class FastMCPHost(Host):
         if self._warned_mount:
             return
         self._warned_mount = True
-        self._warn(
-            f"wakeshift: the FastMCP server {getattr(self.server, 'name', '')!r} that attach was given is being served "
+        warn(
+            f"the FastMCP server {getattr(self.server, 'name', '')!r} that attach was given is being served "
             "through another server (mounted), so its wrapped tools refuse to run and its events aren't served: "
             "attach the server you run, and mount other servers on it"
         )
@@ -226,6 +364,7 @@ def _mount_guard(host: FastMCPHost) -> Any:
         async def on_list_tools(self, context: Any, call_next: Any) -> Any:
             if through_another():
                 host.mounted()
+                return _without_builtins(await call_next(context), host.attached)
             return await call_next(context)
 
         async def on_call_tool(self, context: Any, call_next: Any) -> Any:
@@ -277,16 +416,57 @@ def _is_fastmcp(server: Any) -> bool:
     return False
 
 
-def _major(version: str) -> int | None:
-    head = version.split(".", 1)[0]
-    return int(head) if head.isdigit() else None
+def _version(dist: str) -> tuple[int, ...] | None:
+    """An installed distribution's version, as numbers (None: not installed)."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        v = version(dist)
+    except PackageNotFoundError:
+        return None
+    out: list[int] = []
+    for part in v.split("."):
+        digits = "".join(c for c in part if c.isdigit()) if part[:1].isdigit() else ""
+        if not digits:
+            break
+        out.append(int(digits))
+    return tuple(out)
+
+
+def check_sdks(server: Any) -> None:
+    """attach's runtime check of the MCP SDK it serves on, since the extras'
+    bounds are a resolver's only when installed: mcp 2.3 to below 3, and for
+    a FastMCP server, FastMCP 2.12 to below 4 (on whatever mcp 1.x it
+    brings: never [mcp], which can't share its install) or 4.1 to below 5.
+    Raises ImportError naming what to install."""
+    if _is_fastmcp(server):
+        fv = _version("fastmcp")
+        shown = ".".join(map(str, fv or ()))
+        if fv is not None and (2, 12) <= fv < (4,):
+            # FastMCP 2/3 on mcp 1.x: attach through FastMCP's middleware
+            # (_fastmcp23), without MCP Events. Never [mcp] beside it (#64).
+            return
+        if fv is None or not ((4, 1) <= fv < (5,)):
+            raise ImportError(
+                f"wakeshift: attach supports FastMCP 2.12 and later 2.x, 3.x, and 4.1 and later 4.x, not {shown or 'this one'}: "
+                "upgrade fastmcp (pip install -U 'fastmcp>=2.12'), keeping plain wakeshift on FastMCP 2 or 3"
+            )
+    mv = _version("mcp")
+    if mv is None:
+        raise ImportError("wakeshift: attach needs the MCP Python SDK: pip install 'wakeshift[mcp]'")
+    if not ((2, 3) <= mv < (3,)):
+        raise ImportError(
+            f"wakeshift: attach needs mcp 2.3 or later, below 3, and this is mcp {'.'.join(map(str, mv))}: "
+            "pip install 'wakeshift[mcp]'"
+        )
 
 
 class LowLevelHost(Host):
     """The official SDK's low-level Server (mcp.server.lowlevel.Server): it has
-    no tool registry, so attach's own tools are served by wrapping its
-    tools/list and tools/call handlers, and an app's on_call_tool subscribes
-    with attached.call(ctx) rather than through @attached.tool()."""
+    no tool registry, so its tools that subscribe are named in attach's wrap
+    and its on_call_tool handler finds their call with wake.current_call().
+    attach's own tools are served by attach's middleware, so a handler the
+    app sets again after attach changes nothing."""
 
     framework = "low-level Server"
     registers_tools = False
@@ -297,64 +477,37 @@ class LowLevelHost(Host):
         self.server = server
         self.lowlevel = server
         self.context_type = ServerRequestContext
-        self._tools: dict[str, tuple[Callable[..., Awaitable[Any]], Any]] = {}
 
-    def add_tool(self, fn, *, name, description, annotations=None, input_schema=None, text=False, options=None):
-        from mcp_types import Tool
+    def install(self, middleware: Middleware) -> None:
+        _insert_after_sdk(self.server.middleware, middleware)
 
-        tool = Tool(name=name, description=description, input_schema=input_schema or {"type": "object"}, annotations=annotations)
-        self._tools[name] = (fn, tool)
-        return None
-
-    def install(self, middleware: Middleware, warn: Callable[[str], None]) -> None:
+    def ensure_tool_handlers(self) -> None:
+        """A server without tools gets empty tool handlers, so it advertises
+        tools and attach's own can be listed and called."""
         from mcp.shared.exceptions import MCPError
         from mcp_types import CallToolRequestParams, ListToolsResult, PaginatedRequestParams
 
         low = self.server
-        own = self._tools
-        handlers = getattr(low, "_request_handlers", {})
-        listing = handlers.get("tools/list")
-        calling = handlers.get("tools/call")
+        if low.get_request_handler("tools/list") is None:
 
-        async def list_tools(ctx: Any, params: Any) -> Any:
-            out = await listing.handler(ctx, params) if listing is not None else ListToolsResult(tools=[])
-            # attach's own tools after the app's, on its first page only.
-            if own and getattr(params, "cursor", None) is None:
-                if isinstance(out, Mapping):
-                    tools = [
-                        *out.get("tools", []),
-                        *(t.model_dump(by_alias=True, mode="json", exclude_none=True) for _, t in own.values()),
-                    ]
-                    return {**out, "tools": tools}
-                return out.model_copy(update={"tools": [*out.tools, *(t for _, t in own.values())]})
-            return out
+            async def list_tools(ctx: Any, params: Any) -> Any:
+                return ListToolsResult(tools=[])
 
-        async def call_tool(ctx: Any, params: Any) -> Any:
-            entry = own.get(params.name)
-            if entry is None:
-                if calling is None:
-                    raise MCPError(-32602, f"Unknown tool: {params.name}")
-                return await calling.handler(ctx, params)
-            # The arguments its advertised schema names; others are ignored,
-            # as MCPServer ignores them.
-            fn, tool = entry
-            named = tool.input_schema.get("properties") or {}
-            return await fn(**{k: v for k, v in (params.arguments or {}).items() if k in named}, ctx=ctx)
+            low.add_request_handler("tools/list", PaginatedRequestParams, list_tools)
+        if low.get_request_handler("tools/call") is None:
 
-        if own or listing is not None:
-            low.add_request_handler(
-                "tools/list", listing.params_type if listing is not None else PaginatedRequestParams, list_tools
-            )
-        if own or calling is not None:
-            low.add_request_handler(
-                "tools/call", calling.params_type if calling is not None else CallToolRequestParams, call_tool
-            )
-        low.middleware.append(middleware)
+            async def call_tool(ctx: Any, params: Any) -> Any:
+                raise MCPError(-32602, f"Unknown tool: {params.name}")
+
+            low.add_request_handler("tools/call", CallToolRequestParams, call_tool)
+
+    def list_builtins(self, attached: Any) -> str:
+        return _inject_into_handler(self.server, attached)
 
     def misplaced(self, tool: str) -> str:
         return (
-            f"wakeshift: attached.call() for {tool or 'a tool'} ran without its attach's middleware in front: call it "
-            "from the on_call_tool handler of the Server that attach was given, with that handler's ctx"
+            f"wakeshift: {tool or 'a tool'} ran without its attach's middleware in front: call wake.current_call() "
+            "from the on_call_tool handler of the Server that attach was given"
         )
 
 
@@ -363,9 +516,14 @@ def _is_fastmcp_lowlevel(server: Any) -> bool:
 
 
 def host_of(server: Any) -> Host:
-    """The Host for server: an MCPServer, a FastMCP 4 or a low-level Server."""
+    """The Host for server: an MCPServer, a FastMCP server (2.12+, 3.x or 4)
+    or a low-level Server."""
     if hasattr(server, "_lowlevel_server") and hasattr(server, "add_tool"):
         return MCPServerHost(server)
+    if _is_fastmcp(server) and (_version("fastmcp") or (4,)) < (4,):
+        from ._fastmcp23 import FastMCP23Host
+
+        return FastMCP23Host(server)
     from mcp.server.lowlevel import Server
 
     if isinstance(server, Server):
@@ -373,19 +531,9 @@ def host_of(server: Any) -> Host:
             raise TypeError("wakeshift: pass attach the FastMCP server itself, not its low-level server")
         return LowLevelHost(server)
     if _is_fastmcp(server):
-        version = str(getattr(sys.modules.get("fastmcp"), "__version__", "") or "")
-        major = _major(version)
-        if major is not None and major < 4:
-            raise TypeError(
-                f"wakeshift: attach supports FastMCP 4 (fastmcp>=4.1,<5), and this server is FastMCP {version}: "
-                "FastMCP 2.x and 3.x are built on mcp 1.x, which this SDK can't share an install with. "
-                "Upgrade with pip install 'wakeshift[fastmcp]'"
-            )
-        if major is not None and major > 4:
-            raise TypeError(f"wakeshift: attach supports FastMCP 4 (fastmcp>=4.1,<5), and this server is FastMCP {version}")
         return FastMCPHost(server)
     raise TypeError(
         "wakeshift: attach takes an MCPServer (mcp.server.mcpserver.MCPServer), a low-level Server "
-        "(mcp.server.lowlevel.Server) or a FastMCP 4 server (fastmcp.FastMCP), "
+        "(mcp.server.lowlevel.Server) or a FastMCP server (fastmcp.FastMCP), "
         f"not {type(server).__module__}.{type(server).__qualname__}"
     )

@@ -1,0 +1,313 @@
+{
+  "_about": "encodeArgValue / decodeArgValue (Python encode_arg_value / decode_arg_value, Go wakeshift.EncodeArgValue / DecodeArgValue), design \u00a72.13. Encoding works on the input's UTF-8 bytes: a-z, 0-9, - and _ pass through unchanged, so ordinary IDs (dep-abc123, snake_case) read as they are; the escape character is . (which a routing value allows and IDs rarely carry): A-Z becomes . and the lowercase letter; every other byte, . itself included, becomes .. and two lowercase hex digits. A result over 100 characters becomes ..h and the first 40 lowercase hex digits of SHA-256 over the input's UTF-8 bytes (43 characters), which no encoding of a byte can produce. No Unicode normalization. Every result is a-z 0-9 . _ - and at most 100 characters. Decoding is strict: it parses, requires valid UTF-8, re-encodes and compares, and refuses anything else, the hashed form included.",
+  "_errors": "A refusal is UsageError with code bad_arguments (Python: also a ValueError; Go: *wakeshift.UsageError, IsCode(err, CodeBadArguments)). The message never contains the input.",
+  "_go": "Go's JSON decoder turns lone surrogates into U+FFFD, so Go reads refused_encode cases from go_input_hex (the raw bytes) instead of input. EncodeArgValue(string) string returns no error: bytes that aren't UTF-8 are encoded byte by byte like any other (go_want), which stays injective, and DecodeArgValue refuses the result because it isn't UTF-8. DecodeArgValue(string) (string, error).",
+  "encode": [
+    {
+      "name": "lowercase letters and digits pass through",
+      "input": "job3f2a9c",
+      "want": "job3f2a9c"
+    },
+    {
+      "name": "digits only",
+      "input": "1234567890",
+      "want": "1234567890"
+    },
+    {
+      "name": "- passes through: an ordinary ID reads as it is",
+      "input": "dep-abc123",
+      "want": "dep-abc123"
+    },
+    {
+      "name": "_ passes through",
+      "input": "snake_case",
+      "want": "snake_case"
+    },
+    {
+      "name": "an uppercase letter becomes . and the letter",
+      "input": "AbC",
+      "want": ".ab.c"
+    },
+    {
+      "name": "case-sensitive IDs stay apart: Job7",
+      "input": "Job7",
+      "want": ".job7"
+    },
+    {
+      "name": "case-sensitive IDs stay apart: job7",
+      "input": "job7",
+      "want": "job7"
+    },
+    {
+      "name": "case-sensitive IDs stay apart: JOB7",
+      "input": "JOB7",
+      "want": ".j.o.b7"
+    },
+    {
+      "name": "a Magic Hour style ID",
+      "input": "mh_9QxZ2kLp",
+      "want": "mh_9.qx.z2k.lp"
+    },
+    {
+      "name": "a lowercase UUID passes through",
+      "input": "3f2a9c1e-0b4d-4e8f-9a7b-c6d5e4f3a2b1",
+      "want": "3f2a9c1e-0b4d-4e8f-9a7b-c6d5e4f3a2b1"
+    },
+    {
+      "name": "an uppercase UUID",
+      "input": "3F2A9C1E-0B4D-4E8F-9A7B-C6D5E4F3A2B1",
+      "want": "3.f2.a9.c1.e-0.b4.d-4.e8.f-9.a7.b-.c6.d5.e4.f3.a2.b1"
+    },
+    {
+      "name": "a ULID",
+      "input": "01HZX3K5M8N9P0Q1R2S3T4V5W6",
+      "want": "01.h.z.x3.k5.m8.n9.p0.q1.r2.s3.t4.v5.w6"
+    },
+    {
+      "name": ". is escaped, as the escape character",
+      "input": "job.3f2a",
+      "want": "job..2e3f2a"
+    },
+    {
+      "name": "a slash and an at sign",
+      "input": "owner/repo@main",
+      "want": "owner..2frepo..40main"
+    },
+    {
+      "name": "a space and a colon",
+      "input": "a b:c",
+      "want": "a..20b..3ac"
+    },
+    {
+      "name": "base64url",
+      "input": "dGVzdA_-",
+      "want": "d.g.vzd.a_-"
+    },
+    {
+      "name": "plus, equals, percent",
+      "input": "a+b=c%20",
+      "want": "a..2bb..3dc..2520"
+    },
+    {
+      "name": "NUL",
+      "input": "\u0000",
+      "want": "..00"
+    },
+    {
+      "name": "\u00e9, precomposed (U+00E9)",
+      "input": "\u00e9",
+      "want": "..c3..a9"
+    },
+    {
+      "name": "\u00e9, decomposed (e and U+0301): not normalized, so it differs from the precomposed form",
+      "input": "e\u0301",
+      "want": "e..cc..81"
+    },
+    {
+      "name": "U+FFFD",
+      "input": "\ufffd",
+      "want": "..ef..bf..bd"
+    },
+    {
+      "name": "U+1F600, four bytes",
+      "input": "\ud83d\ude00",
+      "want": "..f0..9f..98..80"
+    },
+    {
+      "name": "the empty string (the core decides whether an empty value is allowed)",
+      "input": "",
+      "want": ""
+    },
+    {
+      "name": "a dot alone",
+      "input": ".",
+      "want": "..2e"
+    },
+    {
+      "name": "100 lowercase characters: kept",
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "want": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "name": "101 lowercase characters: hashed",
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "want": "..hc675a2e604b0cd1229c036e3ce0c87422980a245",
+      "note": "..h and the first 40 hex digits of SHA-256 of the 101 x's"
+    },
+    {
+      "name": "50 uppercase letters encode to exactly 100: kept",
+      "input": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "want": ".a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a.a"
+    },
+    {
+      "name": "51 uppercase letters encode to 102: hashed",
+      "input": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "want": "..h1d31616e307323bd80775ae7483fce654a3b65bc"
+    },
+    {
+      "name": "25 dots encode to exactly 100: kept",
+      "input": ".........................",
+      "want": "..2e..2e..2e..2e..2e..2e..2e..2e..2e..2e..2e..2e..2e..2e..2e..2e..2e..2e..2e..2e..2e..2e..2e..2e..2e"
+    },
+    {
+      "name": "26 dots encode to 104: hashed",
+      "input": "..........................",
+      "want": "..h27c055695d9cea2f87a57147a29039c1dda077ae"
+    },
+    {
+      "name": "six U+1F600 encode to 96: kept",
+      "input": "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00",
+      "want": "..f0..9f..98..80..f0..9f..98..80..f0..9f..98..80..f0..9f..98..80..f0..9f..98..80..f0..9f..98..80"
+    },
+    {
+      "name": "seven U+1F600 encode to 112: hashed",
+      "input": "\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00\ud83d\ude00",
+      "want": "..h50acee3f1232bba1f2b4b156944b6b52d30f4083"
+    }
+  ],
+  "encode_round_trip": "Every encode case whose want doesn't start with ..h decodes back to its input.",
+  "refused_encode": [
+    {
+      "name": "a lone high surrogate",
+      "input": "\ud800",
+      "go_input_hex": "eda080",
+      "go_want": "..ed..a0..80"
+    },
+    {
+      "name": "a lone low surrogate",
+      "input": "a\udc00b",
+      "go_input_hex": "61edb08062",
+      "go_want": "a..ed..b0..80b"
+    },
+    {
+      "name": "a surrogate pair reversed",
+      "input": "\ude00\ud83d",
+      "go_input_hex": "edb880eda0bd",
+      "go_want": "..ed..b8..80..ed..a0..bd"
+    },
+    {
+      "name": "bytes that aren't UTF-8 (Go only: TypeScript and Python strings can't hold them)",
+      "input": null,
+      "go_input_hex": "ff61",
+      "go_want": "..ffa"
+    }
+  ],
+  "_refused_encode_comment": "TypeScript (isWellFormed() false) and Python (str.encode('utf-8') fails) refuse input with UsageError bad_arguments; input null means the case is Go-only. Go encodes go_input_hex's bytes to go_want.",
+  "decode": [
+    {
+      "name": ". escaped is canonical",
+      "input": "..2e",
+      "want": "."
+    },
+    {
+      "name": "mixed",
+      "input": ".job7",
+      "want": "Job7"
+    },
+    {
+      "name": "- and _ as they are",
+      "input": "dep-abc_123",
+      "want": "dep-abc_123"
+    },
+    {
+      "name": "U+1F600",
+      "input": "..f0..9f..98..80",
+      "want": "\ud83d\ude00"
+    },
+    {
+      "name": "empty",
+      "input": "",
+      "want": ""
+    }
+  ],
+  "refused_decode": [
+    {
+      "name": "the hashed form can't be decoded",
+      "input": "..hc675a2e604b0cd1229c036e3ce0c87422980a245"
+    },
+    {
+      "name": "A written as a byte (canonical: .a)",
+      "input": "..41"
+    },
+    {
+      "name": "a written as a byte (canonical: a)",
+      "input": "..61"
+    },
+    {
+      "name": "0 written as a byte (canonical: 0)",
+      "input": "..30"
+    },
+    {
+      "name": "- written as a byte (canonical: -)",
+      "input": "..2d"
+    },
+    {
+      "name": "_ written as a byte (canonical: _)",
+      "input": "..5f"
+    },
+    {
+      "name": "uppercase hex",
+      "input": "..2E"
+    },
+    {
+      "name": ". followed by a digit",
+      "input": ".1"
+    },
+    {
+      "name": ". at the end",
+      "input": "abc."
+    },
+    {
+      "name": ".. at the end",
+      "input": "abc.."
+    },
+    {
+      "name": ".. with one hex digit",
+      "input": "..2"
+    },
+    {
+      "name": ".. with a non-hex digit",
+      "input": "..zz"
+    },
+    {
+      "name": "... (an escape can't start with .)",
+      "input": "...2e"
+    },
+    {
+      "name": "an uppercase character",
+      "input": "A"
+    },
+    {
+      "name": "a space",
+      "input": "a b"
+    },
+    {
+      "name": "a slash",
+      "input": "a/b"
+    },
+    {
+      "name": "not UTF-8: a lone continuation byte",
+      "input": "..80"
+    },
+    {
+      "name": "not UTF-8: 0xff",
+      "input": "..ff"
+    },
+    {
+      "name": "not UTF-8: an overlong /",
+      "input": "..c0..af"
+    },
+    {
+      "name": "not UTF-8: a surrogate's bytes (refused in Go too)",
+      "input": "..ed..a0..80"
+    },
+    {
+      "name": "not UTF-8: a four-byte sequence cut short",
+      "input": "..f0..9f..98"
+    },
+    {
+      "name": "101 lowercase characters: its canonical encoding is the hashed form",
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    }
+  ]
+}

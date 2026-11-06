@@ -1,5 +1,5 @@
 {
-  "comment": "What a wrapped tool's reply looks like once Wakeshift's block is added (docs/subscribe-from-tools.md, \"The block, added automatically\"): result is what the handler returned (a string, or a CallToolResult), addition is /calls/addition's answer (the top-level one unless the case has its own), want is the reply. A beacon line at the end of the result's own text (a message the tool relays, say) is dropped: only Wakeshift's own trailer may end a wrapped tool's text, since a hook acts on the beacon there. A structured result (structuredContent an object) carries the block's text, without the beacon, in its wakeshift field, whether or not the tool's output type declares it. output_schemas is how tools/list gives a wrapped tool's output schema: an object schema gains an optional wakeshift string. Every SDK's tests read it; Go's skips the string cases (its handlers return a CallToolResult).",
+  "comment": "What a wrapped tool's reply looks like once Wakeshift's block is added (docs/subscribe-from-tools.md, \"The block, added automatically\"): result is what the handler returned (a string, or a CallToolResult), addition is /calls/addition's answer (the top-level one unless the case has its own), want is the reply. A beacon line at the end of the result's own text (a message the tool relays, say) is dropped: only Wakeshift's own trailer may end a wrapped tool's text, since a hook acts on the beacon there. A structured result (structuredContent an object) carries the block's text, without the beacon, in its wakeshift field, whether or not the tool's output type declares it. output_schemas is how tools/list gives a wrapped tool's output schema: an object schema gains an optional wakeshift string, {\"type\": \"string\"} (the compact tools/list bench, November 5, 2026). Every SDK's tests read it; Go's skips the string cases (its handlers return a CallToolResult).",
   "addition": {
     "text": "Wakeshift: this conversation is woken by Monitor.",
     "trailer": "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: aaaaaaaaaa.bbbbbbbbbb.cccccccccc)",
@@ -454,8 +454,7 @@
             "type": "string"
           },
           "wakeshift": {
-            "type": "string",
-            "description": "What Wakeshift adds for this conversation: how it's woken by this app's events"
+            "type": "string"
           }
         },
         "required": [
@@ -473,8 +472,7 @@
         "type": "object",
         "properties": {
           "wakeshift": {
-            "type": "string",
-            "description": "What Wakeshift adds for this conversation: how it's woken by this app's events"
+            "type": "string"
           }
         }
       }
@@ -500,5 +498,6 @@
         }
       }
     }
-  ]
+  ],
+  "_output_schemas_comment": "The wakeshift field added to an output schema is {\"type\": \"string\"}, without a description (the compact tools/list, design §2.12, from the bench)."
 }

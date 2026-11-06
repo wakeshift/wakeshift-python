@@ -1,0 +1,45 @@
+{
+  "_comment": "Wakeshift's three tool arguments as JSON Schema properties: TypeScript's WAKESHIFT_ARGUMENTS_JSON_SCHEMA, Python's WAKE_ARGS_SCHEMA and Go's wakeshift.WakeArgsJSONSchema() give exactly this.",
+  "properties": {
+    "conversation_id": {
+      "description": "Your own ID for this conversation, if your program gives you one. Cursor and Grok Bot: the output of `printenv CURSOR_CONVERSATION_ID`. Codex and Antigravity send it automatically; others leave it empty",
+      "type": "string"
+    },
+    "harness": {
+      "description": "The program you're running in: codex, claude-code, cursor (local CLI or IDE), cursor-cloud (Cursor cloud agent), grok-bot, copilot-cli, opencode, antigravity, openclaw (even when it runs your turns in Codex), hermes, chatgpt, or your program's name if it isn't listed",
+      "type": "string"
+    },
+    "session_key": {
+      "description": "This conversation's session_key, from an earlier result (a secret token, or a handle such as claude-code#2). Keep it to this conversation; don't share or log it.",
+      "type": "string"
+    }
+  },
+  "compact": {
+    "_comment": "Next release (design §2.12), what tools/list adds to a tool's inputSchema: subscribing (a tool whose subscribes isn't empty, and subscribe_events) gets all three; subscribes_nothing (a tool with subscribes: [], and unsubscribe_events) gets only session_key, as does list_subscriptions (it lists the calling conversation's subscriptions when there's no user); a tool that doesn't subscribe gets none. Only tools/list changes: the tools still accept all three. The SDK no longer exports these (WAKESHIFT_ARGUMENTS_JSON_SCHEMA, WAKE_ARGS_SCHEMA and WakeArgsJSONSchema are deleted); test them through tools/list. properties above stays today's until PR 10.",
+    "_status": "FINAL (compact tools/list bench, 2026-11-05: compact matched or beat the baseline in every cell). compact_strings in subscribing-tools-list.json is the one place these strings live; every literal that uses them (wake-args.json compact, subscribes.json compact_cases, event-tools.json, events-list.json tools, subscribing-tools-list.json scenarios, tool-output-schemas.json) is generated from it.",
+    "subscribing": {
+      "properties": {
+        "session_key": {
+          "type": "string",
+          "description": "The session_key an earlier result gave you; don't share it"
+        },
+        "harness": {
+          "type": "string",
+          "description": "Your program: claude-code, codex, cursor, grok-bot, openclaw…"
+        },
+        "conversation_id": {
+          "type": "string",
+          "description": "Cursor, Grok Bot: output of printenv CURSOR_CONVERSATION_ID"
+        }
+      }
+    },
+    "subscribes_nothing": {
+      "properties": {
+        "session_key": {
+          "type": "string",
+          "description": "The session_key an earlier result gave you; don't share it"
+        }
+      }
+    }
+  }
+}

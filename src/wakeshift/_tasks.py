@@ -20,24 +20,31 @@ MCP SDK's own tasks support (an older revision's) is never advertised.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
-from .client import (
-    CONVERSATION_DESCRIPTION,
-    HARNESS_DESCRIPTION,
-    SESSION_DESCRIPTION,
-    TASKS_EXTENSION,
-    _call,
-    _request_info,
-    _takes_tasks,
-)
-from .errors import WakeshiftError
+from ._client import TASKS_EXTENSION, _call, _request_info, _takes_tasks
+from ._errors import what_of
 
 if TYPE_CHECKING:
-    from .client import Wakeshift
+    from ._client import Wakeshift
 
 __all__ = ["TASKS_EXTENSION", "TASK_HOLD_SECONDS", "WAIT_TOOL", "WAIT_TOOL_DEFINITION", "WAIT_TOOL_DESCRIPTION"]
+
+# The wait tool's argument descriptions (mcp-tasks-wire.json's wait_tool).
+SESSION_DESCRIPTION = (
+    "This conversation's session_key, from an earlier result (a secret token, or a handle such as claude-code#2). "
+    "Keep it to this conversation; don't share or log it."
+)
+HARNESS_DESCRIPTION = (
+    "The program you're running in: codex, claude-code, cursor (local CLI or IDE), cursor-cloud (Cursor cloud agent), "
+    "grok-bot, copilot-cli, opencode, antigravity, openclaw (even when it runs your turns in Codex), hermes, chatgpt, "
+    "or your program's name if it isn't listed"
+)
+CONVERSATION_DESCRIPTION = (
+    "Your own ID for this conversation, if your program gives you one. Cursor and Grok Bot: the output of "
+    "`printenv CURSOR_CONVERSATION_ID`. Codex and Antigravity send it automatically; others leave it empty"
+)
 
 #: The wait tool's name.
 WAIT_TOOL = "wakeshift_wait"
@@ -109,6 +116,7 @@ TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
 #: The wait tool as tools/list lists it.
 WAIT_TOOL_DEFINITION: dict[str, Any] = {
     "name": WAIT_TOOL,
+    "title": TOOL_ANNOTATIONS[WAIT_TOOL]["title"],
     "description": WAIT_TOOL_DESCRIPTION,
     "inputSchema": {
         "type": "object",
@@ -129,8 +137,7 @@ def takes_tasks(ctx: Any) -> bool:
     return _takes_tasks(meta, headers)
 
 
-def _detail(err: Exception) -> str:
-    return err.detail if isinstance(err, WakeshiftError) else str(err)
+_detail = what_of
 
 
 class TaskServer:
@@ -138,12 +145,16 @@ class TaskServer:
     middleware), and adds the wait tool and the extension to tools/list and
     server/discover."""
 
-    def __init__(self, wake: Wakeshift, caller_of: Callable[[Any], tuple[str | None, str | None]]) -> None:
+    def __init__(self, wake: Wakeshift, caller_of: Callable[[Any], Awaitable[tuple[str | None, str | None, str | None]]]) -> None:
         self._wake = wake
         self._caller_of = caller_of
 
-    def _wire(self, ctx: Any, args: Mapping[str, Any]) -> dict[str, Any]:
-        user, client = self._caller_of(ctx)
+    async def _wire(self, ctx: Any, args: Mapping[str, Any]) -> dict[str, Any]:
+        from mcp.shared.exceptions import MCPError
+
+        user, client, refused = await self._caller_of(ctx)
+        if refused:
+            raise MCPError(-32603, "this app couldn't verify who you are")  # TypeScript's words
         return _call(ctx, user=user, client=client, args=args, tool=WAIT_TOOL, wait=True).to_json()
 
     def handles(self, ctx: Any) -> bool:
@@ -166,7 +177,7 @@ class TaskServer:
             args = params.get("arguments")
             try:
                 out = await self._wake._request_app(
-                    "POST", "/calls/task", {"call": self._wire(ctx, args if isinstance(args, Mapping) else {})}
+                    "POST", "/calls/task", {"call": await self._wire(ctx, args if isinstance(args, Mapping) else {})}
                 )
             except Exception as err:
                 return _tool_error(f"Wakeshift couldn't start the wait ({_detail(err)}). Call {WAIT_TOOL} again.")
@@ -175,7 +186,7 @@ class TaskServer:
                 return result
             return _tool_error(f"Wakeshift didn't answer the wait. Call {WAIT_TOOL} again.")
         task = params.get("taskId")
-        body: dict[str, Any] = {"task": task if isinstance(task, str) else "", "call": self._wire(ctx, {})}
+        body: dict[str, Any] = {"task": task if isinstance(task, str) else "", "call": await self._wire(ctx, {})}
         path = "/calls/task/cancel"
         if method == "tasks/get":
             body["hold_seconds"] = TASK_HOLD_SECONDS

@@ -14,7 +14,7 @@ import httpx2
 import pytest
 from mcp.server.mcpserver import MCPServer
 
-from wakeshift import WakeEvent, Wakeshift, WakeshiftError
+from wakeshift import APIError, WakeEvent, Wakeshift
 
 from .helpers import app_key, golden_file, sorted_json
 from .test_golden import ChatArgs, ChatMessage, Run, RunArgs, Turn, TurnArgs
@@ -81,7 +81,7 @@ async def test_manifest_matches_the_other_sdks(case: dict[str, Any]) -> None:
             return httpx2.Response(reply["status"], json=reply["body"])
         return httpx2.Response(200, json=body)
 
-    wake = Wakeshift(app_key(), core="http://core.test", http=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
+    wake = Wakeshift(app_key(), core="https://core.test", http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
     events = {name: define_sample(wake, name) for name in case["define"]}
     emit = FIXTURE["emit"]
     for i, step in enumerate(case["steps"]):
@@ -140,7 +140,7 @@ async def test_concurrent_unknown_emits_merge_once() -> None:
             return httpx2.Response(404, json={"error": {"code": "unknown_event", "message": "no such event"}})
         return httpx2.Response(200, json={"matched": 0})
 
-    wake = Wakeshift(app_key(), core="http://core.test", http=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
+    wake = Wakeshift(app_key(), core="https://core.test", http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
     chat = define_sample(wake, "chat.message")
     emit = FIXTURE["emit"]
     results = await asyncio.gather(*(chat.emit(emit["arguments"], emit["payload"]) for _ in range(5)))
@@ -165,12 +165,12 @@ async def test_failed_send_is_shared_by_the_calls_waiting_for_it() -> None:
             return httpx2.Response(503, json={"error": {"code": "unavailable", "message": "down"}})
         return httpx2.Response(200, json={"ended": True})
 
-    wake = Wakeshift(app_key(), core="http://core.test", http=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
+    wake = Wakeshift(app_key(), core="https://core.test", http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)))
     chat = define_sample(wake, "chat.message")
     wake._serving = True  # as after attach
     results = await asyncio.gather(*(chat.end("ada", "s1") for _ in range(5)), return_exceptions=True)
-    assert all(isinstance(r, WakeshiftError) and r.code == "unavailable" for r in results), results
+    assert all(isinstance(r, APIError) and r.code == "unavailable" for r in results), results
     assert merges == 1
-    with pytest.raises(WakeshiftError):
+    with pytest.raises(APIError):
         await chat.end("ada", "s1")
     assert merges == 2

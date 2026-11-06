@@ -1,0 +1,383 @@
+{
+  "_about": "event.watch (TypeScript event.watch(args, check, opts), Python event.watch(args, check, every=, timeout=, ...), Go event.Watch(ctx, args, check, opts...)): the in-process helper for vendors with no usable webhook. It calls check until check returns a payload, then emits once. Each SDK runs every case; times are seconds. Options use language-neutral names: every (default 30), timeout (default 3600), max_errors (default 5), id, to; TypeScript isFinal / Python is_final / Go FinalIf mark a check error final.",
+  "defaults": {
+    "every_seconds": 30,
+    "timeout_seconds": 3600,
+    "max_errors": 5,
+    "max_concurrent_checks": 10,
+    "min_every_seconds": 1
+  },
+  "delays": {
+    "_comment": "How long a watch waits before its next check. After a check that returned no payload: every. After n check errors in a row (n >= 1): min(every * 2^n, max(every, 300)). Each SDK may add jitter of at most +/-10% in production; tests turn it off. The first check runs at once.",
+    "cases": [
+      {
+        "every": 30,
+        "errors_in_a_row": 0,
+        "want": 30
+      },
+      {
+        "every": 30,
+        "errors_in_a_row": 1,
+        "want": 60
+      },
+      {
+        "every": 30,
+        "errors_in_a_row": 2,
+        "want": 120
+      },
+      {
+        "every": 30,
+        "errors_in_a_row": 3,
+        "want": 240
+      },
+      {
+        "every": 30,
+        "errors_in_a_row": 4,
+        "want": 300
+      },
+      {
+        "every": 10,
+        "errors_in_a_row": 6,
+        "want": 300
+      },
+      {
+        "every": 600,
+        "errors_in_a_row": 0,
+        "want": 600
+      },
+      {
+        "every": 600,
+        "errors_in_a_row": 3,
+        "want": 600
+      },
+      {
+        "every": 1,
+        "errors_in_a_row": 2,
+        "want": 4
+      }
+    ]
+  },
+  "option_checks": {
+    "_comment": "Refused at the watch call (TypeScript and Python throw UsageError; Go returns it), before any check runs. On a disabled client the same checks run.",
+    "cases": [
+      {
+        "name": "every under a second",
+        "options": {
+          "every": 0.5
+        },
+        "error": "bad_arguments",
+        "says": "every"
+      },
+      {
+        "name": "timeout of zero",
+        "options": {
+          "timeout": 0
+        },
+        "error": "bad_arguments",
+        "says": "timeout"
+      },
+      {
+        "name": "timeout shorter than every",
+        "options": {
+          "every": 60,
+          "timeout": 30
+        },
+        "error": "bad_arguments",
+        "says": "timeout"
+      },
+      {
+        "name": "max_errors of zero",
+        "options": {
+          "max_errors": 0
+        },
+        "error": "bad_arguments",
+        "says": "max_errors"
+      },
+      {
+        "name": "arguments the event refuses",
+        "options": {},
+        "bad_args": true,
+        "error": "bad_arguments"
+      }
+    ]
+  },
+  "outcomes": {
+    "_comment": "What a watch ends with. TypeScript: watch.done resolves (never rejects) to { outcome, emitted?, reason?, error? }; Python: the task's result, a WatchResult(outcome, emitted, reason, error), never raising except CancelledError when the task itself is canceled; Go: Watch returns nil for emitted and skipped, the error otherwise (timeout: errors.Is(err, context.DeadlineExceeded); stopped: the context's error). logs are warnings.json codes.",
+    "cases": [
+      {
+        "name": "check returns a payload on the third check",
+        "checks": [
+          "pending",
+          "pending",
+          "payload"
+        ],
+        "want": {
+          "outcome": "emitted",
+          "emits": 1,
+          "checks": 3
+        },
+        "logs": []
+      },
+      {
+        "name": "two errors then a payload: errors in a row reset",
+        "checks": [
+          "error",
+          "error",
+          "payload"
+        ],
+        "want": {
+          "outcome": "emitted",
+          "emits": 1,
+          "checks": 3
+        },
+        "logs": []
+      },
+      {
+        "name": "max_errors errors in a row",
+        "options": {
+          "max_errors": 3
+        },
+        "checks": [
+          "error",
+          "error",
+          "error"
+        ],
+        "want": {
+          "outcome": "failed",
+          "reason": "errors",
+          "emits": 0,
+          "checks": 3
+        },
+        "logs": [
+          {
+            "code": "watch_failed",
+            "reason": "errors"
+          }
+        ]
+      },
+      {
+        "name": "a final error stops at once",
+        "checks": [
+          "final_error"
+        ],
+        "want": {
+          "outcome": "failed",
+          "reason": "check",
+          "emits": 0,
+          "checks": 1
+        },
+        "logs": [
+          {
+            "code": "watch_stopped"
+          }
+        ]
+      },
+      {
+        "name": "timeout before a payload",
+        "checks": [
+          "pending_forever"
+        ],
+        "want": {
+          "outcome": "timeout",
+          "emits": 0
+        },
+        "logs": [
+          {
+            "code": "watch_timeout"
+          }
+        ]
+      },
+      {
+        "name": "the emit is retried while retryable (unreachable, timeout, 429, 5xx), within the timeout",
+        "checks": [
+          "payload"
+        ],
+        "emit": [
+          "unreachable",
+          "ok"
+        ],
+        "want": {
+          "outcome": "emitted",
+          "emits": 2
+        },
+        "logs": []
+      },
+      {
+        "name": "an emit error retrying wouldn't help (bad_payload) isn't retried",
+        "checks": [
+          "payload"
+        ],
+        "emit": [
+          "bad_payload"
+        ],
+        "want": {
+          "outcome": "failed",
+          "reason": "emit",
+          "emits": 1
+        },
+        "logs": [
+          {
+            "code": "watch_failed",
+            "reason": "emit"
+          }
+        ]
+      },
+      {
+        "name": "id_reused: another emit with that id got there first (a webhook): done, nothing logged",
+        "checks": [
+          "payload"
+        ],
+        "emit": [
+          "id_reused"
+        ],
+        "want": {
+          "outcome": "emitted",
+          "emitted": null,
+          "emits": 1
+        },
+        "logs": []
+      },
+      {
+        "name": "every emit attempt of one watch sends the same id: the option's, else one the SDK makes for the watch",
+        "checks": [
+          "payload"
+        ],
+        "emit": [
+          "unreachable",
+          "ok"
+        ],
+        "want": {
+          "outcome": "emitted",
+          "same_id": true
+        }
+      },
+      {
+        "name": "a second watch of the same event and arguments while one runs is the running one: one check loop",
+        "second_watch": true,
+        "want": {
+          "same_watch": true
+        }
+      },
+      {
+        "name": "stopped (TypeScript watch.stop() or wake.close(), Python task.cancel() or wake.aclose(), Go ctx canceled)",
+        "checks": [
+          "pending_forever"
+        ],
+        "stop": true,
+        "want": {
+          "outcome": "stopped",
+          "emits": 0
+        },
+        "logs": []
+      },
+      {
+        "name": "a disabled client: nothing runs, check is never called",
+        "enabled": false,
+        "want": {
+          "outcome": "skipped",
+          "checks": 0,
+          "emits": 0
+        },
+        "logs": []
+      },
+      {
+        "name": "inside a tool call whose subscription to these arguments came back unavailable or disabled: nothing runs",
+        "subscription_state": "unavailable",
+        "want": {
+          "outcome": "skipped",
+          "checks": 0
+        },
+        "logs": []
+      },
+      {
+        "name": "inside a tool call that then fails (its subscriptions rolled back): a watch it started for a subscription it created stops",
+        "call_fails": true,
+        "want": {
+          "outcome": "stopped"
+        },
+        "logs": []
+      }
+    ]
+  },
+  "on_subscribe": {
+    "_comment": "An event's onSubscribe (Python on_subscribe, Go OnSubscribe) runs once for each new subscription, whichever path made it, in the background (the request doesn't wait for it): its argument is { args, user, via, tool } (Go Subscribed[A]{Args, User, Via, Tool}); via is tool, subscribe_events or native; tool is the subscribing tool's name for via tool, else empty. A throw, rejection or error logs on_subscribe_failed and leaves the subscription in place. A disabled client never calls it.",
+    "cases": [
+      {
+        "name": "a tool's call.subscribe that created a subscription, the call succeeding",
+        "path": "tool",
+        "core_created": true,
+        "want_calls": [
+          {
+            "via": "tool",
+            "tool": "start_crawl"
+          }
+        ],
+        "note": "after the handler returns and the call isn't rolled back"
+      },
+      {
+        "name": "a tool's call.subscribe that renewed one",
+        "path": "tool",
+        "core_created": false,
+        "want_calls": []
+      },
+      {
+        "name": "a tool's call that subscribed, then failed (rolled back)",
+        "path": "tool",
+        "core_created": true,
+        "call_fails": true,
+        "want_calls": []
+      },
+      {
+        "name": "a tool's call for a native client (the block names the event; the client subscribes itself later)",
+        "path": "tool_native",
+        "want_calls": [],
+        "note": "the native events/subscribe that follows fires it"
+      },
+      {
+        "name": "subscribe_events, created",
+        "path": "subscribe_events",
+        "core_created": true,
+        "want_calls": [
+          {
+            "via": "subscribe_events",
+            "tool": ""
+          }
+        ]
+      },
+      {
+        "name": "subscribe_events, renewed",
+        "path": "subscribe_events",
+        "core_created": false,
+        "want_calls": []
+      },
+      {
+        "name": "native events/subscribe, created",
+        "path": "native_subscribe",
+        "core_created": true,
+        "want_calls": [
+          {
+            "via": "native",
+            "tool": ""
+          }
+        ]
+      },
+      {
+        "name": "native events/poll that started a subscription (the core answers created: true)",
+        "path": "native_poll",
+        "core_created": true,
+        "want_calls": [
+          {
+            "via": "native",
+            "tool": ""
+          }
+        ]
+      },
+      {
+        "name": "native events/poll on an existing subscription",
+        "path": "native_poll",
+        "core_created": false,
+        "want_calls": []
+      }
+    ]
+  }
+}

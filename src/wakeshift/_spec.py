@@ -54,6 +54,35 @@ def codes_for(dialect: Dialect) -> Codes:
     return Codes(-32023, -32024, -32025, -32026, -32027)
 
 
+# Harnesses Wakeshift wakes through its own paths (a Monitor, hooks, a
+# connector, a plugin), by MCP clientInfo name or HTTP User-Agent product
+# token, compared case-insensitively (internal/harnesses). A call from one is
+# never treated as a native MCP Events client, whatever capabilities it
+# declares: Claude Code, for one, isn't woken by MCP Events, so treating it
+# as native would leave it with nothing listening. The same list in every SDK.
+BRIDGED_CLIENTS: tuple[str, ...] = (
+    "claude-code",
+    "codex-mcp-client",
+    "cursor",
+    "cursor-vscode",
+    "copilot-cli",
+    "opencode",
+    "antigravity-client",
+    "openclaw-bundle-mcp",
+    "hermes-agent",
+    "capy",
+    "muse-custom-connector",
+)
+
+
+def bridged_client(client_name: str, user_agent: str) -> bool:
+    """Whether a client is one of BRIDGED_CLIENTS, by its clientInfo name or its User-Agent's first product token."""
+    if client_name.strip().lower() in BRIDGED_CLIENTS:
+        return True
+    product = user_agent.split("/", 1)[0].strip().lower()
+    return product != "" and product in BRIDGED_CLIENTS
+
+
 def dialect_of(client_name: str, user_agent: str) -> Dialect:
     """A client's dialect, by its clientInfo name or User-Agent: ChatGPT's MCP client is openai-mcp."""
     if client_name.lower() == "openai-mcp" or user_agent.lower().startswith("openai-mcp"):

@@ -1,0 +1,107 @@
+{
+  "_about": "The line an agent reads for an event defined without text (TypeScript text, Python text=, Go Text): the event's description with its whitespace collapsed to single spaces and trailing periods and whitespace trimmed, then, if any argument is left, \" (\" + the arguments joined by \", \" + \")\". Each argument is \"<key> <value>\": keys in name order; an argument whose value is null (or absent) or the empty string is skipped; a string is written raw (not quoted, not trimmed); any other value is compact JSON as JavaScript's JSON.stringify writes it (no spaces, non-ASCII and <, >, & unescaped, a number with no fraction written without one). No arguments left: the description alone, with no parentheses. Only top-level null and empty-string values are skipped: inside an array or object they stay. Nested objects here list their keys in name order, so the case doesn't depend on how an SDK orders a nested object's keys. Each SDK's tests render every case with the event's default text (TypeScript WakeEvent.render, Python _default_text, Go defaultText) from description and args, and compare it with want exactly. Loaders drop top-level keys that start with _.",
+  "cases": [
+    {
+      "name": "no arguments: the description alone, without parentheses",
+      "description": "A build finished.",
+      "args": {},
+      "want": "A build finished"
+    },
+    {
+      "name": "one string argument, raw",
+      "description": "A crawl finished",
+      "args": { "job": "3f2a" },
+      "want": "A crawl finished (job 3f2a)"
+    },
+    {
+      "name": "whitespace inside the description collapses to one space; leading and trailing whitespace goes",
+      "description": "  A build\n\tfinished   on\r\n a  branch.  ",
+      "args": { "repo": "a/b" },
+      "want": "A build finished on a branch (repo a/b)"
+    },
+    {
+      "name": "a no-break space counts as whitespace",
+      "description": "A build finished. ",
+      "args": {},
+      "want": "A build finished"
+    },
+    {
+      "name": "every trailing period and space is trimmed; periods inside stay",
+      "description": "Version 1.2 shipped... . .",
+      "args": {},
+      "want": "Version 1.2 shipped"
+    },
+    {
+      "name": "other trailing punctuation stays",
+      "description": "Did the build pass?",
+      "args": {},
+      "want": "Did the build pass?"
+    },
+    {
+      "name": "keys in name order: _ and digits sort before letters",
+      "description": "Sorted",
+      "args": { "z": "1", "b": "2", "ab": "3", "a_b": "4", "a1": "5" },
+      "want": "Sorted (a1 5, a_b 4, ab 3, b 2, z 1)"
+    },
+    {
+      "name": "null and empty-string arguments are skipped",
+      "description": "A build finished.",
+      "args": { "repo": "a/b", "branch": "", "gone": null, "pr": 7 },
+      "want": "A build finished (pr 7, repo a/b)"
+    },
+    {
+      "name": "every argument skipped: no parentheses",
+      "description": "A build finished.",
+      "args": { "branch": "", "gone": null },
+      "want": "A build finished"
+    },
+    {
+      "name": "false, zero, an empty array and an empty object are kept",
+      "description": "Kept",
+      "args": { "ok": false, "n": 0, "tags": [], "o": {} },
+      "want": "Kept (n 0, o {}, ok false, tags [])"
+    },
+    {
+      "name": "numbers: negative, fractional, and a whole number written with a fraction",
+      "description": "Numbers",
+      "args": { "a": -3, "b": 2.5, "c": 1.0, "d": 1000000 },
+      "want": "Numbers (a -3, b 2.5, c 1, d 1000000)"
+    },
+    {
+      "name": "true is JSON",
+      "description": "Flags",
+      "args": { "draft": true },
+      "want": "Flags (draft true)"
+    },
+    {
+      "name": "a string is raw: spaces, commas, parentheses, quotes and the word null as given",
+      "description": "Raw",
+      "args": { "a": "  padded  ", "b": "x, y (z)", "c": "say \"hi\"", "d": "null" },
+      "want": "Raw (a   padded  , b x, y (z), c say \"hi\", d null)"
+    },
+    {
+      "name": "a non-ASCII string is raw",
+      "description": "Unicode",
+      "args": { "who": "Zoë ✓ 😀" },
+      "want": "Unicode (who Zoë ✓ 😀)"
+    },
+    {
+      "name": "an array is compact JSON, with null and empty strings inside kept",
+      "description": "Arrays",
+      "args": { "tags": ["x", "y"], "mixed": [1, "", null, true] },
+      "want": "Arrays (mixed [1,\"\",null,true], tags [\"x\",\"y\"])"
+    },
+    {
+      "name": "compact JSON leaves <, >, & and non-ASCII unescaped, and escapes quotes",
+      "description": "Escapes",
+      "args": { "tags": ["<a>", "b&c", "é", "say \"hi\""] },
+      "want": "Escapes (tags [\"<a>\",\"b&c\",\"é\",\"say \\\"hi\\\"\"])"
+    },
+    {
+      "name": "a nested object is compact JSON",
+      "description": "Nested",
+      "args": { "filter": { "a": 1, "b": [true, null], "c": { "d": "e" } } },
+      "want": "Nested (filter {\"a\":1,\"b\":[true,null],\"c\":{\"d\":\"e\"}})"
+    }
+  ]
+}

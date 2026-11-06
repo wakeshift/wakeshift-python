@@ -1,7 +1,7 @@
 [project]
 name = "wakeshift"
-version = "0.9.3"
-description = "Wake AI agents when your app's events happen: Wakeshift's SDK for MCP servers in Python"
+version = "0.10.0"
+description = "Wakeshift lets an MCP server wake the AI agents that use it. The Python SDK: define events, serve them as MCP Events, and emit them."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
@@ -23,16 +23,19 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "mcp>=2.3,<3",
   "mcp-types>=2.3,<3",
   "httpx2>=2.10",
   "cryptography>=42",
   "pydantic>=2.12",
+  "typing-extensions>=4.13",
 ]
 
 [project.optional-dependencies]
-# attach on FastMCP 4 (the fastmcp package), which sits on mcp 2.x as this SDK
-# does. FastMCP 2.x and 3.x sit on mcp 1.x and can't share an install.
+# attach on the official MCP Python SDK (MCPServer, the low-level Server).
+mcp = ["mcp>=2.3,<3"]
+# attach on FastMCP 4, which sits on mcp 2.x. FastMCP 2.12+ and 3.x sit on
+# mcp 1.x: install plain wakeshift beside them (attach works; native MCP
+# Events need FastMCP 4).
 fastmcp = ["fastmcp>=4.1,<5"]
 
 [project.urls]
@@ -42,7 +45,18 @@ Source = "https://github.com/wakeshift/wakeshift-python"
 Issues = "https://github.com/wakeshift/wakeshift-python/issues"
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "uvicorn>=0.30", "ruff>=0.6", "pyright>=1.1.380", "fastmcp>=4.1,<5"]
+dev = [
+    "mcp>=2.3,<3",
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "uvicorn>=0.30",
+    "ruff>=0.6",
+    "pyright>=1.1.380",
+    "fastmcp>=4.1,<5",
+    "sentry-sdk>=2.74.0",
+    "rich>=15.0.0",
+    "mypy>=2.4.1",
+]
 
 [build-system]
 requires = ["hatchling>=1.25"]

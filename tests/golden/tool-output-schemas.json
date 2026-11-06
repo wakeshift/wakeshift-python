@@ -1,0 +1,49 @@
+{
+  "_about": "The built-in tools' output schemas (design §2.12, DR §6, CR L15): minimal, type object, top-level properties and required only, no descriptions, no opt-out. Replaces tool-output-schemas.json when PR 10 lands (that file stays as today's until then). Loaders drop top-level keys that start with _.",
+  "_status": "FINAL (compact tools/list bench, 2026-11-05: compact matched or beat the baseline in every cell). compact_strings in subscribing-tools-list.json is the one place these strings live; every literal that uses them (wake-args.json compact, subscribes.json compact_cases, event-tools.json, events-list.json tools, subscribing-tools-list.json scenarios, tool-output-schemas.json) is generated from it.",
+  "subscribe_events": {
+    "type": "object",
+    "properties": {
+      "subscribed": {
+        "type": "object"
+      },
+      "wakeshift": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "subscribed"
+    ]
+  },
+  "unsubscribe_events": {
+    "type": "object",
+    "properties": {
+      "ended": {
+        "type": "boolean"
+      },
+      "wakeshift": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "ended"
+    ]
+  },
+  "list_subscriptions": {
+    "type": "object",
+    "properties": {
+      "subscriptions": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        }
+      },
+      "wakeshift": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "subscriptions"
+    ]
+  }
+}

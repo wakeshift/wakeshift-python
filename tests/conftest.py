@@ -6,7 +6,9 @@ FastMCP's own, whichever server the rest runs on."""
 
 from __future__ import annotations
 
+import logging
 import os
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -72,3 +74,14 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             mod.MCPServer = server_cls
         if hasattr(mod, "Context"):
             mod.Context = context_cls
+
+
+@pytest.fixture(autouse=True)
+def _wakeshift_logger() -> Iterator[None]:
+    """Every test sees the SDK's lines from debug up, and leaves the logger as it found it."""
+    log = logging.getLogger("wakeshift")
+    level, handlers = log.level, list(log.handlers)
+    log.setLevel(logging.DEBUG)
+    yield
+    log.handlers[:] = handlers
+    log.setLevel(level)

@@ -1,0 +1,729 @@
+{
+  "_about": "Which situations log, at which level and with which code (design §2.11, PR 3). No prose matching: tests check the code, the level and the fields; the message is free, except that it contains the code's fix verbatim and never anything design §2.11 'Never logged' lists (keys, session keys, tokens, headers, signing secrets, publish URL tokens, stream links, task IDs, payloads, tool arguments, request bodies, query strings, the vendor's error messages). A code's fix_python, where given, is the fix as the Python SDK says it, with Python's names (require_user, define_event, raise); the others say fix.",
+  "levels": {
+    "_comment": "Each SDK's level for each name.",
+    "typescript": {
+      "debug": "logger.debug",
+      "info": "logger.info",
+      "warn": "logger.warn",
+      "error": "logger.error"
+    },
+    "python": {
+      "debug": "logging.DEBUG",
+      "info": "logging.INFO",
+      "warn": "logging.WARNING",
+      "error": "logging.ERROR"
+    },
+    "go": {
+      "debug": "slog.LevelDebug",
+      "info": "slog.LevelInfo",
+      "warn": "slog.LevelWarn",
+      "error": "slog.LevelError"
+    }
+  },
+  "fields": {
+    "_comment": "Where each field goes. code is always present. TS: the second argument, { code, event?, tool?, … }. Python: extra={'wakeshift_code': …, 'wakeshift_event': …, 'wakeshift_tool': …} (every field prefixed wakeshift_). Go: LogAttrs with attributes code, event, tool, …. count is the number of occurrences the line stands for (rate-limited codes only); error_type is the error's type name, never its message.",
+    "names": [
+      "code",
+      "event",
+      "tool",
+      "reason",
+      "ended",
+      "count",
+      "error_type"
+    ]
+  },
+  "policies": {
+    "once_per_client": "logged the first time on each client (per: once per distinct value of those fields on each client)",
+    "rate_limited": "at most once per window_seconds per code on each client; a line carries count, the occurrences since the previous line (the first line: 1)",
+    "each": "every occurrence logs"
+  },
+  "codes": [
+    {
+      "code": "no_key",
+      "level": "debug",
+      "fields": [],
+      "policy": {
+        "kind": "once_per_client"
+      },
+      "fix": "Set WAKESHIFT_KEY to turn Wakeshift on.",
+      "when": "construction found no key; the client is disabled (debug: with no key the server behaves exactly as before, stdio included)"
+    },
+    {
+      "code": "no_identify",
+      "level": "debug",
+      "fields": [],
+      "policy": {
+        "kind": "once_per_client"
+      },
+      "fix": "Add identify to tie subscriptions to signed-in users, and requireUser to refuse anonymous callers.",
+      "fix_python": "Add identify to tie subscriptions to signed-in users, and require_user=True to refuse anonymous callers.",
+      "when": "attach without identify: session_key is a bearer for its conversation"
+    },
+    {
+      "code": "no_events",
+      "level": "warn",
+      "fields": [],
+      "policy": {
+        "kind": "once_per_client"
+      },
+      "fix": "Define events with defineEvent before attach.",
+      "fix_python": "Define events with define_event before attach.",
+      "when": "attach with no events defined"
+    },
+    {
+      "code": "text_trimmed",
+      "level": "warn",
+      "fields": [
+        "event"
+      ],
+      "policy": {
+        "kind": "once_per_client",
+        "per": [
+          "event"
+        ]
+      },
+      "fix": "Keep text to a short headline and put the details in the payload.",
+      "when": "Wakeshift trimmed an emitted text over 1000 bytes (the emit result has textTrimmed: true)"
+    },
+    {
+      "code": "rollback_failed",
+      "level": "warn",
+      "fields": [
+        "tool",
+        "event"
+      ],
+      "policy": {
+        "kind": "rate_limited",
+        "window_seconds": 300,
+        "count_field": "count"
+      },
+      "fix": "Nothing to change; Wakeshift retries the cleanup.",
+      "when": "ending the subscriptions of a failed tool call failed"
+    },
+    {
+      "code": "authorize_failed",
+      "level": "error",
+      "fields": [
+        "event",
+        "error_type"
+      ],
+      "policy": {
+        "kind": "rate_limited",
+        "window_seconds": 300,
+        "count_field": "count"
+      },
+      "fix": "Fix authorize: it threw, failed or took over 10 seconds, so the subscription was refused.",
+      "fix_python": "Fix authorize: it raised, failed or took over 10 seconds, so the subscription was refused.",
+      "when": "authorize threw, rejected, returned an error, or ran over 10 seconds; the subscription was refused"
+    },
+    {
+      "code": "identify_error",
+      "level": "error",
+      "fields": [
+        "error_type"
+      ],
+      "policy": {
+        "kind": "rate_limited",
+        "window_seconds": 300,
+        "count_field": "count"
+      },
+      "fix": "Make identify return within 10 seconds: return no user for a credential it can't verify, and throw only when the upstream can't answer.",
+      "fix_python": "Make identify return within 10 seconds: return no user for a credential it can't verify, and raise only when the upstream can't answer.",
+      "when": "identify threw, rejected, returned an error, or ran over 10 seconds; Wakeshift's part of the call was refused. The message names the error's type once and doesn't repeat the fix (identify_failed before round 3)"
+    },
+    {
+      "code": "user_required",
+      "level": "info",
+      "fields": [
+        "tool"
+      ],
+      "policy": {
+        "kind": "rate_limited",
+        "window_seconds": 300,
+        "count_field": "count"
+      },
+      "fix": "Nothing to change if anonymous callers are meant to be refused; otherwise sign the caller in, or turn requireUser off.",
+      "fix_python": "Nothing to change if anonymous callers are meant to be refused; otherwise sign the caller in, or set require_user=False.",
+      "when": "requireUser is on and identify returned no user: Wakeshift's part of the call was refused (identify_failed before round 3). tool is the tool called, absent for an MCP Events request"
+    },
+    {
+      "code": "native_unavailable",
+      "level": "info",
+      "fields": [
+        "tool",
+        "event",
+        "reason"
+      ],
+      "policy": {
+        "kind": "once_per_client",
+        "per": [
+          "tool",
+          "reason"
+        ]
+      },
+      "fix": "To serve MCP Events clients, give the event personal, authorize or public, and sign callers in.",
+      "when": "call.subscribe resolved to state unavailable (reason client_unsupported, no_user or refused), or a call whose only Wakeshift work was native lines got no addition from Wakeshift, so its result went out without one (reason addition_failed; docs/subscribe-vouchers.md §7.2)"
+    },
+    {
+      "code": "event_closed",
+      "level": "warn",
+      "fields": [
+        "event",
+        "ended"
+      ],
+      "policy": {
+        "kind": "each"
+      },
+      "fix": "Add authorize, personal or public: true to reopen it.",
+      "when": "the manifest response's changed lists the event going from any to tools; ended is the number of subscriptions the core ended"
+    },
+    {
+      "code": "wrap_unknown_tool",
+      "level": "warn",
+      "fields": [
+        "tool"
+      ],
+      "policy": {
+        "kind": "once_per_client",
+        "per": [
+          "tool"
+        ]
+      },
+      "fix": "Check the tool's name in wrap.",
+      "when": "a wrap name the server never lists in tools/list"
+    },
+    {
+      "code": "wrap_arg_conflict",
+      "level": "error",
+      "fields": [
+        "tool"
+      ],
+      "policy": {
+        "kind": "once_per_client",
+        "per": [
+          "tool"
+        ]
+      },
+      "fix": "Rename the tool's session_key, harness, conversation_id or wakeshift field.",
+      "when": "a tool named in wrap whose input schema names session_key, harness or conversation_id, or whose output schema names wakeshift; it's left unwrapped"
+    },
+    {
+      "code": "description_too_long",
+      "level": "warn",
+      "fields": [
+        "tool"
+      ],
+      "policy": {
+        "kind": "once_per_client",
+        "per": [
+          "tool"
+        ]
+      },
+      "fix": "Shorten the tool's description: Claude Code keeps only its first 2048 characters, which cuts off Wakeshift's sentence.",
+      "when": "a tool that subscribes has a description over 2048 characters (UTF-16 code units in TypeScript, characters in Python and Go) once tools/list adds the subscribes sentence"
+    },
+    {
+      "code": "wrap_bad_event",
+      "level": "error",
+      "fields": [
+        "tool"
+      ],
+      "policy": {
+        "kind": "once_per_client",
+        "per": [
+          "tool"
+        ]
+      },
+      "fix": "Return only events defined on this client, never null, from the wrap function.",
+      "when": "attach's wrap given as a function returned something other than a list of this client's events for a tool; it's served unwrapped"
+    },
+    {
+      "code": "builtin_name_conflict",
+      "level": "error",
+      "fields": [
+        "tool"
+      ],
+      "policy": {
+        "kind": "once_per_client",
+        "per": [
+          "tool"
+        ]
+      },
+      "fix": "Rename your tool, or turn the built-in off with builtinTools.",
+      "fix_python": "Rename your tool, or turn the built-in off with builtin_tools.",
+      "when": "a tool registered elsewhere has a built-in's name; Wakeshift's tool wins"
+    },
+    {
+      "code": "events_capability_kept",
+      "level": "info",
+      "fields": [],
+      "policy": {
+        "kind": "once_per_client"
+      },
+      "fix": "Nothing to change if you meant to serve your own MCP Events; Wakeshift's events reach MCP Events clients only through your tools.",
+      "when": "the server already declares MCP Events (its own capability, extension or events/* handlers); Wakeshift serves none and keeps them (info: serving your own MCP Events is a legitimate choice, so it isn't a warning)"
+    },
+    {
+      "code": "on_subscribe_failed",
+      "level": "error",
+      "fields": [
+        "event",
+        "error_type"
+      ],
+      "policy": {
+        "kind": "rate_limited",
+        "window_seconds": 300,
+        "count_field": "count"
+      },
+      "fix": "Fix the event's onSubscribe: it threw or rejected; the subscription stands.",
+      "fix_python": "Fix the event's on_subscribe: it raised; the subscription stands.",
+      "when": "an event's onSubscribe (Python on_subscribe, Go OnSubscribe) threw, rejected or returned an error"
+    },
+    {
+      "code": "watch_failed",
+      "level": "warn",
+      "fields": [
+        "event",
+        "reason",
+        "error_type"
+      ],
+      "policy": {
+        "kind": "rate_limited",
+        "window_seconds": 300,
+        "count_field": "count"
+      },
+      "fix": "Check the watch's check function and the emit; the watch stopped without emitting.",
+      "when": "a watch stopped without emitting: reason errors (too many errors in a row) or emit (the emit failed and retrying wouldn't help). A check error marked final is watch_stopped"
+    },
+    {
+      "code": "watch_stopped",
+      "level": "info",
+      "fields": [
+        "event",
+        "error_type"
+      ],
+      "policy": {
+        "kind": "rate_limited",
+        "window_seconds": 300,
+        "count_field": "count"
+      },
+      "fix": "Nothing to change: the check's error was marked final, so the watch stopped as asked.",
+      "when": "a watch stopped at once on a check error marked final (TS isFinal, Python is_final, Go FinalIf), such as \"no such job\": a stop on purpose, so info, not a warning. The outcome is still failed with reason check"
+    },
+    {
+      "code": "watch_timeout",
+      "level": "info",
+      "fields": [
+        "event"
+      ],
+      "policy": {
+        "kind": "once_per_client",
+        "per": [
+          "event"
+        ]
+      },
+      "fix": "Raise the watch's timeout if the work can take longer.",
+      "when": "a watch reached its timeout without the check returning a payload"
+    },
+    {
+      "code": "handler_missing",
+      "level": "warn",
+      "fields": [],
+      "policy": {
+        "kind": "once_per_client"
+      },
+      "fix": "Wrap your HTTP handler with attached.Handler.",
+      "when": "tool calls arrive over HTTP without Handler",
+      "languages": [
+        "go"
+      ]
+    },
+    {
+      "code": "key_refused",
+      "level": "error",
+      "fields": [],
+      "policy": {
+        "kind": "rate_limited",
+        "window_seconds": 300,
+        "count_field": "count"
+      },
+      "fix": "Check WAKESHIFT_KEY: the key was revoked, or belongs to another console.",
+      "when": "Wakeshift answered 401 or 403 to the app's own key (each call also fails with unauthenticated)"
+    },
+    {
+      "code": "block_failed",
+      "level": "warn",
+      "fields": [
+        "tool",
+        "error_type"
+      ],
+      "policy": {
+        "kind": "rate_limited",
+        "window_seconds": 300,
+        "count_field": "count"
+      },
+      "fix": "Nothing to change; the tool's result went out as the tool gave it, without Wakeshift's addition.",
+      "when": "Wakeshift's addition to a result of a tool that subscribes failed (an error answer, a timeout, the core unreachable, a refused key): the tool's result goes out as the tool gave it, never as an error and with nothing asking the agent to call again; what the call subscribed is rolled back"
+    },
+    {
+      "code": "subscribe_in_flight",
+      "level": "warn",
+      "fields": [
+        "tool"
+      ],
+      "policy": {
+        "kind": "once_per_client",
+        "per": [
+          "tool"
+        ]
+      },
+      "fix": "Await subscribe, unsubscribe and resolveSession before the tool returns.",
+      "fix_python": "Await subscribe, unsubscribe and resolve_session before the tool returns.",
+      "when": "a tool returned while one of its call's requests was in flight; the SDK waited for it"
+    },
+    {
+      "code": "mcp_patch_unavailable",
+      "level": "warn",
+      "fields": [],
+      "policy": {
+        "kind": "once_per_client"
+      },
+      "fix": "Upgrade @modelcontextprotocol/sdk to 1.23 or later.",
+      "when": "the MCP SDK 1.x patch Wakeshift needs couldn't load (#51)",
+      "languages": [
+        "typescript"
+      ]
+    },
+    {
+      "code": "monitor_line_long",
+      "level": "warn",
+      "fields": [
+        "event"
+      ],
+      "policy": {
+        "kind": "once_per_client",
+        "per": [
+          "event"
+        ]
+      },
+      "fix": "Keep the event's text under 200 bytes and put the details in the payload: Claude Code's Monitor shows a 480-byte line, about 230 of which are Wakeshift's own fields.",
+      "when": "an emit's rendered text (the event's text, else its description and arguments) is over 200 bytes as UTF-8 JSON (escaped, without the quotes): with Wakeshift's own fields it leaves the payload no room on Claude Code's 480-byte Monitor line, so the agent would see a cut preview. Not for a text over 1000 bytes (UTF-8), which Wakeshift trims and text_trimmed reports instead. Checked on emit (a text is a function, so it can't be checked at define), once per event"
+    },
+    {
+      "code": "config",
+      "level": "error",
+      "fields": [],
+      "policy": {
+        "kind": "each"
+      },
+      "fix": "Fix the configuration the message names; the same error was thrown.",
+      "fix_python": "Fix the configuration the message names; the same error was raised.",
+      "when": "a configuration mistake the SDK throws (errors.json config) while attaching or registering a tool: logged as well, since a framework may turn the throw into a bare HTTP 500 (createMcpHandler). The message is the error's own, which names no secret"
+    }
+  ],
+  "situations": {
+    "_comment": "Each situation, run on a fresh client with a key unless it says otherwise (the samples: crawl.finished tools-only, chat.message public, deploy.finished with authorize, game.turn personal, table.news shared; tools start_crawl and watch). logs: exactly the warnings.json lines the situation produces from construction on, in order, each with the fields given (fields not given aren't checked), and no other line at info level or above. Situations that attach pass an identify returning user u1 unless the case says otherwise. Lines at debug level (no_identify among them) aren't counted. Each SDK runs every op its tests know and fails on one it doesn't, unless skip names its language, with why.",
+    "cases": [
+      {
+        "op": "quickstart_keyless",
+        "name": "the quickstart with no key",
+        "logs": [],
+        "note": "the end state of design §'The end state' run with WAKESHIFT_KEY unset: construct, defineEvent, attach, register the tool, tools/list, call it, emit; no_key is debug, so nothing at info or above"
+      },
+      {
+        "op": "quickstart_with_key",
+        "name": "the quickstart with a key, called by Claude Code",
+        "logs": [],
+        "note": "nothing at info or above: the newcomer gate counts zero warnings; no_identify, the documented default, is debug"
+      },
+      {
+        "op": "quickstart_with_identify",
+        "name": "the quickstart with a key and identify",
+        "logs": []
+      },
+      {
+        "op": "no_identify",
+        "name": "attach without identify, then tools/list and a call of a tool that subscribes",
+        "logs": [],
+        "note": "no_identify is debug: attaching without identify is the documented default, so it says nothing at info or above"
+      },
+      {
+        "op": "no_key_twice",
+        "name": "two clients constructed with no key",
+        "logs": [],
+        "note": "no_key is debug (stdio servers stay literally as before); run at debug level each client logs it once"
+      },
+      {
+        "op": "attach_no_events",
+        "name": "attach before any defineEvent",
+        "logs": [
+          {
+            "code": "no_events"
+          }
+        ]
+      },
+      {
+        "op": "attach_per_request",
+        "name": "attach to a new server on each of three requests, one client, no identify",
+        "logs": [],
+        "note": "no_identify is debug, and once per client, so per-request attach neither shows it nor repeats it"
+      },
+      {
+        "op": "text_trimmed",
+        "name": "two emits of the same event whose text is over 1000 bytes (the core answers text_trimmed: true), then one of another event",
+        "logs": [
+          {
+            "code": "text_trimmed",
+            "event": "chat.message"
+          },
+          {
+            "code": "text_trimmed",
+            "event": "game.turn"
+          }
+        ]
+      },
+      {
+        "op": "rollback_failed",
+        "name": "a tool that subscribed and then threw, the core refusing the rollback, three times in a minute",
+        "logs": [
+          {
+            "code": "rollback_failed",
+            "tool": "watch",
+            "event": "table.news",
+            "count": 1
+          }
+        ],
+        "note": "rate-limited: the first logs; the next within 5 minutes don't; the first after 5 minutes logs with count = the occurrences since the last line (use a fake clock)"
+      },
+      {
+        "op": "rollback_failed_after_window",
+        "name": "rollback_failed three times, then once more 5 minutes later",
+        "logs": [
+          {
+            "code": "rollback_failed",
+            "tool": "watch",
+            "event": "table.news",
+            "count": 1
+          },
+          {
+            "code": "rollback_failed",
+            "tool": "watch",
+            "event": "table.news",
+            "count": 3
+          }
+        ]
+      },
+      {
+        "op": "authorize_throws",
+        "name": "authorize throws an error whose message is boom-canary, on two polls",
+        "logs": [
+          {
+            "code": "authorize_failed",
+            "event": "deploy.finished",
+            "error_type": "Error",
+            "count": 1
+          }
+        ],
+        "note": "error_type is the error's class name (TS err.name / constructor, Python type(err).__name__, Go fmt %T); boom-canary appears in no log field or message"
+      },
+      {
+        "op": "identify_throws",
+        "name": "identify throws on a call of a tool that subscribes",
+        "logs": [
+          {
+            "code": "identify_error",
+            "error_type": "Error",
+            "count": 1
+          }
+        ],
+        "note": "the vendor's tool code still runs; call.subscribe throws identify_failed (errors.json: the error's code is unchanged; only the log line split)"
+      },
+      {
+        "op": "identify_not_called_for_list",
+        "name": "identify throws, and the client only sends initialize, ping and tools/list",
+        "logs": [],
+        "note": "identify is lazy: nothing calls it, so no identify_error"
+      },
+      {
+        "op": "require_user_no_user",
+        "name": "requireUser on, identify returns no user, a call of start_crawl (which subscribes) twice",
+        "logs": [
+          {
+            "code": "user_required",
+            "tool": "start_crawl",
+            "count": 1
+          }
+        ],
+        "note": "not identify_error: identify answered, with no user; rate-limited, so the second call logs nothing; call.subscribe throws user_required (errors.json), the same code as the log line"
+      },
+      {
+        "op": "tool_without_subscribes",
+        "name": "a tool registered through the attachment without subscribes, listed and called, with no key and with a key",
+        "logs": [],
+        "note": "a plain registration (B1): no throw, no config line; with a key its tools/list entry gains session_key only, as subscribes: [] did"
+      },
+      {
+        "op": "monitor_line_long",
+        "name": "emit table.news twice with a text function that renders 300 bytes",
+        "logs": [
+          {
+            "code": "monitor_line_long",
+            "event": "table.news"
+          }
+        ],
+        "note": "once per event; an emit whose text is 200 bytes or less logs nothing"
+      },
+      {
+        "op": "native_unavailable",
+        "name": "identify returns no user; a native client calls start_crawl, which subscribes to crawl.finished (tools-only), twice; then start_crawl subscribing to chat.message (public)",
+        "logs": [
+          {
+            "code": "native_unavailable",
+            "tool": "start_crawl",
+            "event": "crawl.finished",
+            "reason": "client_unsupported"
+          },
+          {
+            "code": "native_unavailable",
+            "tool": "start_crawl",
+            "event": "chat.message",
+            "reason": "no_user"
+          }
+        ],
+        "note": "once per tool and reason"
+      },
+      {
+        "op": "event_closed",
+        "name": "the manifest response carries changed: [{event: crawl.finished, from: any, to: tools, ended: 0}, {event: build.finished, from: any, to: tools, ended: 3}]",
+        "logs": [
+          {
+            "code": "event_closed",
+            "event": "crawl.finished",
+            "ended": 0
+          },
+          {
+            "code": "event_closed",
+            "event": "build.finished",
+            "ended": 3
+          }
+        ],
+        "note": "C1-dependent: the core's manifest response field changed: [{event, from, to, ended}]"
+      },
+      {
+        "op": "event_opened",
+        "name": "the manifest response carries changed: [{event: build.finished, from: tools, to: any, ended: 0}]",
+        "logs": [],
+        "note": "opening up is audited by the core; the SDK logs nothing. C1-dependent"
+      },
+      {
+        "op": "wrap_unknown_tool",
+        "name": "wrap names stat_crawl; the server lists start_crawl; tools/list asked twice",
+        "logs": [
+          {
+            "code": "wrap_unknown_tool",
+            "tool": "stat_crawl"
+          }
+        ]
+      },
+      {
+        "op": "wrap_arg_conflict",
+        "name": "wrap names a tool whose input schema has session_key",
+        "logs": [
+          {
+            "code": "wrap_arg_conflict",
+            "tool": "legacy_watch"
+          }
+        ],
+        "note": "the tool is served unwrapped; checked on every tools/list, logged once"
+      },
+      {
+        "op": "builtin_name_conflict",
+        "name": "the vendor registers list_subscriptions with the host SDK, outside Wakeshift",
+        "logs": [
+          {
+            "code": "builtin_name_conflict",
+            "tool": "list_subscriptions"
+          }
+        ]
+      },
+      {
+        "op": "events_capability_kept",
+        "name": "attach to a server that already handles events/list",
+        "logs": [
+          {
+            "code": "events_capability_kept"
+          }
+        ]
+      },
+      {
+        "op": "handler_missing",
+        "name": "Go: a tool call over HTTP to a server whose handler isn't wrapped with Handler, twice",
+        "logs": [
+          {
+            "code": "handler_missing"
+          }
+        ],
+        "skip": {
+          "typescript": "Go only",
+          "python": "Go only"
+        }
+      },
+      {
+        "op": "key_refused",
+        "name": "the core answers 401 to three emits within a minute",
+        "logs": [
+          {
+            "code": "key_refused",
+            "count": 1
+          }
+        ],
+        "note": "each emit also fails with APIError unauthenticated; rate-limited like rollback_failed"
+      },
+      {
+        "op": "addition_failed",
+        "name": "a tool that subscribed, the core answering 503 to /calls/addition, three times in a minute",
+        "logs": [
+          {
+            "code": "block_failed",
+            "tool": "watch",
+            "count": 1
+          }
+        ],
+        "note": "each call returns the tool's own result unchanged (no isError, no Wakeshift text); its subscriptions are rolled back; rate-limited like rollback_failed"
+      },
+      {
+        "op": "subscribe_in_flight",
+        "name": "a tool returns without awaiting call.subscribe",
+        "logs": [
+          {
+            "code": "subscribe_in_flight",
+            "tool": "watch"
+          }
+        ],
+        "skip": {
+          "go": "Go's Subscribe is synchronous: nothing can be in flight"
+        }
+      },
+      {
+        "op": "mcp_patch_unavailable",
+        "name": "TS: attach on an MCP SDK 1.x whose patch can't load",
+        "logs": [
+          {
+            "code": "mcp_patch_unavailable"
+          }
+        ],
+        "skip": {
+          "python": "TypeScript only",
+          "go": "TypeScript only"
+        }
+      },
+      {
+        "op": "undeclared_subscribe_doesnt_log",
+        "name": "a tool subscribes to an event it didn't declare",
+        "logs": [],
+        "note": "an error now (errors.json undeclared_subscribe), not a warning as before"
+      }
+    ]
+  }
+}

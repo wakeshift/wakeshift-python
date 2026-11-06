@@ -1,6 +1,6 @@
 """attach on the official SDK's low-level Server (mcp.server.lowlevel): its own
-tools served by wrapping the app's tools/list and tools/call handlers, and an
-on_call_tool handler subscribing with attached.call(ctx)."""
+tools served by attach's middleware, the app's tools that subscribe named in
+wrap, and an on_call_tool handler subscribing with wake.current_call()."""
 
 from __future__ import annotations
 
@@ -14,12 +14,12 @@ from mcp.server.mcpserver import Context as MCPContext
 from mcp.server.mcpserver import MCPServer as OfficialMCPServer
 from pydantic import BaseModel
 
-from wakeshift import Identity, ToolCall, Wakeshift, wrapped_tool
+from wakeshift import Identity, ToolCall, UsageError, Wakeshift
 from wakeshift._hosts import LowLevelHost, host_of
-from wakeshift.spec import EXTENSION_KEY
-from wakeshift.tasks import TASKS_EXTENSION, WAIT_TOOL
+from wakeshift._spec import EXTENSION_KEY
+from wakeshift._tasks import TASKS_EXTENSION, WAIT_TOOL
 
-from .helpers import app_key, golden_file, served
+from .helpers import Logged, app_key, golden_file, served
 from .test_toolcall import TRAILER, WOKEN, WakeCore
 
 UA = {"User-Agent": "claude-code/2.1.314"}
@@ -43,21 +43,19 @@ class App:
     def __init__(self, *, handlers: bool = True, tools: Any = None) -> None:
         self.core = WakeCore()
         http = httpx2.AsyncClient(transport=httpx2.MockTransport(self.core.handler))
-        self.warnings: list[str] = []
-        self.wake = Wakeshift(app_key("cards"), core="http://core.test", http=http, on_warning=self.warnings.append)
+        self.warnings = Logged()
+        self.wake = Wakeshift(app_key("cards"), core="https://core.test", http_client=http)
         self.turn = self.wake.define_event(
             "game.turn", description="Your turn.", args=TableArgs, payload=TurnMsg, text=lambda m, a: m.text, personal=True
         )
         self.calls: list[ToolCall] = []
         self.listed = [
-            wrapped_tool(
-                types.Tool(
-                    name="join",
-                    description="Take a seat",
-                    input_schema={"type": "object", "properties": {"table": {"type": "string"}}, "required": ["table"]},
-                )
+            types.Tool(
+                name="join",
+                description="Take a seat",
+                input_schema={"type": "object", "properties": {"table": {"type": "string"}}, "required": ["table"]},
             ),
-            wrapped_tool(types.Tool(name="sit", input_schema={"type": "object"}, output_schema=SEAT_SCHEMA)),
+            types.Tool(name="sit", input_schema={"type": "object"}, output_schema=SEAT_SCHEMA),
             types.Tool(name="plain", input_schema={"type": "object"}),
         ]
         outer = self
@@ -73,8 +71,8 @@ class App:
             text = lambda t: types.CallToolResult(content=[types.TextContent(type="text", text=t)])  # noqa: E731
             if params.name == "plain":
                 return text("plain")
-            call = outer.attached.call(ctx)
-            assert outer.attached.call(ctx) is call  # the same call, asked twice
+            call = outer.wake.current_call()
+            assert outer.wake.current_call(ctx) is call  # the same call, from the context too
             outer.calls.append(call)
             await call.subscribe(outer.turn, {"table": table})
             if params.name == "join":
@@ -93,8 +91,9 @@ class App:
         self.server = Server("cards", version="1.0.0", **kw)
         self.attached = self.wake.attach(
             self.server,
-            identify=lambda ctx: Identity(user=ctx.request.headers.get("x-user") if ctx.request is not None else None),
-            tools=tools if tools is not None else {"wait": {"enabled": True}},
+            identify=lambda r: Identity(user=r.headers.get("x-user")),
+            builtin_tools=tools if tools is not None else {"wait": True},
+            wrap={name: [self.turn] for name in ("join", "sit", "boom", "refused")},
         )
 
 
@@ -121,8 +120,10 @@ async def test_tools_list_has_the_apps_tools_and_attachs() -> None:
         assert tools["subscribe_events"]["inputSchema"]["properties"]["event"]["enum"] == ["game.turn"]
         # attach's tools carry every SDK's annotations (tool-annotations.json).
         annotations = golden_file("tool-annotations.json")
+        schemas = {k: v for k, v in golden_file("tool-output-schemas.json").items() if not k.startswith("_")}
         for name in ("subscribe_events", "unsubscribe_events", "list_subscriptions"):
             assert tools[name]["annotations"] == annotations[name], name
+            assert tools[name]["outputSchema"] == schemas[name], name
         # attach's tools are on the first page only.
         later = (await rpc("tools/list", {"cursor": "p2"}))["result"]["tools"]
         assert [t["name"] for t in later] == ["later"]
@@ -141,7 +142,7 @@ async def test_attached_call_subscribes_and_gets_the_block() -> None:
         r = (await call_tool(rpc, "sit", {"table": "elm"}, user="bo"))["result"]
         assert r["structuredContent"] == {"table": "elm", "seat": 3, "wakeshift": WOKEN}
         assert a.core.bodies("/event-subscriptions")[1]["call"]["user"] == "bo"
-        # A tool that doesn't call attached.call gets nothing.
+        # A tool wrap doesn't name gets nothing.
         a.core.reset()
         assert texts(await call_tool(rpc, "plain", {})) == ["plain"]
         assert a.core.paths() == []
@@ -189,9 +190,7 @@ async def test_a_server_without_tool_handlers_gets_attachs_tools() -> None:
 
 
 async def test_no_own_tools_leaves_the_handlers_alone() -> None:
-    a = App(
-        handlers=False, tools={"subscribe": {"enabled": False}, "list": {"enabled": False}, "unsubscribe": {"enabled": False}}
-    )
+    a = App(handlers=False, tools={"subscribe": False, "list": False, "unsubscribe": False})
     async with served(a.server) as (_, rpc):
         res = await rpc("tools/list", {})
         assert "error" in res  # no tools/list handler, as without attach
@@ -222,34 +221,42 @@ async def test_protocol_2026_07_28() -> None:
         assert a.core.bodies("/event-subscriptions")[0]["call"]["tasks"] is True
 
 
-async def test_attached_call_outside_a_tools_call_is_refused() -> None:
+async def test_current_call_outside_a_tools_call_is_refused() -> None:
     a = App()
-    with pytest.raises(RuntimeError, match="only in a tools/call"):
-        a.attached.call(None)
-    assert a.warnings and "on_call_tool handler" in a.warnings[0]
+    with pytest.raises(UsageError, match="outside a tool call") as e:
+        a.wake.current_call()
+    assert e.value.code == "no_call"
 
 
 def test_attached_tool_is_refused_on_a_low_level_server() -> None:
     a = App()
-    with pytest.raises(TypeError, match="wrapped_tool"):
+    with pytest.raises(TypeError, match="wrap"):
 
         @a.attached.tool()
         async def join(call: ToolCall) -> str:
             return ""
 
 
-def test_wrapped_tool_in_wire_form() -> None:
-    t = wrapped_tool(
-        {
-            "name": "x",
-            "inputSchema": {"type": "object", "properties": {"session_key": {"type": "string", "description": "mine"}}},
-            "outputSchema": SEAT_SCHEMA,
-        }
-    )
-    assert t["inputSchema"]["properties"]["session_key"] == {"type": "string", "description": "mine"}
-    assert set(t["inputSchema"]["properties"]) == {"session_key", "harness", "conversation_id"}
-    assert "wakeshift" in t["outputSchema"]["properties"] and "wakeshift" not in SEAT_SCHEMA["properties"]
-    assert wrapped_tool({"name": "y"})["inputSchema"]["type"] == "object"
+async def test_a_handler_set_again_after_attach_keeps_wakeshift() -> None:
+    # attach wraps no handler: one the app sets after attach still gets
+    # attach's tools, Wakeshift's arguments and the block.
+    a = App()
+
+    async def list_tools(ctx: Any, params: Any) -> types.ListToolsResult:
+        return types.ListToolsResult(tools=[a.listed[0]])
+
+    async def call_again(ctx: Any, params: types.CallToolRequestParams) -> types.CallToolResult:
+        await a.wake.current_call().subscribe(a.turn, {"table": "oak"})
+        return types.CallToolResult(content=[types.TextContent(type="text", text="again")])
+
+    a.server.add_request_handler("tools/list", types.PaginatedRequestParams, list_tools)
+    a.server.add_request_handler("tools/call", types.CallToolRequestParams, call_again)
+    async with served(a.server) as (_, rpc):
+        tools = {t["name"]: t for t in (await rpc("tools/list", {}))["result"]["tools"]}
+        assert {"join", "subscribe_events", "list_subscriptions"} <= set(tools)
+        assert "session_key" in tools["join"]["inputSchema"]["properties"]
+        res = await call_tool(rpc, "join", {"table": "oak", "session_key": "wsc_s1"})
+        assert texts(res) == ["again", WOKEN, TRAILER]
 
 
 def test_fastmcps_low_level_server_is_refused() -> None:
@@ -259,22 +266,114 @@ def test_fastmcps_low_level_server_is_refused() -> None:
         host_of(fastmcp.FastMCP("x")._mcp_server)
 
 
-async def test_attached_call_from_a_plain_mcpserver_tool() -> None:
-    """attached.call works in a tool attach didn't register on MCPServer too."""
+async def test_wrap_on_an_mcpserver_tool() -> None:
+    """wrap works on a tool MCPServer registered, attach after it or before."""
     core = WakeCore()
     wake = Wakeshift(
-        app_key("cards"), core="http://core.test", http=httpx2.AsyncClient(transport=httpx2.MockTransport(core.handler))
+        app_key("cards"), core="https://core.test", http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(core.handler))
     )
     turn = wake.define_event("game.turn", description="Your turn.", args=TableArgs, payload=TurnMsg, text=lambda m, a: m.text)
     server = OfficialMCPServer("cards")
-    attached = wake.attach(server)
+    wake.attach(server, wrap={"join": [turn]})
+    seen: list[Any] = []
 
     @server.tool(structured_output=False)
     async def join(table: str, ctx: MCPContext) -> str:
-        await attached.call(ctx).subscribe(turn, {"table": table})
+        seen.append(ctx)
+        await wake.current_call().subscribe(turn, {"table": table})
         return f"Seated at {table}."
 
     async with served(server) as (_, rpc):
-        res = await rpc("tools/call", {"name": "join", "arguments": {"table": "oak"}}, headers=UA)
+        tools = {t["name"]: t for t in (await rpc("tools/list", {}))["result"]["tools"]}
+        assert set(tools["join"]["inputSchema"]["properties"]) == {"table", "session_key", "harness", "conversation_id"}
+        res = await rpc("tools/call", {"name": "join", "arguments": {"table": "oak", "session_key": "wsc_s1"}}, headers=UA)
         assert texts(res)[-1].endswith(TRAILER)
-    assert core.bodies("/event-subscriptions")[0]["call"]["tool"] == "join"
+    sub = core.bodies("/event-subscriptions")[0]
+    assert sub["call"]["tool"] == "join" and sub["call"]["session"] == "wsc_s1"
+    # The header validation on protocol 2026-07-28 sees the schema tools/list gives (#72).
+    schema = server._lowlevel_server.get_tool_input_schema("join")
+    assert set(schema["properties"]) == {"table", "session_key", "harness", "conversation_id"}
+    assert "id" in server._lowlevel_server.get_tool_input_schema("unsubscribe_events")["properties"]
+
+
+@pytest.mark.parametrize("when", ["before", "after", "mcpserver"])
+async def test_a_vendors_own_server_discover_keeps_its_answer_and_gains_events(when: str) -> None:
+    """A server that answers server/discover itself (protocol 2026-07-28):
+    attach's middleware adds Wakeshift's events capability to the vendor's
+    answer, keeping everything the vendor put in it, whether the handler was
+    set before attach or after."""
+    wake = Wakeshift(
+        app_key("cards"),
+        core="https://core.test",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(WakeCore().handler)),
+    )
+    wake.define_event("game.turn", description="Your turn.", args=TableArgs, payload=TurnMsg, personal=True)
+
+    async def discover(ctx: Any, params: Any) -> types.DiscoverResult:
+        return types.DiscoverResult(
+            supported_versions=["2026-07-28"],
+            capabilities=types.ServerCapabilities(
+                experimental={"vendor": {"on": True}}, extensions={"com.vendor/thing": {"v": 1}}, logging={}
+            ),
+            instructions="The vendor's own.",
+        )
+
+    server: Any = OfficialMCPServer("cards") if when == "mcpserver" else Server("cards")
+    low = server._lowlevel_server if when == "mcpserver" else server
+    if when == "before":
+        low.add_request_handler("server/discover", types.RequestParams, discover)
+    wake.attach(server)
+    if when != "before":
+        low.add_request_handler("server/discover", types.RequestParams, discover)
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "claude-code", "version": "2.1.314"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+    h = {"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "server/discover"}
+    async with served(server) as (_, rpc):
+        d = (await rpc("server/discover", {"_meta": meta}, headers=h))["result"]
+    caps = d["capabilities"]
+    assert caps["events"] == {"listChanged": False}
+    assert caps["extensions"] == {"com.vendor/thing": {"v": 1}, EXTENSION_KEY: {"listChanged": False}}
+    assert caps["experimental"] == {"vendor": {"on": True}} and caps["logging"] == {}
+    assert d["instructions"] == "The vendor's own." and d["supportedVersions"] == ["2026-07-28"]
+
+
+@pytest.mark.parametrize("public", [False, True], ids=["tools-only", "one public event"])
+async def test_the_events_capability_with_any_event(public: bool) -> None:
+    """MCP Events is advertised (initialize and server/discover) whenever the
+    server has an event, tools-only ones included: a native client subscribes
+    to those with the subscribe voucher a tool handed it
+    (docs/subscribe-vouchers.md §4.3)."""
+    wake = Wakeshift(
+        app_key("cards"),
+        core="https://core.test",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(WakeCore().handler)),
+    )
+    wake.define_event("game.turn", description="Your turn.", args=TableArgs, payload=TurnMsg)
+    if public:
+        wake.define_event("game.news", description="News.", args=TableArgs, payload=TurnMsg, public=True)
+    server = OfficialMCPServer("cards")
+    wake.attach(server)
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "claude-code", "version": "2.1.314"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+    async with served(server) as (_, rpc):
+        init = (
+            await rpc(
+                "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "c", "version": "1"}}
+            )
+        )["result"]
+        d = (
+            await rpc(
+                "server/discover",
+                {"_meta": meta},
+                headers={"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "server/discover"},
+            )
+        )["result"]
+    for caps in (init["capabilities"], d["capabilities"]):
+        assert "events" in caps, caps
+        assert EXTENSION_KEY in (caps.get("extensions") or {}), caps

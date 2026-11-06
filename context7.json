@@ -3,7 +3,7 @@
   "url": "https://context7.com/wakeshift/wakeshift-python",
   "public_key": "pk_VQQuS8pdgK6PLLe6L8HXe",
   "projectTitle": "Wakeshift SDK for Python",
-  "description": "wakeshift (PyPI): define the events an MCP server offers, serve them as MCP Events, and emit them; Wakeshift wakes every subscribed agent conversation (Claude Code, Codex, Cursor, ChatGPT and others). For the official MCP Python SDK (MCPServer or the low-level Server) and FastMCP 4.",
+  "description": "wakeshift (PyPI): wake the AI agents that use your MCP server (Claude Code, Codex, Cursor, ChatGPT and others) when something they're waiting for happens. Define events, register the tools that subscribe, and emit. For the official MCP Python SDK (MCPServer or the low-level Server) and FastMCP 4.",
   "excludeFolders": [
     "tests"
   ],
@@ -13,11 +13,16 @@
     "SECURITY.md"
   ],
   "rules": [
-    "Read the app key from the WAKESHIFT_KEY environment variable. Never hard-code it or commit it.",
-    "Define every event with wake.define_event before calling wake.attach.",
-    "Register tools that subscribe the calling conversation with @attached.tool(subscribes=[...]), naming the events they subscribe to.",
-    "wakeshift_wait is off by default. Turn it on with wake.attach(server, tools={\"wait\": {\"enabled\": True}}) only where a request may stay open 30 seconds or more.",
-    "For FastMCP, install wakeshift[fastmcp] and use FastMCP 4: FastMCP 2.x and 3.x are built on mcp 1.x and aren't supported.",
+    "Install wakeshift[mcp] for the official MCP Python SDK, or wakeshift[fastmcp] for FastMCP 4. On FastMCP 2.12+ or 3.x, install plain wakeshift and never add [mcp]: attach works there, and native MCP Events need FastMCP 4.",
+    "Create the client with Wakeshift(), which reads WAKESHIFT_KEY and does no I/O; without a key it's a disabled no-op, so no try/except or None checks are needed. Never hard-code the key or commit it.",
+    "Define every event with wake.define_event at startup, before calling wake.attach.",
+    "Register tools that subscribe with @attached.tool(subscribes=[event]) and a parameter annotated ToolCall; call await call.subscribe(event, args, once=True) before starting the work. Leave the tool's own arguments as they are: Wakeshift adds its arguments in tools/list.",
+    "Tools registered elsewhere (a low-level Server's handlers, a generated catalog) go in wake.attach(server, wrap={\"tool_name\": [event]}) and subscribe with wake.current_call().subscribe(...).",
+    "An event with neither personal, authorize nor public can be subscribed only by your own tools: keep that default for IDs your tool mints, use personal=True for per-user things, authorize=f for shared resources, and public=True only for streams anyone may watch. Never decide authorize on subscriber.client or subscriber.native.",
+    "With sign-in, pass identify (it gets a wakeshift.Request; return Identity(user=...) from the verified r.token) and require_user=True. Take a personal event's to= from your own ownership records, never from the subscriber list.",
+    "builtin_tools={\"wait\": True} turns on wakeshift_wait; only where a request may stay open 30 seconds or more.",
+    "Never log call.session, tokens or tool arguments; use wakeshift.redact_secrets on text you log yourself.",
+    "From sync code, use asyncio.run(event.emit(...)) or asgiref's async_to_sync(event.emit); asyncio only.",
     "Write event descriptions as plain statements of what happened, not instructions to the agent."
   ]
 }

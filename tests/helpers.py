@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import secrets
 import zlib
 from collections.abc import AsyncIterator, Callable
@@ -21,6 +22,28 @@ from wakeshift import Wakeshift
 GOLDEN = Path(__file__).resolve().parent / "golden"
 if not GOLDEN.is_dir():
     GOLDEN = Path(__file__).resolve().parents[2] / "typescript" / "test"
+
+
+class Logged(list[str]):
+    """The lines the SDK logs (logging.getLogger("wakeshift")) at level or
+    above from now on, as their messages; records keeps each LogRecord (its
+    code is record.wakeshift_code). conftest.py removes the handler after
+    each test."""
+
+    def __init__(self, level: int = logging.WARNING) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+        logged = self
+
+        class _Handler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                logged.records.append(record)
+                logged.append(record.getMessage())
+
+        logging.getLogger("wakeshift").addHandler(_Handler(level))
+
+    def codes(self) -> list[str]:
+        return [getattr(r, "wakeshift_code", "") for r in self.records]
 
 
 def golden_file(name: str) -> Any:
@@ -92,7 +115,7 @@ class FakeCore:
 def fake_wake(core: FakeCore | None = None, app: str = "sample", **kw: Any) -> tuple[Wakeshift, FakeCore]:
     core = core or FakeCore(default_ok=True)
     http = httpx2.AsyncClient(transport=httpx2.MockTransport(core.handler))
-    return Wakeshift(app_key(app), core="http://core.test", http=http, **kw), core
+    return Wakeshift(app_key(app), core="https://core.test", http_client=http, **kw), core
 
 
 class Rpc:
@@ -159,3 +182,23 @@ async def initialize(
         },
         headers=headers,
     )
+
+
+def input_shape(s: dict[str, Any]) -> dict[str, Any]:
+    """The shape normalization the fixtures' README gives: type, each
+    property's type, description and enum where present (and an array's
+    items type), properties left out when it has none, and required (sorted,
+    left out when empty)."""
+    props = {}
+    for k, p in (s.get("properties") or {}).items():
+        props[k] = {f: p[f] for f in ("type", "description", "enum") if f in p}
+        if isinstance(p.get("items"), dict) and "type" in p["items"]:
+            props[k]["items"] = {"type": p["items"]["type"]}
+    shape: dict[str, Any] = {}
+    if "type" in s:
+        shape["type"] = s["type"]
+    if props:  # left out when it has none
+        shape["properties"] = props
+    if s.get("required"):
+        shape["required"] = sorted(s["required"])
+    return shape

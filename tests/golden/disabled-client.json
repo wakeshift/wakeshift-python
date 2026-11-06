@@ -1,0 +1,920 @@
+{
+  "_about": "The disabled client (design §2.1, §10 decisions 5 and 6, PR 3): construction inputs and what each gives, the option checks that hold on every client, and each method's behavior on a disabled client. Test values are fake: the key is app-keys.json's S key.",
+  "construction": {
+    "_comment": "Each case sets exactly env (every other variable unset: clear WAKESHIFT_KEY and WAKESHIFT_CORE first) and constructs with options, mapped per SDK: key (absent or null: TS key left out or undefined, Python key=None, Go no WithKey; a string: TS { key }, Python Wakeshift(key), Go WithKey(k)); required (TS required: true, Python required=True, Go Required()); core (TS core, Python core=, Go WithCore); max_retries (TS maxRetries, Python max_retries=, Go WithMaxRetries); timeout_seconds (TS timeoutMs = seconds * 1000, Python timeout=); log_level (TS logLevel); unknown (TS: an extra property with that name and value). want: enabled and the resolved core (only checked through the URL the SDK would call; no request is made); logs: exactly these warnings.json codes at construction (none: []); or error: construction throws (Go: New returns) UsageError with that code, its message containing says and none of must_not_contain (the key, fragments of it, its length). Construction makes no network request in any case. no_key logs once per client, at debug (logs here counts every level).",
+    "cases": [
+      {
+        "name": "no key anywhere: disabled, logged once at debug",
+        "env": {},
+        "options": {},
+        "want": {
+          "enabled": false,
+          "core": "https://app.wakeshift.ai",
+          "logs": [
+            {
+              "code": "no_key",
+              "level": "debug"
+            }
+          ]
+        }
+      },
+      {
+        "name": "WAKESHIFT_KEY set: enabled",
+        "env": {
+          "WAKESHIFT_KEY": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV"
+        },
+        "options": {},
+        "want": {
+          "enabled": true,
+          "core": "https://app.wakeshift.ai",
+          "logs": []
+        }
+      },
+      {
+        "name": "WAKESHIFT_KEY empty: missing",
+        "env": {
+          "WAKESHIFT_KEY": ""
+        },
+        "options": {},
+        "want": {
+          "enabled": false,
+          "core": "https://app.wakeshift.ai",
+          "logs": [
+            {
+              "code": "no_key",
+              "level": "debug"
+            }
+          ]
+        }
+      },
+      {
+        "name": "WAKESHIFT_KEY whitespace: missing",
+        "env": {
+          "WAKESHIFT_KEY": "  \n"
+        },
+        "options": {},
+        "want": {
+          "enabled": false,
+          "core": "https://app.wakeshift.ai",
+          "logs": [
+            {
+              "code": "no_key",
+              "level": "debug"
+            }
+          ]
+        }
+      },
+      {
+        "name": "WAKESHIFT_KEY with whitespace around it: trimmed, enabled",
+        "env": {
+          "WAKESHIFT_KEY": "  wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV\n"
+        },
+        "options": {},
+        "want": {
+          "enabled": true,
+          "core": "https://app.wakeshift.ai",
+          "logs": []
+        }
+      },
+      {
+        "name": "WAKESHIFT_KEY malformed: throws (the operator tried to turn Wakeshift on)",
+        "env": {
+          "WAKESHIFT_KEY": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSW"
+        },
+        "options": {},
+        "want": {
+          "error": "config",
+          "says": "WAKESHIFT_KEY",
+          "must_not_contain": [
+            "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSW",
+            "1116qJFW",
+            "z9fWXzSW",
+            "vUeyc2S6",
+            "54",
+            "50"
+          ]
+        }
+      },
+      {
+        "name": "WAKESHIFT_KEY malformed, required",
+        "env": {
+          "WAKESHIFT_KEY": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSW"
+        },
+        "options": {
+          "required": true
+        },
+        "want": {
+          "error": "config",
+          "says": "WAKESHIFT_KEY",
+          "must_not_contain": [
+            "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSW",
+            "1116qJFW",
+            "z9fWXzSW",
+            "vUeyc2S6",
+            "54",
+            "50"
+          ]
+        }
+      },
+      {
+        "name": "required and no key: throws",
+        "env": {},
+        "options": {
+          "required": true
+        },
+        "want": {
+          "error": "config",
+          "says": "WAKESHIFT_KEY"
+        }
+      },
+      {
+        "name": "required and WAKESHIFT_KEY empty: throws",
+        "env": {
+          "WAKESHIFT_KEY": " "
+        },
+        "options": {
+          "required": true
+        },
+        "want": {
+          "error": "config",
+          "says": "WAKESHIFT_KEY"
+        }
+      },
+      {
+        "name": "required and a key: enabled",
+        "env": {
+          "WAKESHIFT_KEY": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV"
+        },
+        "options": {
+          "required": true
+        },
+        "want": {
+          "enabled": true,
+          "core": "https://app.wakeshift.ai",
+          "logs": []
+        }
+      },
+      {
+        "name": "an explicit key: enabled",
+        "env": {},
+        "options": {
+          "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV"
+        },
+        "want": {
+          "enabled": true,
+          "core": "https://app.wakeshift.ai",
+          "logs": []
+        }
+      },
+      {
+        "name": "an explicit key wins over WAKESHIFT_KEY, which isn't read",
+        "env": {
+          "WAKESHIFT_KEY": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSW"
+        },
+        "options": {
+          "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV"
+        },
+        "want": {
+          "enabled": true,
+          "core": "https://app.wakeshift.ai",
+          "logs": []
+        }
+      },
+      {
+        "name": "key left out (TS undefined, Python None, Go no WithKey): WAKESHIFT_KEY",
+        "env": {
+          "WAKESHIFT_KEY": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV"
+        },
+        "options": {
+          "key": null
+        },
+        "want": {
+          "enabled": true,
+          "core": "https://app.wakeshift.ai",
+          "logs": []
+        }
+      },
+      {
+        "name": "an explicit empty key means no key, never the environment",
+        "env": {
+          "WAKESHIFT_KEY": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV"
+        },
+        "options": {
+          "key": ""
+        },
+        "want": {
+          "enabled": false,
+          "core": "https://app.wakeshift.ai",
+          "logs": [
+            {
+              "code": "no_key",
+              "level": "debug"
+            }
+          ]
+        },
+        "note": "TS { key: \"\" }, Python Wakeshift(\"\"), Go WithKey(\"\"): the same in all three"
+      },
+      {
+        "name": "an explicit whitespace key means no key",
+        "env": {
+          "WAKESHIFT_KEY": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV"
+        },
+        "options": {
+          "key": "   "
+        },
+        "want": {
+          "enabled": false,
+          "core": "https://app.wakeshift.ai",
+          "logs": [
+            {
+              "code": "no_key",
+              "level": "debug"
+            }
+          ]
+        }
+      },
+      {
+        "name": "an explicit empty key, required: throws",
+        "env": {
+          "WAKESHIFT_KEY": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV"
+        },
+        "options": {
+          "key": "",
+          "required": true
+        },
+        "want": {
+          "error": "config",
+          "says": "key"
+        }
+      },
+      {
+        "name": "an explicit malformed key: throws",
+        "env": {},
+        "options": {
+          "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSW"
+        },
+        "want": {
+          "error": "config",
+          "says": "key",
+          "must_not_contain": [
+            "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSW",
+            "1116qJFW",
+            "z9fWXzSW",
+            "vUeyc2S6",
+            "54",
+            "50"
+          ]
+        }
+      },
+      {
+        "name": "a session key passed as the key: throws, without echoing it",
+        "env": {},
+        "options": {
+          "key": "wsc_fakefakefakefakefakefakefa"
+        },
+        "want": {
+          "error": "config",
+          "says": "key",
+          "must_not_contain": [
+            "wsc_fakefakefakefakefakefakefa",
+            "fakefake",
+            "kefakefa",
+            "efakefak",
+            "30",
+            "26"
+          ]
+        }
+      },
+      {
+        "name": "WAKESHIFT_CORE sets the core",
+        "env": {
+          "WAKESHIFT_KEY": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+          "WAKESHIFT_CORE": "https://core.example"
+        },
+        "options": {},
+        "want": {
+          "enabled": true,
+          "core": "https://core.example",
+          "logs": []
+        }
+      },
+      {
+        "name": "WAKESHIFT_CORE empty: the default",
+        "env": {
+          "WAKESHIFT_KEY": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+          "WAKESHIFT_CORE": ""
+        },
+        "options": {},
+        "want": {
+          "enabled": true,
+          "core": "https://app.wakeshift.ai",
+          "logs": []
+        }
+      },
+      {
+        "name": "the core option wins over WAKESHIFT_CORE",
+        "env": {
+          "WAKESHIFT_KEY": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+          "WAKESHIFT_CORE": "https://env.example"
+        },
+        "options": {
+          "core": "https://opt.example"
+        },
+        "want": {
+          "enabled": true,
+          "core": "https://opt.example",
+          "logs": []
+        }
+      },
+      {
+        "name": "http on localhost is allowed",
+        "env": {},
+        "options": {
+          "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+          "core": "http://localhost:8370"
+        },
+        "want": {
+          "enabled": true,
+          "core": "http://localhost:8370",
+          "logs": []
+        }
+      },
+      {
+        "name": "http on 127.0.0.1 is allowed",
+        "env": {},
+        "options": {
+          "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+          "core": "http://127.0.0.1:8370"
+        },
+        "want": {
+          "enabled": true,
+          "core": "http://127.0.0.1:8370",
+          "logs": []
+        }
+      },
+      {
+        "name": "http on ::1 is allowed",
+        "env": {},
+        "options": {
+          "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+          "core": "http://[::1]:8370"
+        },
+        "want": {
+          "enabled": true,
+          "core": "http://[::1]:8370",
+          "logs": []
+        }
+      },
+      {
+        "name": "http elsewhere throws",
+        "env": {},
+        "options": {
+          "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+          "core": "http://core.example"
+        },
+        "want": {
+          "error": "config",
+          "says": "https"
+        }
+      },
+      {
+        "name": "http on a name that only starts with localhost throws",
+        "env": {},
+        "options": {
+          "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+          "core": "http://localhost.example"
+        },
+        "want": {
+          "error": "config",
+          "says": "https"
+        }
+      },
+      {
+        "name": "http on a subdomain of localhost throws (only the three loopback hosts)",
+        "env": {},
+        "options": {
+          "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+          "core": "http://app.localhost"
+        },
+        "want": {
+          "error": "config",
+          "says": "https"
+        }
+      },
+      {
+        "name": "http in WAKESHIFT_CORE throws",
+        "env": {
+          "WAKESHIFT_KEY": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+          "WAKESHIFT_CORE": "http://core.example"
+        },
+        "options": {},
+        "want": {
+          "error": "config",
+          "says": "https"
+        }
+      },
+      {
+        "name": "the core is checked on a disabled client too",
+        "env": {},
+        "options": {
+          "core": "http://core.example"
+        },
+        "want": {
+          "error": "config",
+          "says": "https"
+        }
+      },
+      {
+        "name": "a core that isn't http or https throws",
+        "env": {},
+        "options": {
+          "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+          "core": "ftp://core.example"
+        },
+        "want": {
+          "error": "config",
+          "says": "https"
+        }
+      },
+      {
+        "name": "a core that isn't a URL throws",
+        "env": {},
+        "options": {
+          "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+          "core": "core.example"
+        },
+        "want": {
+          "error": "config",
+          "says": "https"
+        }
+      },
+      {
+        "name": "an unknown option throws",
+        "env": {},
+        "options": {
+          "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+          "unknown": {
+            "name": "requried",
+            "value": true
+          }
+        },
+        "want": {
+          "error": "config",
+          "says": "requried"
+        },
+        "skip": {
+          "python": "an unknown keyword argument is Python's own TypeError",
+          "go": "options are functions: an unknown one doesn't compile"
+        }
+      },
+      {
+        "name": "max retries below zero throws",
+        "env": {},
+        "options": {
+          "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+          "max_retries": -1
+        },
+        "want": {
+          "error": "config",
+          "says": "max"
+        }
+      },
+      {
+        "name": "a timeout of zero or less throws",
+        "env": {},
+        "options": {
+          "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+          "timeout_seconds": 0
+        },
+        "want": {
+          "error": "config",
+          "says": "timeout"
+        },
+        "skip": {
+          "go": "no timeout option: WithHTTPClient sets it"
+        }
+      },
+      {
+        "name": "an unknown log level throws",
+        "env": {},
+        "options": {
+          "key": "wst_1116qJFWMMHFy3xDdLmvUeyc2S6FrWRhJP51HsvDYdz9fWXzSV",
+          "log_level": "verbose"
+        },
+        "want": {
+          "error": "config",
+          "says": "logLevel"
+        },
+        "skip": {
+          "python": "logging.getLogger(\"wakeshift\") carries the level",
+          "go": "WithLogger carries the level"
+        }
+      }
+    ]
+  },
+  "option_checks": {
+    "_comment": "Checked at defineEvent, attach and registration, on enabled and disabled clients alike: UsageError (error is its code), the message containing says. go: \"panics\" means Go panics at registration instead of returning (design §2.3 'Go: panics and errors').",
+    "cases": [
+      {
+        "op": "define_event_public_not_boolean",
+        "name": "defineEvent: public: \"yes\"",
+        "error": "config",
+        "says": "public",
+        "skip": {
+          "go": "Public is a bool"
+        }
+      },
+      {
+        "op": "define_event_public_and_personal",
+        "name": "defineEvent: public with personal",
+        "error": "config",
+        "says": "public"
+      },
+      {
+        "op": "define_event_public_and_authorize",
+        "name": "defineEvent: public with authorize",
+        "error": "config",
+        "says": "public"
+      },
+      {
+        "op": "define_event_unknown_option",
+        "name": "defineEvent: an unknown option (personnal: true)",
+        "error": "config",
+        "says": "personnal",
+        "skip": {
+          "python": "Python's own TypeError",
+          "go": "EventDef is a struct: doesn't compile"
+        }
+      },
+      {
+        "op": "attach_unknown_builtin",
+        "name": "attach: builtinTools { subcribe: false }",
+        "error": "config",
+        "says": "subcribe",
+        "skip": {
+          "go": "BuiltinTools is a struct: doesn't compile"
+        }
+      },
+      {
+        "op": "attach_builtin_not_boolean",
+        "name": "attach: builtinTools { wait: \"yes\" }",
+        "error": "config",
+        "says": "wait",
+        "skip": {
+          "go": "BuiltinTools is a struct"
+        }
+      },
+      {
+        "op": "attach_unknown_option",
+        "name": "attach: an unknown option (requireUsr: true)",
+        "error": "config",
+        "says": "requireUsr",
+        "skip": {
+          "python": "Python's own TypeError",
+          "go": "AttachOptions is a struct: doesn't compile"
+        }
+      },
+      {
+        "op": "attach_wrap_not_events",
+        "name": "attach: wrap { start_crawl: [\"crawl.finished\"] } (a string, not an event)",
+        "error": "config",
+        "says": "wrap",
+        "skip": {
+          "go": "[]ToolOption: doesn't compile"
+        }
+      },
+      {
+        "op": "attach_twice",
+        "name": "attach: a second attach on the same server",
+        "error": "config",
+        "says": "attach",
+        "go": "panics"
+      },
+      {
+        "op": "attach_inner_server",
+        "name": "attach: an McpServer's inner .server",
+        "error": "config",
+        "says": "McpServer",
+        "skip": {
+          "python": "TypeScript only",
+          "go": "TypeScript only"
+        }
+      },
+      {
+        "op": "register_builtin_name",
+        "name": "registerTool / @tool / AddTool named subscribe_events",
+        "error": "config",
+        "says": "subscribe_events",
+        "go": "panics"
+      },
+      {
+        "op": "register_schema_names_wake_arg",
+        "name": "registerTool / @tool / AddTool whose input schema names session_key",
+        "error": "config",
+        "says": "session_key",
+        "go": "panics"
+      },
+      {
+        "op": "register_output_names_wakeshift",
+        "name": "registerTool / @tool / AddTool whose output schema names wakeshift",
+        "error": "config",
+        "says": "wakeshift",
+        "go": "panics"
+      },
+      {
+        "op": "register_event_from_another_client",
+        "name": "registerTool / @tool / AddTool subscribing to another client's event",
+        "error": "config",
+        "says": "another",
+        "go": "panics"
+      }
+    ]
+  },
+  "methods": {
+    "_comment": "Each method on a disabled client (constructed with no key). The rule: hot paths (emit, subscribe, unsubscribe, currentCall) are no-ops that still run their local checks; anything that must return Wakeshift's data throws UsageError disabled. No case makes a network request. want: works (returns normally), adds (what it adds to the server), value (the property's value; null: TS undefined, Python None, Go zero), resolves (the awaited result, compared field by field; Go: the struct with the error nil), error (throws UsageError with that code; Go returns it), called (whether the vendor's callback runs), returns (Go's Handler). A per-language want (typescript/python/go keys) overrides.",
+    "cases": [
+      {
+        "op": "enabled",
+        "name": "wake.enabled / wake.Enabled()",
+        "want": {
+          "value": false
+        }
+      },
+      {
+        "op": "define_event",
+        "name": "defineEvent",
+        "want": {
+          "works": true
+        },
+        "note": "fully typed; schemas and options checked (option_checks hold on a disabled client)"
+      },
+      {
+        "op": "attach",
+        "name": "attach",
+        "want": {
+          "works": true,
+          "adds": "nothing"
+        },
+        "note": "no built-in tools, no wake arguments, no MCP Events capability or events/* methods, nothing stripped; tools/list is subscribing-tools-list.json's disabled scenario. A second attach on the same server is still refused."
+      },
+      {
+        "op": "handler",
+        "name": "Go: attached.Handler(next) and wake.Handler(next, opts)",
+        "want": {
+          "returns": "next"
+        },
+        "skip": {
+          "typescript": "Go only",
+          "python": "Go only"
+        }
+      },
+      {
+        "op": "register_tool",
+        "name": "registerTool / @tool / AddTool",
+        "want": {
+          "works": true,
+          "adds": "nothing"
+        },
+        "note": "the tool as the vendor wrote it; the handler still gets a call (a disabled one)"
+      },
+      {
+        "op": "identify",
+        "name": "identify",
+        "want": {
+          "called": false
+        },
+        "note": "never runs on a disabled client, for any request; call.user is unset"
+      },
+      {
+        "op": "current_call",
+        "name": "wake.currentCall() outside any tool call",
+        "want": {
+          "works": true,
+          "call": "disabled"
+        },
+        "note": "never throws no_call on a disabled client"
+      },
+      {
+        "op": "current_call_in_tool",
+        "name": "wake.currentCall() inside a tool",
+        "want": {
+          "works": true,
+          "call": "disabled"
+        }
+      },
+      {
+        "op": "call_user",
+        "name": "call.user",
+        "want": {
+          "value": null
+        }
+      },
+      {
+        "op": "call_subscribe",
+        "name": "call.subscribe(event, valid args)",
+        "want": {
+          "resolves": {
+            "state": "disabled"
+          }
+        }
+      },
+      {
+        "op": "call_subscribe_bad_arguments",
+        "name": "call.subscribe with arguments that don't match",
+        "want": {
+          "error": "bad_arguments"
+        },
+        "note": "local checks still run: arguments, the declared events, replay bounds",
+        "skip": {
+          "go": "Go's types make the mistake impossible"
+        }
+      },
+      {
+        "op": "call_subscribe_undeclared",
+        "name": "call.subscribe to an event the tool didn't declare",
+        "want": {
+          "error": "undeclared_subscribe"
+        }
+      },
+      {
+        "op": "call_unsubscribe",
+        "name": "call.unsubscribe(event, args)",
+        "want": {
+          "resolves": {
+            "ended": false
+          }
+        },
+        "note": "nothing was subscribed on a disabled client, so nothing ends (TS and Python false; Go false, nil)"
+      },
+      {
+        "op": "call_resolve_session",
+        "name": "call.resolveSession()",
+        "want": {
+          "error": "disabled"
+        }
+      },
+      {
+        "op": "emit",
+        "name": "event.emit(valid args, valid payload)",
+        "want": {
+          "resolves": {
+            "matched": 0,
+            "duplicate": false,
+            "unmatched": [],
+            "ended": [],
+            "textTrimmed": false
+          }
+        },
+        "note": "checks locally, sends nothing"
+      },
+      {
+        "op": "emit_with_id",
+        "name": "event.emit with id",
+        "want": {
+          "resolves": {
+            "matched": 0,
+            "duplicate": false,
+            "unmatched": [],
+            "ended": [],
+            "textTrimmed": false
+          }
+        }
+      },
+      {
+        "op": "emit_bad_payload",
+        "name": "event.emit with a payload that doesn't match",
+        "want": {
+          "error": "bad_arguments"
+        },
+        "skip": {
+          "go": "Go's types make the mistake impossible"
+        }
+      },
+      {
+        "op": "emit_personal_without_to",
+        "name": "event.emit of a personal event without to",
+        "want": {
+          "error": "bad_arguments"
+        }
+      },
+      {
+        "op": "create_publish_url",
+        "name": "event.createPublishUrl",
+        "want": {
+          "error": "disabled"
+        }
+      },
+      {
+        "op": "revoke_publish_url",
+        "name": "wake.revokePublishUrl",
+        "want": {
+          "error": "disabled"
+        }
+      },
+      {
+        "op": "status",
+        "name": "event.status",
+        "want": {
+          "error": "disabled"
+        }
+      },
+      {
+        "op": "status_of",
+        "name": "event.statusOf",
+        "want": {
+          "error": "disabled"
+        }
+      },
+      {
+        "op": "end",
+        "name": "event.end",
+        "want": {
+          "error": "disabled"
+        },
+        "skip": {
+          "go": "Go has no End (DefinedEvent.End is deleted)"
+        }
+      },
+      {
+        "op": "forget_user",
+        "name": "wake.forgetUser",
+        "want": {
+          "error": "disabled"
+        }
+      },
+      {
+        "op": "publish_manifest",
+        "name": "wake.publishManifest",
+        "want": {
+          "error": "disabled"
+        }
+      },
+      {
+        "op": "event_subscriptions",
+        "name": "Go: wake.EventSubscriptions",
+        "want": {
+          "error": "disabled"
+        },
+        "skip": {
+          "typescript": "Go only",
+          "python": "Go only"
+        }
+      },
+      {
+        "op": "app_id",
+        "name": "the app ID",
+        "want": {
+          "typescript": {
+            "value": null
+          },
+          "python": {
+            "error": "disabled"
+          },
+          "go": {
+            "error": "disabled"
+          }
+        },
+        "note": "TS wake.appId is undefined; Python app_id raises; Go AppID(ctx) returns the error"
+      },
+      {
+        "op": "key_id",
+        "name": "Go: wake.KeyID()",
+        "want": {
+          "value": ""
+        },
+        "skip": {
+          "typescript": "Go only",
+          "python": "Go only"
+        }
+      },
+      {
+        "op": "act_as",
+        "name": "wake.actAs (advanced)",
+        "want": {
+          "error": "disabled"
+        }
+      },
+      {
+        "op": "workspace",
+        "name": "wake.workspace (advanced)",
+        "want": {
+          "error": "disabled"
+        }
+      },
+      {
+        "op": "add_agent",
+        "name": "wake.addAgent (advanced)",
+        "want": {
+          "error": "disabled"
+        }
+      },
+      {
+        "op": "check_agent",
+        "name": "wake.checkAgent (advanced)",
+        "want": {
+          "error": "disabled"
+        }
+      }
+    ]
+  }
+}

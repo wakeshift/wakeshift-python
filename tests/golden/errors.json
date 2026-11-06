@@ -1,5 +1,5 @@
 {
-  "_about": "How every SDK (pkg/appkit, sdk/typescript, sdk/python) reads Wakeshift's answers: which refusals it retries, the error each answer becomes, the JSON-RPC error each becomes for an MCP Events client, and the error for each mistake the SDK catches before asking Wakeshift (client_checks). {core} stands for the core's address.",
+  "_about": "How every SDK (pkg/wakeshift, sdk/typescript, sdk/python) reads Wakeshift's answers: which refusals it retries, the error each answer becomes, the JSON-RPC error each becomes for an MCP Events client, and the error for each mistake the SDK catches before asking Wakeshift (client_checks). {core} stands for the core's address.",
   "retry": {
     "pauses_ms": [
       250,
@@ -710,6 +710,395 @@
         "skip": {
           "go": "Go's types make the mistake impossible: the arguments and payload are structs"
         }
+      }
+    ]
+  },
+  "codes": [
+    {
+      "code": "bad_request",
+      "class": {
+        "before_sending": "UsageError",
+        "from_core": "APIError"
+      },
+      "fix": "Check the call against the API reference.",
+      "anchor": "https://wakeshift.ai/docs/errors#bad_request",
+      "status": 400,
+      "note": "before_sending: statusOf's own checks (client_checks)"
+    },
+    {
+      "code": "bad_arguments",
+      "class": {
+        "before_sending": "UsageError",
+        "from_core": "APIError"
+      },
+      "fix": "Pass arguments and a payload that match the event's schemas.",
+      "anchor": "https://wakeshift.ai/docs/errors#bad_arguments",
+      "status": 400,
+      "note": "UsageError before sending (issues: [{message, path}]), APIError when the core refuses"
+    },
+    {
+      "code": "bad_payload",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIError"
+      },
+      "fix": "Send a payload that matches the event's payload schema.",
+      "anchor": "https://wakeshift.ai/docs/errors#bad_payload",
+      "status": 400
+    },
+    {
+      "code": "unknown_event",
+      "class": {
+        "before_sending": "UsageError",
+        "from_core": "APIError"
+      },
+      "fix": "Define the event in this app with defineEvent; the SDK sends the manifest itself.",
+      "fix_python": "Define the event in this app with define_event; the SDK sends the manifest itself.",
+      "anchor": "https://wakeshift.ai/docs/errors#unknown_event",
+      "status": 404,
+      "note": "before_sending: another app's event (client_checks)"
+    },
+    {
+      "code": "unknown_session",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIError"
+      },
+      "fix": "Use the session_key from this conversation's own results.",
+      "anchor": "https://wakeshift.ai/docs/errors#unknown_session",
+      "status": 404
+    },
+    {
+      "code": "unknown_conversation",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIError"
+      },
+      "fix": "Use the session_key from this conversation's own results.",
+      "anchor": "https://wakeshift.ai/docs/errors#unknown_conversation",
+      "status": 400
+    },
+    {
+      "code": "other_client",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIError"
+      },
+      "fix": "Only the client that made a subscription can change it.",
+      "anchor": "https://wakeshift.ai/docs/errors#other_client",
+      "status": 403
+    },
+    {
+      "code": "private_topic",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIError"
+      },
+      "fix": "Subscribe only to topics this app and caller may read.",
+      "anchor": "https://wakeshift.ai/docs/errors#private_topic",
+      "status": 403
+    },
+    {
+      "code": "subscription_limit",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIError"
+      },
+      "fix": "End subscriptions that are no longer needed.",
+      "anchor": "https://wakeshift.ai/docs/errors#subscription_limit",
+      "status": 403
+    },
+    {
+      "code": "subscription_stopped",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIError"
+      },
+      "fix": "The person stopped this subscription; subscribe again only if they ask.",
+      "anchor": "https://wakeshift.ai/docs/errors#subscription_stopped",
+      "status": 403
+    },
+    {
+      "code": "id_reused",
+      "class": {
+        "before_sending": null,
+        "from_core": "IdReusedError"
+      },
+      "fix": "Use a new id for a different emit; reuse an id only to retry the same emit.",
+      "anchor": "https://wakeshift.ai/docs/errors#id_reused",
+      "status": 409,
+      "note": "IdReusedError is an APIError (Go: *APIError, IsCode(err, CodeIDReused))"
+    },
+    {
+      "code": "rate_limited",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIError"
+      },
+      "fix": "Slow down, and retry after the Retry-After interval.",
+      "anchor": "https://wakeshift.ai/docs/errors#rate_limited",
+      "status": 429
+    },
+    {
+      "code": "too_large",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIError"
+      },
+      "fix": "Keep text under 1000 bytes and the payload under 64 KB.",
+      "anchor": "https://wakeshift.ai/docs/errors#too_large",
+      "status": 413
+    },
+    {
+      "code": "unauthenticated",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIError"
+      },
+      "fix": "Check WAKESHIFT_KEY: the key was revoked, or belongs to another console.",
+      "anchor": "https://wakeshift.ai/docs/errors#unauthenticated",
+      "status": 401,
+      "note": "401 or 403 on the app's own key; also logged as key_refused (warnings.json)"
+    },
+    {
+      "code": "no_grant",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIError"
+      },
+      "fix": "Ask the user to grant this app access first.",
+      "anchor": "https://wakeshift.ai/docs/errors#no_grant",
+      "status": 403
+    },
+    {
+      "code": "unknown_workspace",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIError"
+      },
+      "fix": "Use a workspace ID from wake.workspace.",
+      "anchor": "https://wakeshift.ai/docs/errors#unknown_workspace",
+      "status": 404
+    },
+    {
+      "code": "unknown_publish_url",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIError"
+      },
+      "fix": "Create a new publish URL: this one was revoked or never existed.",
+      "anchor": "https://wakeshift.ai/docs/errors#unknown_publish_url",
+      "status": 404
+    },
+    {
+      "code": "bad_signing_secret",
+      "class": {
+        "before_sending": "UsageError",
+        "from_core": "APIError"
+      },
+      "fix": "Pass a Standard Webhooks secret: whsec_ and base64.",
+      "anchor": "https://wakeshift.ai/docs/errors#bad_signing_secret",
+      "status": 400,
+      "note": "before_sending: an empty or malformed signingSecret"
+    },
+    {
+      "code": "unsupported",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIError"
+      },
+      "fix": "Upgrade the SDK, or leave out the option this Wakeshift doesn't support.",
+      "anchor": "https://wakeshift.ai/docs/errors#unsupported"
+    },
+    {
+      "code": "internal",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIError"
+      },
+      "fix": "Retry later; if it persists, contact Wakeshift with the request ID.",
+      "anchor": "https://wakeshift.ai/docs/errors#internal",
+      "status": 500
+    },
+    {
+      "code": "bad_response",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIError"
+      },
+      "fix": "Check that WAKESHIFT_CORE, or the core option, is the address of the console your key came from.",
+      "anchor": "https://wakeshift.ai/docs/errors#bad_response",
+      "note": "status is whatever the answer had (bad_response above)"
+    },
+    {
+      "code": "callback_failed",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIError"
+      },
+      "fix": "Make the webhook URL answer Wakeshift's verification with a 2xx.",
+      "anchor": "https://wakeshift.ai/docs/errors#callback_failed",
+      "status": 422
+    },
+    {
+      "code": "unreachable",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIConnectionError"
+      },
+      "fix": "Check that WAKESHIFT_CORE, or the core option, is the address of the console your key came from.",
+      "anchor": "https://wakeshift.ai/docs/errors#unreachable",
+      "note": "status: null (TS), None (Python), 0 (Go); cause / Unwrap is the transport error"
+    },
+    {
+      "code": "timeout",
+      "class": {
+        "before_sending": null,
+        "from_core": "APIConnectionError"
+      },
+      "fix": "The outcome is unknown; an emit sent again with the same id emits once.",
+      "anchor": "https://wakeshift.ai/docs/errors#timeout",
+      "note": "the SDK's own timeout (timeoutMs, timeout=, the HTTP client's); a caller's abort or ctx cancellation is never this: TS rethrows signal.reason, Python raises CancelledError, Go returns an error errors.Is matches to context.Canceled or DeadlineExceeded"
+    },
+    {
+      "code": "config",
+      "class": {
+        "before_sending": "UsageError",
+        "from_core": null
+      },
+      "fix": "Fix the option or value the message names.",
+      "anchor": "https://wakeshift.ai/docs/errors#config",
+      "note": "construction, defineEvent and attach (disabled-client.json construction and option_checks)"
+    },
+    {
+      "code": "disabled",
+      "class": {
+        "before_sending": "UsageError",
+        "from_core": null
+      },
+      "fix": "Set WAKESHIFT_KEY, or check wake.enabled before this call.",
+      "anchor": "https://wakeshift.ai/docs/errors#disabled",
+      "note": "disabled-client.json methods"
+    },
+    {
+      "code": "undeclared_subscribe",
+      "class": {
+        "before_sending": "UsageError",
+        "from_core": null
+      },
+      "fix": "Add the event to the tool's subscribes.",
+      "anchor": "https://wakeshift.ai/docs/errors#undeclared_subscribe"
+    },
+    {
+      "code": "no_call",
+      "class": {
+        "before_sending": "UsageError",
+        "from_core": null
+      },
+      "fix": "Call it inside a tool call that subscribes, or pass the request's context.",
+      "anchor": "https://wakeshift.ai/docs/errors#no_call",
+      "note": "never on a disabled client (disabled-client.json)"
+    },
+    {
+      "code": "call_ended",
+      "class": {
+        "before_sending": "UsageError",
+        "from_core": null
+      },
+      "fix": "Await subscribe, unsubscribe and resolveSession before the tool returns.",
+      "fix_python": "Await subscribe, unsubscribe and resolve_session before the tool returns.",
+      "anchor": "https://wakeshift.ai/docs/errors#call_ended"
+    },
+    {
+      "code": "identify_failed",
+      "class": {
+        "before_sending": "UsageError",
+        "from_core": null
+      },
+      "fix": "Check identify: it threw, failed or took over 10 seconds.",
+      "fix_python": "Check identify: it raised, failed or took over 10 seconds.",
+      "anchor": "https://wakeshift.ai/docs/errors#identify_failed",
+      "note": "thrown by call.subscribe when identify threw, failed or timed out; built-ins answer isError and native methods forbidden instead"
+    },
+    {
+      "code": "user_required",
+      "class": {
+        "before_sending": "UsageError",
+        "from_core": null
+      },
+      "fix": "Nothing to change if anonymous callers are meant to be refused; otherwise sign the caller in.",
+      "anchor": "https://wakeshift.ai/docs/errors#user_required",
+      "note": "thrown by call.subscribe when requireUser is on and identify gave no user (identify_failed before this release; the log line was already user_required); built-ins answer isError and native methods forbidden instead"
+    }
+  ],
+  "_codes_comment": "Next release (design §2.10, PR 2). codes is the one list of codes shared by the three SDKs and the HTTP API, in this order: the API's, then the SDK's own (unreachable onward). Per code: the class an SDK raises before sending (null: never) and for the core's answer (null: never); the HTTP status the core usually answers with (informative, not checked); the fix, one clause; the docs anchor. Class names are the same in the three SDKs: WakeshiftError is the base (TS, Python; Go has none); APIError; APIConnectionError, an APIError with no status; IdReusedError, an APIError; UsageError (Python: also a ValueError). Go has *APIError (Status 0 for APIConnectionError's codes, IsCode for id_reused) and *UsageError. TypeScript's isWakeshiftError(err, code) narrows to the classes listed for that code; its code parameter accepts exactly these codes. TypeScript KnownCode, Python ErrorCode and Go's Code constants (CodeBadRequest, …, CodeIDReused, …) list exactly these codes. Loaders: check the SDK's list equals this one, and that every class an SDK raises for a code is listed here. A code's fix_python, where given, is the fix as the Python SDK says it, with Python's names (define_event, resolve_session, raise); the others say fix.",
+  "messages": {
+    "_comment": "Next release (design §2.10 'Messages say what failed, the fix in one clause, and a docs anchor'). Every message the SDK writes itself (every UsageError, unreachable and timeout) has the format below and contains the code's fix from codes verbatim. Messages from the core's answer keep responses[].want.text unchanged in this release. No message contains the key or any fragment or length of it, a session key, a caller's token or header, a signing secret, a publish URL token, a payload, tool arguments, or the vendor's own error message (for identify and authorize, only the error's type).",
+    "format": "wakeshift: {what}. {fix} {anchor}",
+    "checks": [
+      "starts with \"wakeshift: \"",
+      "contains the code's fix verbatim",
+      "ends with \" \" and the code's anchor"
+    ],
+    "unreachable": "unreachable.message_prefix, the transport error, unreachable.message_suffix, then \". \" and the anchor: can't reach Wakeshift at {core} (connection refused). Check that WAKESHIFT_CORE, or the core option, is the address of the console your key came from. https://wakeshift.ai/docs/errors#unreachable",
+    "timeout": "wakeshift: Wakeshift at {core} didn't answer in time. The outcome is unknown; an emit sent again with the same id emits once. https://wakeshift.ai/docs/errors#timeout",
+    "example": "wakeshift: start_crawl subscribed to crawl.finished, which isn't in its subscribes. Add the event to the tool's subscribes. https://wakeshift.ai/docs/errors#undeclared_subscribe"
+  },
+  "client_checks_next": {
+    "_comment": "Next release (PR 2, PR 5, PR 7). Every client_checks case above raises UsageError with the same code and no status (status applies to today's SDKs only), its message containing says and following messages. The cases below are new; same events and rules as client_checks (game.turn personal, table.news shared), run inside a tool that subscribes declaring table.news only, unless the case says otherwise. subscribe-options.json replay_bounds and disabled-client.json add more.",
+    "cases": [
+      {
+        "op": "subscribe_undeclared",
+        "name": "subscribe: an event the tool didn't declare (game.turn)",
+        "code": "undeclared_subscribe",
+        "says": "isn't in its subscribes",
+        "note": "TypeScript registerTool also refuses it at compile time; the run-time check holds on every path, wrap included"
+      },
+      {
+        "op": "current_call_outside",
+        "name": "currentCall outside any tool call, enabled client",
+        "code": "no_call",
+        "says": "outside a tool call",
+        "skip": {
+          "go": "ToolCallFrom(ctx) returns nil; subscribe_nil_call covers Go"
+        }
+      },
+      {
+        "op": "subscribe_nil_call",
+        "name": "Go: Subscribe with a nil call (ToolCallFrom outside a call)",
+        "code": "no_call",
+        "says": "outside a tool call",
+        "skip": {
+          "typescript": "Go only",
+          "python": "Go only"
+        }
+      },
+      {
+        "op": "subscribe_after_return",
+        "name": "subscribe on a call whose handler already returned",
+        "code": "call_ended",
+        "says": "already returned"
+      },
+      {
+        "op": "identify_throws",
+        "name": "subscribe when identify throws (Go: returns an error)",
+        "code": "identify_failed",
+        "says": "identify",
+        "must_not_contain": "boom-canary",
+        "note": "identify throws an error whose message is boom-canary; the vendor's tool code still runs"
+      },
+      {
+        "op": "identify_times_out",
+        "name": "subscribe when identify takes over 10 seconds",
+        "code": "identify_failed",
+        "says": "identify",
+        "note": "use a fake clock or the SDK's test hook; don't sleep 10 seconds"
+      },
+      {
+        "op": "require_user_anonymous",
+        "name": "subscribe with requireUser and an identify that returns no user",
+        "code": "user_required",
+        "says": "identify gave no user"
       }
     ]
   }

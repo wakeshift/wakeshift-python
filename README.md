@@ -1,217 +1,90 @@
 # wakeshift
 
-Let agents subscribe to things in your app. You define the events your app offers and emit them when they happen; Wakeshift wakes every agent subscribed to them. Clients that speak MCP Events, such as ChatGPT, subscribe natively; every other agent (Claude Code, Codex, Cursor and the rest) subscribes with a tool the SDK adds, and Wakeshift wakes it its own way. You write no subscribe tool and handle no harnesses.
-
-Python 3.11 or later, on the official MCP Python SDK (`mcp` 2.3 or later: `MCPServer` or the [low-level `Server`](#low-level-server)) or [FastMCP](#fastmcp) 4. The same API as the Node and Go SDKs.
+Wakeshift lets an MCP server wake the AI agents that use it. It wakes the agent that started the work when it finishes: your MCP server's tools subscribe the calling conversation to your app's events, and Wakeshift wakes it (Claude Code, Codex, ChatGPT and the rest) the best way its client allows.
 
 ## Install
 
 ```sh
-pip install wakeshift
+pip install 'wakeshift[mcp]'        # the official MCP Python SDK (MCPServer, the low-level Server)
+pip install 'wakeshift[fastmcp]'    # FastMCP 4
 ```
 
-Or `uv add wakeshift`.
+On FastMCP 2.12+ or 3.x, install plain `wakeshift`, never `[mcp]`: `attach` works on them, and native MCP Events need FastMCP 4.
 
-## Quickstart: events
+## Quickstart
 
-Register an app in the Wakeshift console (Build) and put its key in `WAKESHIFT_KEY`. The SDK talks to `https://app.wakeshift.ai` unless `WAKESHIFT_CORE` names another address.
+A crawler that wakes the conversation that started a crawl. Put your app's key from the Wakeshift console in `WAKESHIFT_KEY`; without one, Wakeshift is off and the server runs as before.
 
 ```python
-import os
+from uuid import uuid4
 
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel
 
-from wakeshift import Identity, Recipient, ToolCall, Wakeshift
+from wakeshift import ToolCall, Wakeshift
 
-wake = Wakeshift(os.environ["WAKESHIFT_KEY"])
-
-
-class Channel(BaseModel):
-    channel: str
+wake = Wakeshift()  # reads WAKESHIFT_KEY; without one, Wakeshift is off
 
 
-class Message(BaseModel):
-    sender: str
-    text: str
+class Job(BaseModel):
+    job: str
 
 
-message = wake.define_event(
-    "chat.message",
-    description="A new message in a channel",
-    args=Channel,
-    payload=Message,
-    text=lambda m, a: f"{m.sender} in #{a.channel}: {m.text}",
-)
+class Crawl(BaseModel):
+    status: str
+    pages: int
 
 
-class Table(BaseModel):
-    table: str
+crawl_finished = wake.define_event("crawl.finished", description="A crawl finished", args=Job, payload=Crawl)
+
+server = MCPServer("crawler")
+attached = wake.attach(server)
 
 
-class Turn(BaseModel):
-    hole: list[str]
-    to_call: int
+def start(url: str, job: str) -> None:
+    """Starts the crawl (your own code)."""
 
 
-# A personal event: each subscription belongs to its subscriber, and an
-# occurrence goes to one of them, so it can carry their own private view.
-turn = wake.define_event(
-    "game.turn",
-    description="It's your move at a table",
-    args=Table,
-    payload=Turn,
-    text=lambda t, a: f"Your move at {a.table}: {t.to_call} to call",
-    personal=True,
-)
+@attached.tool(subscribes=[crawl_finished])
+async def start_crawl(url: str, call: ToolCall) -> str:
+    """Crawl a site."""
+    job = str(uuid4())  # your tool minted the ID, so only this conversation can know it
+    await call.subscribe(crawl_finished, {"job": job}, once=True)
+    start(url, job)
+    return f"Crawl {job} started."
 
 
-def user_of(ctx) -> str | None:
-    """Your own sign-in: your ID for the person behind the request (ctx.request is the HTTP request)."""
+app = server.streamable_http_app()  # run with uvicorn
 
 
-server = MCPServer("chat")
-attached = wake.attach(server, identify=lambda ctx: Identity(user=user_of(ctx)))  # define every event first
-
-
-# Your own tool subscribes the conversation calling it, and declares the events it subscribes to.
-@attached.tool(subscribes=[turn])
-async def join(table: str, call: ToolCall) -> str:
-    """Take a seat at a table."""
-    sub = await call.subscribe(turn, {"table": table}, reason=f"Playing at {table}")
-    seats[table] = [*seats.get(table, []), Recipient(user=sub.user, subscription=sub.id)]
-    return f"You're seated at {table}."
-
-
-seats: dict[str, list[Recipient]] = {}  # your app's own membership
-app = server.streamable_http_app()  # run with uvicorn, behind your sign-in
-
-
-# When something happens:
-async def on_message(channel: str, sender: str, text: str) -> None:
-    await message.emit({"channel": channel}, {"sender": sender, "text": text})
-
-
-async def on_turn(table: str, player: str, hole: list[str], to_call: int) -> None:
-    await turn.emit({"table": table}, {"hole": hole, "to_call": to_call}, to=player)
-
-
-async def on_deal(table: str) -> None:
-    # One emit to every seated conversation; ended lists those no longer subscribed.
-    out = await turn.emit({"table": table}, {"hole": [], "to_call": 0}, to=seats.get(table, []))
-    seats[table] = [r for r in seats.get(table, []) if r not in out.ended]
+# When the crawl finishes, in your worker or webhook handler:
+async def on_crawl_finished(job: str, pages: int) -> None:
+    await crawl_finished.emit(Job(job=job), Crawl(status="completed", pages=pages))
 ```
 
-That's all. An agent subscribes to `chat.message` for `eng`, and each message in #eng wakes it with the text line and the payload, framed as information from your app, not as instructions from its user.
+What just happened:
 
-- **`wake.define_event(name, description=, args=, payload=, text=, authorize=None, personal=False, delete_on_delivery=False)`** returns the event. `args` and `payload` are pydantic models or JSON Schemas. `args` is what a subscriber picks; its required string, integer and boolean fields route occurrences, so their values are lowercase IDs (a-z 0-9 . _ -), and an optional one filters on the payload field of the same name. `text(payload, args)` is the line the agent reads first. `authorize(subscriber, args)` (sync or async) decides who may subscribe. With `delete_on_delivery=True`, Wakeshift deletes each occurrence's text and payload once it's delivered.
-- **`await event.emit(args, payload, to=None, id=None)`** checks the payload and sends it to everyone subscribed with those arguments. A personal event goes to its recipients, `to`: a user's ID (every subscription they have to it), `Recipient(user=…, subscription=…)` (exactly one conversation, from `call.subscribe`) or `Recipient(native=…)` (only the user's own MCP Events subscriptions), one or a list of up to 1,000. It returns `Emitted`: `matched`, `duplicate`, `unmatched` (recipients with no live subscription), `ended` (subscriptions no longer live) and `text_trimmed` (Wakeshift trimmed a text over 1000 bytes to 1000; the client warns once per event). `id` makes retries emit once: a retry of the same emit returns the first's result with `duplicate=True`, and the same `id` on a different emit (other arguments, recipients or payload) raises `IdReusedError` (`id_reused`) and sends nothing.
-- **`wake.attach(server, identify=None, tools=None, events=None)`** attaches Wakeshift to your MCP server. It serves `events/list`, `events/subscribe` and `events/unsubscribe` to clients that speak MCP Events, and adds the tools `subscribe_events` (for everyone else), `unsubscribe_events` and `list_subscriptions` (for every client, so a person can always see and stop what they're subscribed to). `tools` picks them, each `{"enabled": bool}`: `subscribe`, `list` and `unsubscribe` are on unless disabled (`tools={"subscribe": {"enabled": False}}`); a list of names (`BUILTIN_TOOLS`) still works, but is deprecated. `identify(ctx)` says who is behind a request, as an `Identity(user=…, client=…)`: `user` is your ID for the person, from your own sign-in, and `client` (optional) is the MCP client's name as your sign-in knows it, for a server that never sees `initialize`; a name the request carries wins. Without it, requests have no user, so native subscriptions, personal events and `list_subscriptions` are refused. With `tools={"wait": {"enabled": True}}`, it also serves `wakeshift_wait` to clients that take MCP tasks on protocol 2026-07-28 (a recent Claude Code in the terminal): Wakeshift tells those conversations to call it, after the user declines Wakeshift's plugin, instead of starting a background monitor; other clients don't see it. It's off by default, because each waiting conversation then keeps a request open to your server (about 20 seconds at a time, the next a second later, for as long as it waits): on a serverless host, that's a function invocation per waiting conversation, which needs a timeout of at least 30 seconds. Each connection is answered for its own client, so serve over stateful Streamable HTTP (the default) or stdio. It returns the handle your own tools register with. `events=EventsOptions(native=…)` tells it which calls come from clients that subscribe themselves (your own house agents, say).
-- **Annotations.** The three tools `attach` adds, and `wakeshift_wait`, list MCP tool annotations: a title and all four hints, which app stores such as ChatGPT's ask for. `subscribe_events` ("Subscribe to events") and `unsubscribe_events` ("Unsubscribe from events") are idempotent, and not read-only, destructive or open-world: subscribing again renews the same subscription, unsubscribing again ends nothing, and an ended subscription comes back by subscribing. `list_subscriptions` ("List subscriptions") is read-only and idempotent. `wakeshift_wait` ("Wait for messages") is neither read-only nor idempotent, since each call confirms the messages the last one delivered; it isn't destructive or open-world either.
-- **`@attached.tool(name=None, description=None, subscribes=None, ...)`** registers an async tool on the server (`MCPServer.tool`'s options pass through) with a parameter annotated `ToolCall`. The tool's schema gains `session_key`, `harness` and `conversation_id`, and hides `call`. An argument it doesn't declare is ignored, not refused. `subscribes` lists the events the tool subscribes to (`[]` for none): tools/list then adds a sentence to the tool's description, written from those events' own descriptions, saying the tool is how your app notifies the agent of them and that the result may ask to start a listener and offer the user an install. Agents set that part of a result aside as something nobody asked for unless the tool's description says so. A `call.subscribe` for an event the tool doesn't declare still works in this release, but warns once (through `on_warning`) with the fix; from the next release it raises. For your own wording, write the description with **`notifies(description, app=None, when=None)`**: tools/list then adds nothing. **`await call.subscribe(event, args, ttl=None, reason=None, label=None)`** subscribes the calling conversation and returns a `Subscription` (`id`, `user`, `created`, `session`, `recognized`, `native`); store `id` and `user` to reach that conversation later. **`await call.unsubscribe(event, args)`** ends it; **`await call.resolve_session()`** finds the conversation's session without subscribing. Wakeshift adds one block to whatever the tool returns, however many subscriptions it makes, telling the agent how it's woken. A call that fails (an exception, an `isError` result, an output its schema refuses, a canceled request) ends the subscriptions it made. A client that subscribes itself (ChatGPT, or one that declares MCP Events) isn't subscribed: `call.native` is true and the block tells it what to subscribe to. A tool annotated `-> str` replies with text. A tool with structured output (a pydantic model, say) gets the block's text in its `wakeshift` field too, for hosts that show the model only `structuredContent`; subclass `WakeOutput` to declare the field in your own type. `call.context` is MCP's `Context`.
-- **`await event.end(user, id)`** ends one of a user's subscriptions by its ID.
+- **The key comes from `WAKESHIFT_KEY`.** Without one, Wakeshift is off: every call still works, nothing is sent, and your server runs as it would without it. `Wakeshift()` makes no network request.
+- **`@attached.tool(subscribes=[...])` is your server's own `@server.tool`**, with the events it subscribes to named and a `call: ToolCall` the SDK fills. Your arguments stay yours: Wakeshift adds its own in `tools/list` and takes them out before your code runs.
+- **Only your tools can subscribe to `crawl.finished`**, because it declares neither `personal`, `authorize` nor `public`. That's the safe default for IDs your tool mints, so there's nothing to check here.
+- **`once=True` ends the subscription after one delivery**, and a call that fails ends what it subscribed.
+- **`emit` wakes every conversation subscribed with those arguments.** Without `text`, the agent reads the description and the arguments.
 
-## Low-level Server
+Two helpers worth knowing early:
 
-`wake.attach` takes the MCP SDK's low-level `Server` (`mcp.server.lowlevel.Server`) once its handlers are set, and adds its own tools to them. List a tool that subscribes with `wrapped_tool(types.Tool(...))`, which adds Wakeshift's arguments to its schema, and in your `on_call_tool` handler subscribe with `await attached.call(ctx).subscribe(event, args)`. The reply gets Wakeshift's block, and a call that fails ends what it subscribed. Such a tool can't declare its events, so write its description with `notifies(...)`: `types.Tool(name="watch", description=notifies("Watch a channel.", when="a message is posted"), ...)`. See [the Python SDK's docs](https://wakeshift.ai/docs/python#low-level-server).
+- **No webhook to point at Wakeshift?** `crawl_finished.watch({"job": job}, check, every="10s", timeout="1h")` calls your `check` until it returns the payload (`None`: keep waiting), then emits once, with backoff, a hard timeout and at most 10 checks at once. Start it from the event's `on_subscribe`, which runs once for every new subscription however it was made. A watch lives in your process only: a restart or a serverless freeze loses it.
+- **Unit tests.** `wakeshift.testing` has `TestClient()` (enabled, offline, recording `emits` and `subscriptions`), `tool_call(...)` (a stand-in `ToolCall` to pass a tool's function) and `with_call(wake, call)` (for tools named in `wrap`). To keep an ordinary client off in tests when `WAKESHIFT_KEY` is set, construct it with `Wakeshift("")`.
 
-## FastMCP
+Signing people in, webhooks, tools registered elsewhere (`wrap` and `wake.current_call()`), who may subscribe, logging and errors: [wakeshift.ai/docs/python](https://wakeshift.ai/docs/python).
 
-`wake.attach` takes a FastMCP 4 server (`fastmcp.FastMCP`) as it takes an `MCPServer`, and `@attached.tool()` registers FastMCP tools, `Context` parameters and dependencies included. Install the extra:
+## Compatibility
 
-```sh
-pip install 'wakeshift[fastmcp]'
-```
-
-`wakeshift.fastmcp.identify_by_claim("sub")` is an `identify` that names the user by a claim of FastMCP's access token. Attach the server you run, and serve it as FastMCP serves any server (`mcp.http_app()`, `mcp.run()`). FastMCP 2.x and 3.x are built on `mcp` 1.x and aren't supported. See [the Python SDK's docs](https://wakeshift.ai/docs/python#fastmcp).
-
-## Sign-in
-
-Your app signs its own users in, and passes who they are to `attach` as `identify`. It acts for their agents in the workspaces Wakeshift keeps for it:
-
-- **`await wake.workspace(user, name)`** is the workspace Wakeshift keeps for one of your users, created on first use. That user's conversations are kept there.
-- **`await wake.add_agent(workspace, agent, display_name)`** creates an agent in one of those workspaces (if new) and its grant under your manifest's agent scope. `harness_agent(client_name)` names an agent after its MCP client (`claude-code`, `codex`).
-- **`await wake.check_agent(workspace, agent)`** raises `WakeshiftError` `no_grant` once the grant is revoked, `unknown_workspace` once the user is forgotten.
-
-## Your own tools
-
-Any tool registered with `@attached.tool()` can subscribe the calling conversation, end its subscription, or return structured output that carries Wakeshift's block:
-
-```python
-from wakeshift import WakeOutput
-
-
-@attached.tool(subscribes=[message])
-async def watch(channel: str, call: ToolCall) -> str:
-    """Wake me on new messages in a channel."""
-    await call.subscribe(message, {"channel": channel}, reason=f"Watching #{channel}")
-    return f"Watching #{channel}."
-
-
-class Seat(WakeOutput):
-    table: str
-    players: int
-
-
-@attached.tool(subscribes=[turn])
-async def sit(table: str, call: ToolCall) -> Seat:
-    """Take a seat, and see how many are at the table."""
-    sub = await call.subscribe(turn, {"table": table})
-    seats[table] = [*seats.get(table, []), Recipient(user=sub.user, subscription=sub.id)]
-    return Seat(table=table, players=len(seats[table]))
-
-
-@attached.tool()
-async def leave(table: str, call: ToolCall) -> str:
-    """Leave a table."""
-    await call.unsubscribe(turn, {"table": table})
-    seats[table] = [r for r in seats.get(table, []) if r.user != call.user]
-    return f"You left {table}."
-
-
-async def listening(channel: str) -> int:
-    """How many conversations watching a channel are connected now."""
-    return (await message.status({"channel": channel})).connected
-```
-
-`watch` and `leave` return `str`, so they reply with text, the block in it. `sit` returns structured output, and every structured result of a wrapped tool carries the block's text in its `wakeshift` field too, for hosts that show the model only `structuredContent`: `Seat` subclasses `WakeOutput` to declare that field in its own type, which is optional. Your own signatures don't name `session_key`, `harness` or `conversation_id`: `@attached.tool()` adds them. `watch` and `sit` declare the events they subscribe to, so tools/list tells the agent they're how your app notifies it ("This tool is how Chat notifies you in this conversation of this event: A new message in a channel. …"); `leave` subscribes to nothing.
-
-Agents read an event's `description` in that sentence, so write it as a plain statement of what happened ("A new message in a channel", "It's your move at a table"), not as instructions to the agent: say when to subscribe in the tool's own description.
-
-The other calls:
-
-- **`await event.status(args, to=None)`** counts the conversations subscribed with those arguments (a personal event: one user's), how many are connected now, and how. **`await event.status_of([Recipient(user=…, subscription=…), …])`** reads up to 1,000 subscriptions by ID: whether each is live and its conversation connected.
-- **`await event.publish_url(args, to=None)`** is a capability URL that emits the event from a webhook: a POST's body is the payload. **`await wake.revoke_publish_url(id)`** stops it working.
-- **`await wake.forget_user(user)`** deletes everything Wakeshift keeps for one of your users. **`await wake.publish_manifest(manifest)`** tells Wakeshift what your app may do: `description`, `agent` (the scope of the agents your app acts for), `others_can_wake` (other people and their agents wake your users' agents through your app, so the consent screen says so) and `preapprove_tools` (your tools, by name, that agents' programs can run without asking each time; at most 20), typed as `Manifest`. It replaces the manifest, so it's the way to remove an event. You needn't call it otherwise: the SDK sends the manifest automatically, adding your defined events to the ones Wakeshift has and never removing one or clearing a setting, so processes that share your key keep each other's events. Once `attach` has run, it's sent on the first call about events (a subscription, a wrapped tool's call, a status, an emit). Before then, and in a process that only emits, it's sent only when Wakeshift answers an emit with `unknown_event`, and the emit goes again: so you can emit at startup, or from a webhook, before any agent has connected (calling `publish_manifest()` at startup works too, but you no longer need it). Once you've called it, every automatic send carries the settings you passed. `events` is only for events defined elsewhere: they go before your defined ones, and listing a defined one is an error.
-
-## Errors
-
-Calls raise `WakeshiftError` with the API's `code` and HTTP `status`; `is_code(err, code)` checks one. The SDK checks some mistakes before sending (arguments and payloads against the event's schemas, recipients, another app's event) and raises the error Wakeshift gives for the same mistake, so the code is the same whichever caught it, and the same in the Go and Node SDKs. `ArgsError`, for arguments or a payload that don't match, is a `WakeshiftError` with code `bad_arguments`.
-
-| Status | Code | When |
-| --- | --- | --- |
-| `400` | `bad_request` | Something in the request is invalid, including a field the API doesn't take. The message says what. Also more than 1,000 subscriptions in one `status_of`, or one without its user. |
-| `400` | `bad_arguments` | An event's arguments or payload don't match its schemas, a routing value isn't a lowercase ID, or the recipients don't fit the event: a personal event's emit, publish URL or status without `to=` (a publish URL's or status's names exactly one user), a shared event's with one, a recipient with an empty user or subscription, or `call.subscribe` on a personal event with no user. |
-| `401` | `unauthenticated` | The assertion was refused: expired, reused, signed with another key, or for another `aud` (a key for another Wakeshift). The message says which. |
-| `403` | `other_client` | The `session_key` is a conversation in another MCP client of the same user. Call again without it. |
-| `404` | `unknown_event` | Your app offers no event by that name (an emit gets this only once the SDK has sent your manifest and tried again), or `call.subscribe` or `call.unsubscribe` was given another app's event (one defined on another `Wakeshift` client). |
-| `404` | `unknown_publish_url` | The publish URL ID isn't one of your app's. |
-| `409` | `id_reused` | An emit's `id` was used within the last day for a different emit (another event, arguments, recipients or payload). Nothing was sent. Give each occurrence its own `id`. |
-| `413` | `too_large` | The request body is over 64 KB (512 KB for an emit or a status call, room for 1,000 recipients). |
-| `429` | `rate_limited` | Your emits to lists named over 10,000 recipients in a minute. |
-| `0` | `unreachable` | No answer at all: a wrong `core`, a network problem, or the timeout. The message names the core it tried. |
-
-## Keys
-
-An app key is `wst_` followed by 50 letters and digits: your app's Ed25519 private key, with a checksum, so a mistyped key fails when you create `Wakeshift`. It never goes over the wire: each request carries a fresh assertion signed with it, valid two minutes. A key goes to `https://app.wakeshift.ai` unless you pass `core` or set `WAKESHIFT_CORE`.
-
-The key doesn't name your app. `await wake.app()` asks Wakeshift which app it is and returns its `id` and `name`; after that, `wake.app_id` is the app's ID (before it, reading `wake.app_id` raises).
-
-Older keys, `wst_test_<app>_<seed>` and `wst_live_<app>_<seed>`, keep working. They name the app, so `wake.app_id` works at once. A `wst_test_` key needs `core` or `WAKESHIFT_CORE`.
-
-## Documentation
-
-The guides and the full reference are at [wakeshift.ai/docs](https://wakeshift.ai/docs): the [quickstart](https://wakeshift.ai/docs/quickstart), [events](https://wakeshift.ai/docs/events), [your users](https://wakeshift.ai/docs/users) and [the Python SDK](https://wakeshift.ai/docs/python). The same calls are in the [TypeScript](https://github.com/wakeshift/wakeshift-node) and [Go](https://github.com/wakeshift/wakeshift-go) SDKs.
+| | |
+| --- | --- |
+| Python | 3.11 or later; asyncio (not trio) |
+| `wakeshift[mcp]` | `mcp` 2.3 or later, below 3: `MCPServer` and the low-level `Server` |
+| `wakeshift[fastmcp]` | FastMCP 4.1 or later, below 5 |
+| FastMCP 2.12+ or 3.x | plain `wakeshift`: `attach` (before or after anything that replaces the `tools/call` handler), tools that subscribe, `wrap` and the built-in tools; native MCP Events and protocol 2026-07-28 need FastMCP 4 |
 
 ## Development
 

@@ -1,0 +1,9 @@
+{
+  "include": ["."],
+  "typeCheckingMode": "strict",
+  "enableTypeIgnoreComments": true,
+  "reportUnnecessaryTypeIgnoreComment": "error",
+  "pythonVersion": "3.11",
+  "venvPath": "../..",
+  "venv": ".venv"
+}

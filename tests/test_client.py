@@ -14,18 +14,11 @@ from cryptography.exceptions import InvalidSignature
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel
 
-from wakeshift import (
-    CONVERSATION_ARG,
-    HARNESS_ARG,
-    SESSION_ARG,
-    Wakeshift,
-    WakeshiftError,
-    is_code,
-    parse_key,
-    sign_assertion,
-)
-from wakeshift.client import WAKE_ARGS_SCHEMA, _call, _call_of
-from wakeshift.key import b64url, b64url_decode, public_key_of
+from wakeshift import APIConnectionError, APIError, UsageError, Wakeshift
+from wakeshift._client import CONVERSATION_ARG, HARNESS_ARG, SESSION_ARG, _call, _call_of
+from wakeshift._key import b64url, b64url_decode, parse_key, public_key_of, sign_assertion
+
+from .helpers import golden_file
 
 # RFC 8032, test 1: this seed's public key.
 SEED_HEX = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
@@ -100,7 +93,9 @@ class Core:
         return httpx2.Response(status, json=out)
 
     def wake(self, **kw: Any) -> Wakeshift:
-        return Wakeshift(KEY, core="http://core.test", http=httpx2.AsyncClient(transport=httpx2.MockTransport(self)), **kw)
+        return Wakeshift(
+            KEY, core="https://core.test", http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(self)), **kw
+        )
 
 
 def test_the_core_url_given_else_wakeshift_core_else_production_except_for_a_test_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,14 +103,14 @@ def test_the_core_url_given_else_wakeshift_core_else_production_except_for_a_tes
     monkeypatch.setenv("WAKESHIFT_CORE", "https://app.staging.wakeshift.ai")
     assert Wakeshift(KEY).core == "https://app.staging.wakeshift.ai"
     monkeypatch.delenv("WAKESHIFT_CORE")
-    with pytest.raises(ValueError, match="no core URL for this test key: set WAKESHIFT_CORE"):
+    with pytest.raises(UsageError, match="a test key has no default core: set WAKESHIFT_CORE") as e:
         Wakeshift(KEY)
+    assert e.value.code == "config"
     monkeypatch.setenv("WAKESHIFT_CORE", "")
-    with pytest.raises(ValueError, match="no core URL"):
+    with pytest.raises(UsageError, match="no default core"):
         Wakeshift(KEY)
     assert Wakeshift(KEY.replace("wst_test_", "wst_live_")).core == "https://app.wakeshift.ai"
-    with pytest.raises(ValueError, match="no app key"):
-        Wakeshift("")
+    assert Wakeshift("").enabled is False
 
 
 class Hole(BaseModel):
@@ -139,8 +134,8 @@ async def test_emit_merges_the_manifest_then_sends_a_signed_request() -> None:
     out = await news.emit({"table": "oak"}, {"text": "dealt"}, id="d1")
     assert (out.matched, out.duplicate, out.unmatched, out.ended) == (3, False, [], [])
     assert [(r["method"], r["url"]) for r in core.sent] == [
-        ("POST", "http://core.test/api/apps/v1/manifest/merge"),
-        ("POST", "http://core.test/api/apps/v1/events/emit"),
+        ("POST", "https://core.test/api/apps/v1/manifest/merge"),
+        ("POST", "https://core.test/api/apps/v1/events/emit"),
     ]
     r = core.sent[1]
     assert re.fullmatch(r"Bearer [\w-]+\.[\w-]+\.[\w-]+", r["auth"])
@@ -161,13 +156,11 @@ async def test_errors_carry_the_apis_code() -> None:
     wake = Core(
         lambda p, b: (403, {"error": {"code": "other_client", "message": "that conversation is another client's"}})
     ).wake()
-    with pytest.raises(WakeshiftError) as e:
+    with pytest.raises(APIError) as e:
         await wake.forget_user("ada")
     assert (e.value.status, e.value.code, e.value.detail) == (403, "other_client", "that conversation is another client's")
-    assert is_code(e.value, "other_client")
-    assert not is_code(e.value, "bad_request")
     bare = Core(lambda p, b: (502, "bad gateway")).wake()
-    with pytest.raises(WakeshiftError) as e2:
+    with pytest.raises(APIError) as e2:
         await bare.forget_user("ada")
     assert (e2.value.status, e2.value.code) == (502, "")
 
@@ -177,21 +170,21 @@ async def test_a_2xx_without_a_json_object_is_a_wakeshift_error(body: str) -> No
     http = httpx2.AsyncClient(
         transport=httpx2.MockTransport(lambda r: httpx2.Response(200, text=body, headers={"Content-Type": "text/html"}))
     )
-    wake = Wakeshift(KEY, core="http://core.test", http=http)
-    with pytest.raises(WakeshiftError) as e:
+    wake = Wakeshift(KEY, core="https://core.test", http_client=http)
+    with pytest.raises(APIError) as e:
         await wake.workspace("ada", "Ada")
     assert (e.value.code, e.value.status) == ("bad_response", 200)
-    assert "http://core.test answered 200 without a JSON object" in str(e.value)
+    assert "https://core.test answered 200 without a JSON object" in str(e.value)
 
 
 async def test_a_core_that_doesnt_answer_the_error_names_it() -> None:
     def refused(r: httpx2.Request) -> httpx2.Response:
         raise httpx2.ConnectError("connection refused")
 
-    wake = Wakeshift(KEY, core="http://127.0.0.1:9", http=httpx2.AsyncClient(transport=httpx2.MockTransport(refused)))
-    with pytest.raises(WakeshiftError) as e:
+    wake = Wakeshift(KEY, core="http://127.0.0.1:9", http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(refused)))
+    with pytest.raises(APIConnectionError) as e:
         await wake.forget_user("ada")
-    assert (e.value.code, e.value.status) == ("unreachable", 0)
+    assert (e.value.code, e.value.status) == ("unreachable", None)
     assert str(e.value).startswith(
         "wakeshift: can't reach Wakeshift at http://127.0.0.1:9 (connection refused). Check that WAKESHIFT_CORE"
     )
@@ -200,9 +193,12 @@ async def test_a_core_that_doesnt_answer_the_error_names_it() -> None:
     def slow(r: httpx2.Request) -> httpx2.Response:
         raise httpx2.ReadTimeout("timed out")
 
-    wake2 = Wakeshift(KEY, core="http://core.test", http=httpx2.AsyncClient(transport=httpx2.MockTransport(slow)), timeout=0.02)
-    with pytest.raises(WakeshiftError, match=r"can't reach Wakeshift at http://core\.test \(no answer within 0\.02s\)"):
+    wake2 = Wakeshift(
+        KEY, core="https://core.test", http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(slow)), timeout=0.02
+    )
+    with pytest.raises(APIConnectionError, match=r"Wakeshift at https://core\.test didn't answer in time") as e3:
         await wake2.workspace("ada", "Ada")
+    assert e3.value.code == "timeout"
 
 
 async def test_the_other_calls_paths_bodies_and_results() -> None:
@@ -226,7 +222,7 @@ async def test_the_other_calls_paths_bodies_and_results() -> None:
     assert await wake.add_agent("ws_1", "codex", "Codex") == "gr_1"
     assert core.sent[-1]["body"] == {"agent": "codex", "display_name": "Codex"}
     await wake.check_agent("ws_1", "codex")
-    assert core.sent[-1]["url"] == "http://core.test/api/apps/v1/workspaces/ws_1/agents/codex/token"
+    assert core.sent[-1]["url"] == "https://core.test/api/apps/v1/workspaces/ws_1/agents/codex/token"
 
 
 def test_a_call_packs_only_what_was_given() -> None:
@@ -282,17 +278,18 @@ def test_a_call_reads_the_context_and_the_wake_arguments() -> None:
     )
 
 
-def test_wake_args_session_key_harness_and_conversation_id() -> None:
-    assert list(WAKE_ARGS_SCHEMA) == ["session_key", "harness", "conversation_id"]
-    assert re.fullmatch(
-        r"This conversation's session_key, from an earlier result .*Keep it to this conversation; don't share or log it\.",
-        WAKE_ARGS_SCHEMA[SESSION_ARG]["description"],
-    )
-    assert re.fullmatch(
-        r"The program you're running in: .*cursor \(local CLI or IDE\), cursor-cloud \(Cursor cloud agent\), grok-bot, .*or your program's name if it isn't listed",
-        WAKE_ARGS_SCHEMA[HARNESS_ARG]["description"],
-    )
-    assert "printenv CURSOR_CONVERSATION_ID" in WAKE_ARGS_SCHEMA[CONVERSATION_ARG]["description"]
+def test_wake_args_compact() -> None:
+    """wake-args.json compact: what tools/list adds to a tool that subscribes
+    to something, and to one that subscribes to nothing."""
+    from wakeshift._text import wake_args
+
+    want = golden_file("wake-args.json")["compact"]
+    assert wake_args(True) == want["subscribing"]["properties"]
+    assert wake_args(False) == want["subscribes_nothing"]["properties"]
+    for p in wake_args(True).values():
+        assert len(p["description"]) <= 61
+    assert "don't share it" in wake_args(False)[SESSION_ARG]["description"]
+    assert [HARNESS_ARG, CONVERSATION_ARG] == list(wake_args(True))[1:]
 
 
 def test_the_package_no_longer_exports_guest_sign_in() -> None:
@@ -316,7 +313,6 @@ def test_the_package_no_longer_exports_topics_or_the_old_subscribe() -> None:
         "apply_addition",
         "TopicSubscription",
         "TopicStatus",
-        "SubscriptionStatus",
         "Published",
         "UNKNOWN_CLIENT_WARNING",
     ):
@@ -339,10 +335,9 @@ def test_the_package_no_longer_exports_topics_or_the_old_subscribe() -> None:
         "unsubscribe_user",
     ):
         assert not hasattr(wakeshift.Wakeshift, name), name
-    for name in ("subscribe", "unsubscribe"):
+    for name in ("subscribe", "unsubscribe", "publish_url"):
         assert not hasattr(wakeshift.WakeEvent, name), name
-    for name in ("emit", "publish_url", "status", "status_of", "end"):
+    for name in ("emit", "create_publish_url", "status", "status_of", "end"):
         assert hasattr(wakeshift.WakeEvent, name), name
     for name in ("revoke_publish_url", "forget_user", "workspace", "add_agent", "check_agent", "attach", "define_event"):
         assert hasattr(wakeshift.Wakeshift, name), name
-    assert wakeshift.__version__ == "0.9.3"

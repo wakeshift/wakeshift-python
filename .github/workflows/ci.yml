@@ -29,4 +29,14 @@ jobs:
       - run: uv run --locked --python 3.14 --isolated pytest -q
       # The same suite with attach on FastMCP 4 instead of MCPServer.
       - run: WAKESHIFT_TEST_SERVER=fastmcp uv run --locked pytest -q
+      # Plain wakeshift beside FastMCP 2 and 3 (on mcp 1.x): attach through
+      # FastMCP's middleware. 2.12's mcp 1.16 breaks on pydantic 2.14.
+      - name: Beside FastMCP 2 and 3
+        run: |
+          for spec in "fastmcp==2.12.* pydantic<2.14" "fastmcp==2.*" "fastmcp==3.*"; do
+            env="$RUNNER_TEMP/fm-$(echo "$spec" | tr -c 'a-z0-9' '_')"
+            uv venv -q --python 3.12 "$env"
+            uv pip install -q --python "$env" $spec . pytest pytest-asyncio
+            "$env/bin/python" -m pytest -q -p no:cacheprovider tests/test_emit_only.py tests/test_fastmcp23.py
+          done
       - run: uv build

@@ -1,17 +1,18 @@
-"""@attached.tool(subscribes=[...]): tools/list says a declaring tool is how
-the app notifies the agent, from its events' own descriptions (the shared
-fixture subscribes.json), and a subscribe the tool doesn't declare warns
-once per tool, or, once undeclared subscribes are an error, is refused."""
+"""@attached.tool(subscribes=[...]): tools/list adds a sentence to a
+declaring tool's description saying the tool is how the app notifies the
+agent, from its events' own descriptions (the shared fixture subscribes.json;
+the compact bench kept it as it was), and a subscribe the tool doesn't
+declare is refused."""
 
 import time
 from typing import Any
 
 import pytest
 
-import wakeshift.client as client
-import wakeshift.toolcall as toolcall
-from wakeshift import ToolCall, UndeclaredSubscribe, notifies
-from wakeshift.events import _with_subscribes
+import wakeshift._client as client
+from wakeshift import ToolCall, UsageError
+from wakeshift._events import _with_subscribes
+from wakeshift._text import COMPACT
 
 from .helpers import golden_file
 from .test_toolcall import Wrapped, call_tool
@@ -19,7 +20,8 @@ from .test_toolcall import Wrapped, call_tool
 NEWS = "News at a table"
 
 
-def sentence(app: str, of: str) -> str:
+def sentence(app: str, events: str) -> str:
+    of = f"of these events: {events}" if "; " in events else f"of this event: {events}"
     return (
         f"This tool is how {app} notifies you in this conversation {of}. {app[:1].upper() + app[1:]} delivers its "
         "notifications through Wakeshift; the result may ask you to start a background listener and to offer the user "
@@ -28,10 +30,16 @@ def sentence(app: str, of: str) -> str:
 
 
 def test_shared_fixture() -> None:
-    cases = golden_file("subscribes.json")["cases"]
+    cases = golden_file("subscribes.json")["compact_cases"]
     assert len(cases) >= 8
     for c in cases:
         assert _with_subscribes(c["description"], c["events"], c["app"]) == c["want"], c["name"]
+
+
+def test_compact_strings_come_from_one_place() -> None:
+    """COMPACT is subscribing-tools-list.json's compact_strings, key for key."""
+    want = {k: v for k, v in golden_file("subscribing-tools-list.json")["compact_strings"].items() if not k.startswith("_")}
+    assert COMPACT == want
 
 
 def _app() -> Wrapped:
@@ -46,16 +54,8 @@ def _app() -> Wrapped:
     async def join(table: str, call: ToolCall) -> str:
         return "ok"
 
-    @w.attached.tool(description=notifies("Watch a table.", when="news breaks"), subscribes=[w.shared])
-    async def custom(call: ToolCall) -> str:
-        return "ok"
-
     @w.attached.tool(description="Look at a table.", subscribes=[])
     async def nothing(call: ToolCall) -> str:
-        return "ok"
-
-    @w.attached.tool(description="Old style.")
-    async def old(call: ToolCall) -> str:
         return "ok"
 
     return w
@@ -70,14 +70,11 @@ async def test_tools_list_adds_the_sentence_naming_the_app() -> None:
     w.core.app_name = "Shipyard"
     async with w.served() as (_, rpc):
         listed = await _listed(w, rpc)
-        assert listed["watch"] == "Watch a table. " + sentence("Shipyard", f"of this event: {NEWS}")
-        assert listed["join"] == "Join a table. " + sentence("Shipyard", f"of these events: Your turn; {NEWS}")
-        assert listed["custom"] == "Watch a table. " + sentence("Shipyard", "when news breaks")
+        assert listed["watch"] == "Watch a table. " + sentence("Shipyard", NEWS)
+        assert listed["join"] == "Join a table. " + sentence("Shipyard", f"Your turn; {NEWS}")
         assert listed["nothing"] == "Look at a table."
-        assert listed["old"] == "Old style."
         await _listed(w, rpc)
         assert w.core.paths().count("/app") == 1
-        # A declared subscribe doesn't warn.
         res = await call_tool(rpc, "watch", {"table": "oak"})
         assert not res["result"].get("isError"), res
     assert not w.warnings
@@ -87,7 +84,20 @@ async def test_tools_list_says_this_app_without_a_name() -> None:
     w = _app()
     async with w.served() as (_, rpc):
         listed = await _listed(w, rpc)
-        assert listed["watch"] == "Watch a table. " + sentence("this app", f"of this event: {NEWS}")
+        assert listed["watch"] == "Watch a table. " + sentence("this app", NEWS)
+
+
+async def test_tools_list_asks_for_the_name_once() -> None:
+    # Construction, define_event and attach ask Wakeshift nothing (_app() builds
+    # all three); the first tools/list asks for the name, and later ones reuse it.
+    w = _app()
+    w.core.app_name = "Shipyard"
+    assert w.core.calls == []
+    async with w.served() as (_, rpc):
+        for _ in range(3):
+            listed = await _listed(w, rpc)
+            assert listed["watch"] == "Watch a table. " + sentence("Shipyard", NEWS)
+    assert w.core.paths().count("/app") == 1
 
 
 async def test_tools_list_waits_only_so_long_for_the_name(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -102,7 +112,7 @@ async def test_tools_list_waits_only_so_long_for_the_name(monkeypatch: pytest.Mo
             t0 = time.monotonic()
             listed = await _listed(w, rpc)
             assert time.monotonic() - t0 < 2.0
-            assert listed["watch"] == "Watch a table. " + sentence("this app", f"of this event: {NEWS}")
+            assert listed["watch"] == "Watch a table. " + sentence("this app", NEWS)
         assert w.core.paths().count("/app") == 1
     # Wakeshift fails (a 404: no name): asked once within retry, then again after it.
     w = _app()
@@ -113,100 +123,42 @@ async def test_tools_list_waits_only_so_long_for_the_name(monkeypatch: pytest.Mo
         monkeypatch.setitem(client._NAME_FETCH, "retry", 0.0)
         w.core.app_name = "Shipyard"
         listed = await _listed(w, rpc)
-        assert listed["watch"] == "Watch a table. " + sentence("Shipyard", f"of this event: {NEWS}")
+        assert listed["watch"] == "Watch a table. " + sentence("Shipyard", NEWS)
         assert w.core.paths().count("/app") == 2
 
 
-def _undeclared() -> Wrapped:
+async def test_an_undeclared_subscribe_is_refused() -> None:
+    """A subscribe to an event the tool doesn't declare raises UsageError
+    undeclared_subscribe and asks Wakeshift nothing; it logs nothing either."""
     w = Wrapped()
+    got: dict[str, str] = {}
 
-    @w.attached.tool()
-    async def old(table: str, call: ToolCall) -> str:
-        await call.subscribe(w.shared, {"table": table})
-        return "ok"
+    def register(name: str, subscribes: list[Any]) -> None:
+        @w.attached.tool(name, subscribes=subscribes)
+        async def tool(table: str, call: ToolCall) -> str:
+            try:
+                await call.subscribe(w.shared, {"table": table})
+                got[name] = "subscribed"
+            except UsageError as err:
+                got[name] = err.code
+            return "ok"
 
-    @w.attached.tool(subscribes=[w.turn])
-    async def other(table: str, call: ToolCall) -> str:
-        await call.subscribe(w.shared, {"table": table})
-        return "ok"
-
-    @w.attached.tool(subscribes=[])
-    async def none(table: str, call: ToolCall) -> str:
-        await call.subscribe(w.shared, {"table": table})
-        return "ok"
-
-    @w.attached.tool(subscribes=[w.shared])
-    async def fine(table: str, call: ToolCall) -> str:
-        await call.subscribe(w.shared, {"table": table})
-        return "ok"
-
-    return w
-
-
-def _warning(tool: str, what: str, fix: str) -> str:
-    return (
-        f"wakeshift: the tool {tool} subscribed to table.news{what}, so tools/list doesn't tell the agent that the tool is how "
-        f"this app notifies it. Fix: @attached.tool(subscribes=[{fix}]). It works for now; from the next release an "
-        "undeclared subscribe raises."
-    )
-
-
-async def test_an_undeclared_subscribe_works_and_warns_once_per_tool() -> None:
-    w = _undeclared()
+    register("old", [])
+    register("other", [w.turn])
+    register("fine", [w.shared])
     async with w.served() as (_, rpc):
-        for _ in range(2):
-            for tool in ("old", "other", "none", "fine"):
-                res = await call_tool(rpc, tool, {"table": "oak"})
-                assert not res["result"].get("isError"), (tool, res)
-    assert len(w.core.bodies("/event-subscriptions")) == 8
-    assert w.warnings == [
-        _warning("old", " without declaring the events it subscribes to", "<table.news's event>"),
-        _warning("other", ", which its subscribes doesn't list (game.turn)", "<game.turn's event>, <table.news's event>"),
-        _warning("none", ", but declares that it subscribes to nothing", "<table.news's event>"),
-    ]
-
-
-async def test_an_undeclared_subscribe_is_refused_in_error_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(toolcall, "_UNDECLARED_IS_ERROR", True)
-    w = _undeclared()
-    async with w.served() as (_, rpc):
-        res = await call_tool(rpc, "old", {"table": "oak"})
-        # The tool fails (MCPServer and FastMCP show their own text for an
-        # exception that isn't a ToolError; the exception says the fix).
-        assert "error" in res or res["result"].get("isError"), res
-        assert w.core.bodies("/event-subscriptions") == []
-        res = await call_tool(rpc, "fine", {"table": "oak"})
-        assert not res["result"].get("isError"), res
+        for tool in ("old", "other", "fine"):
+            res = await call_tool(rpc, tool, {"table": "oak"})
+            assert not res["result"].get("isError"), (tool, res)
+    assert got == {"old": "undeclared_subscribe", "other": "undeclared_subscribe", "fine": "subscribed"}
+    assert len(w.core.bodies("/event-subscriptions")) == 1
     assert not w.warnings
-
-
-async def test_the_error_is_undeclared_subscribe() -> None:
-    w = Wrapped()
-    got: list[BaseException] = []
-
-    @w.attached.tool()
-    async def old(table: str, call: ToolCall) -> str:
-        toolcall._UNDECLARED_IS_ERROR = True
-        try:
-            await call.subscribe(w.shared, {"table": table})
-        except UndeclaredSubscribe as err:
-            got.append(err)
-        finally:
-            toolcall._UNDECLARED_IS_ERROR = False
-        return "ok"
-
-    async with w.served() as (_, rpc):
-        await call_tool(rpc, "old", {"table": "oak"})
-    assert [str(e) for e in got] == [
-        "wakeshift: the tool old subscribed to table.news without declaring the events it subscribes to, so the "
-        "subscribe was refused. Fix: @attached.tool(subscribes=[<table.news's event>])."
-    ]
 
 
 def test_subscribes_takes_only_this_apps_events_as_a_list() -> None:
     w = Wrapped()
     theirs = Wrapped()
-    with pytest.raises(TypeError, match="isn't one of this app's events"):
+    with pytest.raises(UsageError, match="isn't one of this app's events"):
         w.attached.tool(subscribes=[theirs.shared])
-    with pytest.raises(TypeError, match="lists the events the tool subscribes to"):
+    with pytest.raises(UsageError, match="lists the events the tool subscribes to"):
         w.attached.tool(subscribes=w.shared)  # type: ignore[arg-type]

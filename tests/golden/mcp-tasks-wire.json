@@ -5,6 +5,7 @@
   "hold_seconds": 20,
   "wait_tool": {
     "name": "wakeshift_wait",
+    "title": "Wait for messages",
     "description": "Wait for this conversation's next Wakeshift messages from this app. Returns at once and keeps waiting in the background: when messages arrive, its result reaches you as a task notification. Call it again after each one, with the session_key Wakeshift gave you.",
     "inputSchema": {
       "type": "object",

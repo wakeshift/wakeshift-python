@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any
 
 import httpx2
@@ -16,28 +17,27 @@ from mcp.shared.exceptions import MCPError
 from pydantic import BaseModel, ConfigDict
 
 from wakeshift import (
-    BUILTIN_TOOLS,
-    CallEnded,
     Emitted,
-    EventsOptions,
     EventStatus,
-    EventSubscriptionStatus,
     Identity,
     IdReusedError,
     Recipient,
+    Request,
+    SessionKey,
     Subscription,
+    SubscriptionStatus,
     ToolCall,
-    WakeOutput,
+    UsageError,
     Wakeshift,
     WakeshiftError,
-    is_code,
 )
-from wakeshift.client import SESSION_DESCRIPTION
-from wakeshift.events import tool_choice
-from wakeshift.toolcall import CONVERSATION_META, conversation_key, merge_block, with_wakeshift_field
+from wakeshift._errors import anchor
+from wakeshift._events import builtin_choice
+from wakeshift._text import COMPACT
+from wakeshift._toolcall import CONVERSATION_META, conversation_key, merge_block, with_wakeshift_field
 
 from .conftest import FASTMCP
-from .helpers import app_key, golden_file, served
+from .helpers import Logged, app_key, golden_file, served
 
 TRAILER = "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: aaaaaaaaaa.bbbbbbbbbb.cccccccccc)"
 WOKEN = "Wakeshift: this conversation is woken by Monitor."
@@ -54,9 +54,12 @@ class WakeCore:
         #: /event-subscriptions/unsubscribe's answer, if set.
         self.unsubscribe: dict[str, Any] | None = None
         self.fail: set[str] = set()
+        #: A path that times out, fails to connect, or answers 401 (a refused key).
+        self.broken: dict[str, str] = {}
         self.native: list[dict[str, Any]] = []
-        #: Seconds each subscribe takes.
+        #: Seconds each subscribe takes, and each unsubscribe.
         self.delay = 0.0
+        self.unsub_delay = 0.0
         #: GET /app's name, if set (otherwise /app is a 404).
         self.app_name: str | None = None
         #: Seconds GET /app takes.
@@ -75,12 +78,21 @@ class WakeCore:
         path = request.url.path.removeprefix("/api/apps/v1")
         if self.delay and path == "/event-subscriptions":
             await asyncio.sleep(self.delay)
+        if self.unsub_delay and path == "/event-subscriptions/unsubscribe":
+            await asyncio.sleep(self.unsub_delay)
         body = json.loads(request.content) if request.content else {}
         self.calls.append((path, body))
         if self.app_delay and path == "/app":
             await asyncio.sleep(self.app_delay)
         if path in self.fail:
             return httpx2.Response(503, json={"error": {"code": "unavailable", "message": "down"}})
+        broken = self.broken.get(path)
+        if broken == "timeout":
+            raise httpx2.ReadTimeout("timed out", request=request)
+        if broken == "unreachable":
+            raise httpx2.ConnectError("connection refused", request=request)
+        if broken == "401":
+            return httpx2.Response(401, json={"error": {"code": "unauthenticated", "message": "key revoked"}})
         call = (body or {}).get("call") or {}
         if path in ("/manifest", "/manifest/merge"):
             return httpx2.Response(200, json=body)
@@ -154,7 +166,7 @@ class TurnMsg(BaseModel):
     text: str
 
 
-class View(WakeOutput):
+class View(BaseModel):
     table: str
 
 
@@ -162,15 +174,20 @@ class PlainView(BaseModel):
     table: str
 
 
+class Seat(BaseModel):
+    table: str
+    seat: int
+
+
 class Wrapped:
     """An app with a personal and a shared event, behind attach on a stateless
     MCPServer whose X-User header is the user."""
 
-    def __init__(self, events: EventsOptions | None = None, identify: Any = "header") -> None:
+    def __init__(self, is_native_client: Any = None, identify: Any = "header", **wake: Any) -> None:
         self.core = WakeCore()
-        self.warnings: list[str] = []
+        self.warnings = Logged()
         http = httpx2.AsyncClient(transport=httpx2.MockTransport(self.core.handler))
-        self.wake = Wakeshift(app_key("cards"), core="http://core.test", http=http, on_warning=self.warnings.append)
+        self.wake = Wakeshift(app_key("cards"), core="https://core.test", http_client=http, **wake)
         self.turn = self.wake.define_event(
             "game.turn", description="Your turn.", args=TableArgs, payload=TurnMsg, text=lambda m, a: m.text, personal=True
         )
@@ -180,10 +197,10 @@ class Wrapped:
         self.server = MCPServer("cards")
         if identify == "header":
 
-            def identify(ctx: Any) -> Identity:
-                return Identity(user=ctx.request.headers.get("x-user") if ctx.request is not None else None)
+            def identify(r: Request) -> Identity:
+                return Identity(user=r.headers.get("x-user"))
 
-        self.attached = self.wake.attach(self.server, identify=identify, events=events)
+        self.attached = self.wake.attach(self.server, identify=identify, is_native_client=is_native_client)
 
     def served(self) -> Any:
         return served(self.server)
@@ -218,7 +235,7 @@ async def test_two_subscribes_one_block() -> None:
     got: list[Subscription] = []
     before: list[Any] = []
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def join(table: str, call: ToolCall) -> str:
         """Take a seat."""
         before.append((call.recognized, call.session, call.user, call.tool, call.native))
@@ -243,7 +260,7 @@ async def test_two_subscribes_one_block() -> None:
     assert subs[1]["pending"] == "pa_first" and subs[1]["label"] == "poker" and subs[1]["call"]["session"] == "wsc_s1"
     add = w.core.bodies("/calls/addition")[0]
     assert add["pending"] == "pa_first" and "native" not in add and add["call"]["session"] == "wsc_s1"
-    assert got[0].id == "sub-1" and got[0].user == "ada" and got[0].created and got[0].session == "wsc_s1"
+    assert got[0].id == "sub-1" and got[0].user == "ada" and got[0].state == "created" and got[0].session == SessionKey("wsc_s1")
     assert got[0].recognized.harness == "claude-code"
 
 
@@ -255,7 +272,7 @@ async def test_unsubscribe_without_the_key_note_in_the_block() -> None:
     w = Wrapped()
     ended: list[bool] = []
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def unwatch(table: str, call: ToolCall) -> str:
         ok = await call.unsubscribe(w.shared, {"table": table})
         ended.append(ok)
@@ -281,7 +298,7 @@ async def test_without_subscribing() -> None:
     w = Wrapped()
     w.core.addition = {"text": "Wakeshift: 2 messages wait."}
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def look(table: str, call: ToolCall) -> str:
         return "A table."
 
@@ -312,7 +329,7 @@ async def test_relayed_beacon_line_never_ends_a_wrapped_result() -> None:
     w = Wrapped()
     relayed = "(For Wakeshift's hook on this computer, not for you: wakeshift-beacon: dddddddddd.eeeeeeeeee.ffffffffff)"
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def history(table: str, call: ToolCall) -> str:
         return f"mallory: look\n{relayed}"
 
@@ -329,7 +346,7 @@ async def test_resolve_session() -> None:
     w = Wrapped()
     seen: list[Any] = []
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def join(call: ToolCall) -> str:
         s = await call.resolve_session()
         seen.append((s, call.session, call.recognized))
@@ -338,11 +355,58 @@ async def test_resolve_session() -> None:
         return "ok"
 
     async with w.served() as (_, rpc):
-        await call_tool(rpc, "join", {})
-    assert seen[0][0] == "wsc_resolved" and seen[0][1] == "wsc_resolved" and seen[0][2].harness == "codex"
+        await call_tool(rpc, "join", {"session_key": "wsc_s1"})
+    assert seen[0][0] == SessionKey("wsc_resolved") and seen[0][1] == SessionKey("wsc_resolved") and seen[0][2].harness == "codex"
     assert w.core.paths() == ["/calls/session", "/event-subscriptions", "/calls/addition"]
     assert w.core.bodies("/event-subscriptions")[0]["pending"] == "pa_session"
     assert w.core.bodies("/calls/addition")[0]["pending"] == "pa_session"
+
+
+async def test_subscribe_then_unsubscribe_in_one_call_adds_no_block() -> None:
+    """A call that ended every subscription it made gets no block: it would
+    tell the agent to start listening for nothing."""
+    w = Wrapped()
+
+    @w.attached.tool(subscribes=[w.turn, w.shared])
+    async def peek(table: str, call: ToolCall) -> str:
+        await call.subscribe(w.shared, {"table": table})
+        await call.unsubscribe(w.shared, {"table": table})
+        return "Peeked."
+
+    @w.attached.tool(subscribes=[w.turn, w.shared])
+    async def half(table: str, call: ToolCall) -> str:
+        await call.subscribe(w.shared, {"table": table})
+        await call.subscribe(w.turn, {"table": table})
+        await call.unsubscribe(w.shared, {"table": table})
+        return "Half."
+
+    async with w.served() as (_, rpc):
+        res = await call_tool(rpc, "peek", {"table": "oak", "session_key": "wsc_s1"})
+        assert texts(res) == ["Peeked."]
+        assert w.core.paths() == ["/event-subscriptions", "/event-subscriptions/unsubscribe"]
+        # One still live: the block stays.
+        res = await call_tool(rpc, "half", {"table": "elm"})
+        assert texts(res) == [f"Half.\n\n{WOKEN}\n\n{TRAILER}"]
+
+
+async def test_call_session_is_none_until_wakeshift_resolved_it() -> None:
+    """call.session is never the raw session_key argument (a caller can
+    forge one): None until a subscribe reached Wakeshift, then its answer.
+    The passed key still goes to Wakeshift."""
+    w = Wrapped()
+    seen: list[Any] = []
+
+    @w.attached.tool(subscribes=[w.turn, w.shared])
+    async def join(call: ToolCall) -> str:
+        seen.append(call.session)
+        await call.subscribe(w.shared, {"table": "oak"})
+        seen.append(call.session)
+        return "ok"
+
+    async with w.served() as (_, rpc):
+        await call_tool(rpc, "join", {"session_key": "wsc_forged_0123456789"})
+    assert seen == [None, SessionKey("wsc_s1")]
+    assert w.core.bodies("/event-subscriptions")[0]["call"]["session"] == "wsc_forged_0123456789"
 
 
 # ── Rollback ──────────────────────────────────────────────────────────────
@@ -356,24 +420,24 @@ async def test_rollback_on_each_failure_kind() -> None:
         await call.subscribe(w.shared, {"table": "old"})
         await call.subscribe(w.shared, {"table": "new"})
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def fails(call: ToolCall) -> str:
         await both(call)
         raise ValueError("the table is full")
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def is_error(call: ToolCall) -> Any:
         from mcp_types import CallToolResult, TextContent
 
         await both(call)
         return CallToolResult(content=[TextContent(type="text", text="no")], is_error=True)
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def rpc_error(call: ToolCall) -> str:
         await both(call)
         raise MCPError(-32602, "bad table")
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def bad_output(call: ToolCall) -> PlainView:
         await both(call)
         return {"seat": 3}  # type: ignore[return-value]  # no table: the output schema refuses it
@@ -402,7 +466,7 @@ async def test_rollback_on_cancellation() -> None:
     w = Wrapped()
     subscribed = asyncio.Event()
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def slow(call: ToolCall) -> str:
         await call.subscribe(w.shared, {"table": "oak"})
         subscribed.set()
@@ -424,37 +488,122 @@ async def test_rollback_on_cancellation() -> None:
     assert "/calls/addition" not in w.core.paths()
 
 
-async def test_block_failure_rolls_back() -> None:
-    w = Wrapped()
-    w.core.fail.add("/calls/addition")
+# Wakeshift's part failing never changes the tool's result: the vendor's
+# tool may have done paid or visible work, so an error, or text telling the
+# agent to try again, would repeat it. The result goes out as the tool gave
+# it; what the call subscribed is rolled back, and block_failed is logged.
+@pytest.mark.parametrize(
+    "fail",
+    ["503", "timeout", "unreachable", "401"],
+    ids=["the addition fails", "the addition times out", "the core is unreachable", "the key is refused"],
+)
+async def test_a_failed_block_returns_the_tools_own_result(fail: str) -> None:
+    w = Wrapped(max_retries=0)
+    if fail == "503":
+        w.core.fail.add("/calls/addition")
+    else:
+        w.core.broken["/calls/addition"] = fail
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def join(table: str, call: ToolCall) -> str:
         await call.subscribe(w.shared, {"table": table})
         return "Seated."
 
+    @w.attached.tool(subscribes=[w.shared])
+    async def seat(table: str, call: ToolCall) -> Seat:
+        await call.subscribe(w.shared, {"table": table})
+        return Seat(table=table, seat=3)
+
+    # The structured tool without Wakeshift: what the agent must get.
+    @w.server.tool()
+    async def plain_seat(table: str) -> Seat:
+        return Seat(table=table, seat=3)
+
     async with w.served() as (_, rpc):
         res = await call_tool(rpc, "join", {"table": "oak"})
-    assert res["result"]["isError"] is True
-    assert "Wakeshift couldn't finish setting up" in texts(res)[0]
+        out = await call_tool(rpc, "seat", {"table": "elm"})
+        want_out = await call_tool(rpc, "plain_seat", {"table": "elm"})
+    # A wrapped tool returning a string has no output schema: one text item.
+    assert res["result"] == {"content": [{"type": "text", "text": "Seated."}], "isError": False}, res
+    assert out["result"] == want_out["result"], out
+    assert out["result"]["structuredContent"] == {"table": "elm", "seat": 3} and not out["result"].get("isError")
     ends = w.core.bodies("/event-subscriptions/unsubscribe")
-    assert len(ends) == 1 and ends[0]["reason"] == "rolled_back"
-    # The app hears why, through on_warning.
-    assert any("the block for join failed" in m for m in w.warnings), w.warnings
+    assert len(ends) == 2 and all(e["reason"] == "rolled_back" for e in ends)
+    lines = [r for r in w.warnings.records if getattr(r, "wakeshift_code", "") == "block_failed"]
+    assert len(lines) == 1, w.warnings
+    assert lines[0].levelno == logging.WARNING
+    assert lines[0].wakeshift_tool == "join"  # type: ignore[attr-defined]
+    assert lines[0].wakeshift_count == 1  # type: ignore[attr-defined]
+    fix = next(c.get("fix_python", c["fix"]) for c in golden_file("warnings.json")["codes"] if c["code"] == "block_failed")
+    assert fix in lines[0].getMessage()
+    assert "key revoked" not in " ".join(w.warnings) and "down" not in " ".join(w.warnings)
+
+
+async def test_the_vendors_own_error_and_throw_pass_through_when_wakeshift_is_down() -> None:
+    w = Wrapped()
+    w.core.fail.add("/calls/addition")
+
+    @w.attached.tool(subscribes=[w.shared])
+    async def refuse(table: str, call: ToolCall) -> Any:
+        from mcp_types import CallToolResult, TextContent
+
+        await call.subscribe(w.shared, {"table": table})
+        return CallToolResult(content=[TextContent(type="text", text="The table is full.")], is_error=True)
+
+    @w.attached.tool(subscribes=[w.shared])
+    async def boom(table: str, call: ToolCall) -> str:
+        await call.subscribe(w.shared, {"table": table})
+        raise ValueError("the dealer left")
+
+    async with w.served() as (_, rpc):
+        res = await call_tool(rpc, "refuse", {"table": "oak"})
+        thrown = await call_tool(rpc, "boom", {"table": "oak"})
+    assert res["result"]["isError"] is True and texts(res) == ["The table is full."]
+    # The host's own answer to a tool that raised, as without Wakeshift.
+    said = "Error calling tool 'boom': the dealer left" if FASTMCP else "Error executing tool boom"
+    assert thrown["result"] == {"content": [{"type": "text", "text": said}], "isError": True}
+    assert "/calls/addition" not in w.core.paths()
+
+
+async def test_an_undeclared_subscribe_never_reaches_the_agent_as_try_again() -> None:
+    """A bug the developer must see (raised, in their logs); the agent gets
+    the host's own error for a tool that raised, nothing asking it to call again."""
+    w = Wrapped()
+    raised: list[BaseException] = []
+
+    @w.attached.tool(subscribes=[w.turn])
+    async def other(table: str, call: ToolCall) -> str:
+        try:
+            await call.subscribe(w.shared, {"table": table})
+        except UsageError as err:
+            raised.append(err)
+            raise
+        return "ok"
+
+    async with w.served() as (_, rpc):
+        res = await call_tool(rpc, "other", {"table": "oak"})
+    assert [getattr(e, "code", "") for e in raised] == ["undeclared_subscribe"]
+    assert res["result"]["isError"] is True
+    said = texts(res)[0]
+    if FASTMCP:  # FastMCP shows the error's message: the developer's text, with its fix and link
+        assert said.startswith("Error calling tool 'other': wakeshift: other subscribed to table.news"), said
+    else:  # MCPServer hides it
+        assert said == "Error executing tool other"
+    assert "again" not in json.dumps(res).lower()
 
 
 async def test_a_failed_block_without_a_subscription_is_a_courtesy() -> None:
     w = Wrapped()
     w.core.fail.add("/calls/addition")
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def look(call: ToolCall) -> str:
         return "A table."
 
     async with w.served() as (_, rpc):
         res = await call_tool(rpc, "look", {"session_key": "wsc_s1"})
     assert texts(res) == ["A table."] and not res["result"].get("isError")
-    assert any("addition" in m for m in w.warnings)
+    assert not w.warnings, "a courtesy that failed is logged at debug only"
 
 
 # ── The scope guard ───────────────────────────────────────────────────────
@@ -477,7 +626,7 @@ async def test_scope_guard() -> None:
         )  # type: ignore[arg-type]
     kept: list[ToolCall] = []
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def join(call: ToolCall) -> str:
         kept.append(call)
         return "ok"
@@ -485,9 +634,9 @@ async def test_scope_guard() -> None:
     async with w.served() as (_, rpc):
         await call_tool(rpc, "join", {})
     assert kept
-    with pytest.raises(CallEnded):
+    with pytest.raises(UsageError, match="already returned"):
         await kept[0].subscribe(w.turn, {"table": "oak"})
-    with pytest.raises(CallEnded):
+    with pytest.raises(UsageError, match="already returned"):
         await kept[0].resolve_session()
     assert "/event-subscriptions" not in w.core.paths() and "/calls/session" not in w.core.paths()
 
@@ -496,7 +645,7 @@ async def test_scope_guard() -> None:
     w.attached._server = other  # register the next tool on another server
     ran: list[bool] = []
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def stray(call: ToolCall) -> str:
         ran.append(True)
         return "ran"
@@ -510,71 +659,127 @@ def test_decorator_refusals() -> None:
     w = Wrapped()
     with pytest.raises(TypeError, match="async"):
 
-        @w.attached.tool()
+        @w.attached.tool(subscribes=[w.turn, w.shared])
         def sync(call: ToolCall) -> str:  # pyright: ignore[reportUnusedFunction]
             return ""
 
     with pytest.raises(TypeError, match="ToolCall"):
 
-        @w.attached.tool()
+        @w.attached.tool(subscribes=[w.turn, w.shared])
         async def nocall(table: str) -> str:  # pyright: ignore[reportUnusedFunction]
             return ""
 
-    with pytest.raises(TypeError, match="parentheses"):
-        w.attached.tool(lambda: None)  # type: ignore[arg-type]
+    # A tool that subscribes nothing is a plain registration: sync is fine, and so is no ToolCall.
+    def plain() -> str:
+        return "plain"
+
+    assert w.attached.tool(plain) is plain
+
+    # The bare form registers too, and every form returns the function itself.
+    @w.attached.tool
+    async def bare(call: ToolCall) -> str:
+        return "bare"
+
+    async def fn(call: ToolCall) -> str:
+        return ""
+
+    assert w.attached.tool("named")(fn) is fn and bare.__name__ == "bare"
 
 
-async def test_attach_tools_option() -> None:
-    """attach's tools picks which of its own tools it adds: all three by
-    default, each {"enabled"} of the mapping form, or (deprecated, with a
-    warning once) the ones a list names; anything it doesn't know is refused."""
-    assert BUILTIN_TOOLS == ("subscribe_events", "unsubscribe_events", "list_subscriptions")
+class Out(BaseModel):
+    wakeshift: str
 
-    async def listed(tools: Any) -> tuple[list[str], list[str]]:
-        warnings: list[str] = []
-        wake = Wakeshift(app_key("cards"), core="http://core.test", on_warning=warnings.append)
-        wake.define_event("table.news", description="News at a table.", args=TableArgs, payload=TurnMsg, text=lambda m, a: m.text)
-        server = MCPServer("cards")
-        wake.attach(server, tools=tools)
-        return sorted(t.name for t in await server.list_tools()), warnings
 
+def test_a_local_import_resolves_under_future_annotations() -> None:
+    """#66: with `from __future__ import annotations`, a ToolCall imported
+    inside a function resolves; any other name that doesn't is a clear TypeError."""
+    w = Wrapped()
+    src = (
+        "from __future__ import annotations\n"
+        "def register(attached):\n"
+        "    from wakeshift import ToolCall\n"
+        "    @attached.tool()\n"
+        "    async def local(table: str, call: ToolCall) -> str:\n"
+        "        return table\n"
+        "    return local\n"
+        "def bad(attached):\n"
+        "    from pydantic import BaseModel\n"
+        "    class Local(BaseModel):\n"
+        "        x: int\n"
+        "    from wakeshift import ToolCall\n"
+        "    @attached.tool()\n"
+        "    async def other(v: Local, call: ToolCall) -> str:\n"
+        "        return ''\n"
+    )
+    ns: dict[str, Any] = {}
+    exec(compile(src, "local_tools.py", "exec"), ns)
+    assert ns["register"](w.attached).__name__ == "local"
+    with pytest.raises(TypeError, match="can't resolve the annotation 'Local'"):
+        ns["bad"](w.attached)
+
+
+def test_registration_conflicts_are_refused() -> None:
+    w = Wrapped()
+    other = Wrapped()
+
+    async def builtin(call: ToolCall) -> str:
+        return ""
+
+    with pytest.raises(UsageError, match="subscribe_events") as e:
+        w.attached.tool("subscribe_events")(builtin)
+    assert e.value.code == "config"
+    with pytest.raises(UsageError, match="session_key"):
+
+        @w.attached.tool(subscribes=[w.turn, w.shared])
+        async def own_key(session_key: str, call: ToolCall) -> str:  # pyright: ignore[reportUnusedFunction]
+            return ""
+
+    with pytest.raises(UsageError, match="wakeshift"):
+
+        @w.attached.tool(subscribes=[w.turn, w.shared])
+        async def own_field(call: ToolCall) -> Out:  # pyright: ignore[reportUnusedFunction]
+            return Out(wakeshift="")
+
+    assert w.server._tool_manager.get_tool("own_field") is None, "a refused tool isn't left registered"
+    with pytest.raises(UsageError, match="another"):
+        w.attached.tool(subscribes=[other.shared])
+
+
+async def test_attach_builtin_tools_option() -> None:
+    """attach's builtin_tools picks which of its own tools it serves: the
+    three by default, each True or False; anything it doesn't know is refused."""
     every = ["list_subscriptions", "subscribe_events", "unsubscribe_events"]
-    for tools in (
-        None,
-        {},
-        {"subscribe": {}},
-        {"list": {"enabled": True}},
-        {"wait": {"enabled": False}},
-        {"wait": {"enabled": True}},
-    ):
-        assert await listed(tools) == (every, []), tools
-    assert (await listed({"subscribe": {"enabled": False}}))[0] == ["list_subscriptions", "unsubscribe_events"]
-    off = {"enabled": False}
-    assert (await listed({"subscribe": off, "list": off, "unsubscribe": off}))[0] == []
-    names, warnings = await listed(["list_subscriptions", "unsubscribe_events"])
-    assert names == ["list_subscriptions", "unsubscribe_events"]
-    assert len(warnings) == 1 and "tools as a list of names is deprecated" in warnings[0]
-    assert (await listed([]))[0] == []
-    wake = Wakeshift(app_key("cards"), core="http://core.test")
+
+    async def listed(builtin_tools: Any) -> list[str]:
+        wake = Wakeshift(app_key("cards"), core="https://core.test")
+        wake.define_event(
+            "table.news", description="News at a table.", args=TableArgs, payload=TurnMsg, text=lambda m, a: m.text, public=True
+        )
+        server = MCPServer("cards")
+        wake.attach(server, builtin_tools=builtin_tools)
+        async with served(server) as (_, rpc):
+            return sorted(t["name"] for t in (await rpc("tools/list", {}))["result"]["tools"])
+
+    for choice in (None, {}, {"list": True}, {"wait": False}, {"wait": True}):
+        assert await listed(choice) == every, choice
+    assert await listed({"subscribe": False}) == ["list_subscriptions", "unsubscribe_events"]
+    assert await listed({"subscribe": False, "list": False, "unsubscribe": False}) == []
+    wake = Wakeshift(app_key("cards"), core="https://core.test")
     wake.define_event("table.news", description="News at a table.", args=TableArgs, payload=TurnMsg, text=lambda m, a: m.text)
-    with pytest.raises(ValueError, match="'subscribe'"):
-        wake.attach(MCPServer("cards"), tools=["subscribe"])
-    with pytest.raises(ValueError, match="has 'subscribe_events'"):
-        wake.attach(MCPServer("cards"), tools={"subscribe_events": off})  # type: ignore[typeddict-unknown-key]
-    with pytest.raises(TypeError, match=r"tools\['wait'\] is a mapping"):
-        wake.attach(MCPServer("cards"), tools={"wait": True})  # type: ignore[typeddict-item]
-    with pytest.raises(TypeError, match="True or False"):
-        wake.attach(MCPServer("cards"), tools={"wait": {"enabled": "yes"}})  # type: ignore[typeddict-item]
-    with pytest.raises(ValueError, match="has 'hold_seconds'"):
-        wake.attach(MCPServer("cards"), tools={"wait": {"hold_seconds": 5}})  # type: ignore[typeddict-unknown-key]
+    with pytest.raises(UsageError, match="'subcribe'") as e:
+        wake.attach(MCPServer("cards"), builtin_tools={"subcribe": False})  # type: ignore[typeddict-unknown-key]
+    assert e.value.code == "config"
+    with pytest.raises(UsageError, match=r"builtin_tools\['wait'\] is True or False"):
+        wake.attach(MCPServer("cards"), builtin_tools={"wait": "yes"})  # type: ignore[typeddict-item]
+    with pytest.raises(UsageError, match="mapping"):
+        wake.attach(MCPServer("cards"), builtin_tools=["subscribe_events"])  # type: ignore[arg-type]
 
 
-def test_tool_choice() -> None:
-    """The mapping form and the list form; the wait tool only when enabled, never from a list."""
-    assert tool_choice(None) == (set(BUILTIN_TOOLS), False)
-    assert tool_choice({"wait": {"enabled": True}}) == (set(BUILTIN_TOOLS), True)
-    assert tool_choice({"list": {"enabled": False}}) == ({"subscribe_events", "unsubscribe_events"}, False)
-    assert tool_choice(["subscribe_events"]) == ({"subscribe_events"}, False)
+def test_builtin_choice() -> None:
+    every = {"subscribe_events", "unsubscribe_events", "list_subscriptions"}
+    assert builtin_choice(None) == (every, False)
+    assert builtin_choice({"wait": True}) == (every, True)
+    assert builtin_choice({"list": False}) == ({"subscribe_events", "unsubscribe_events"}, False)
 
 
 async def test_schema_hides_call_and_adds_wake_args() -> None:
@@ -584,19 +789,19 @@ async def test_schema_hides_call_and_adds_wake_args() -> None:
     async def join(table: str, call: ToolCall, seats: int = 1) -> str:
         return ""
 
-    @w.attached.tool()
-    async def with_ctx(ctx: Context, call: ToolCall, harness: str | None = None) -> str:
-        """Own context and harness."""
+    @w.attached.tool(subscribes=[w.turn, w.shared])
+    async def with_ctx(ctx: Context, call: ToolCall) -> str:
+        """Own context."""
         assert ctx is call.context
-        return f"h={harness}"
+        return "h=" + str(ctx is call.context)
 
     tools = {t.name: t for t in await w.server.list_tools()}
     props = tools["join"].input_schema["properties"]
-    assert set(props) == {"table", "seats", "session_key", "harness", "conversation_id"}
-    assert props["session_key"]["description"] == SESSION_DESCRIPTION
+    assert set(props) == {"table", "seats", "session_key"}, "subscribes=[]: only session_key"
+    assert props["session_key"]["description"] == COMPACT["session_key"]
     assert tools["join"].input_schema.get("required") == ["table"]
     assert tools["join"].description == "Take a seat."
-    assert tools["with_ctx"].description == "Own context and harness."
+    assert tools["with_ctx"].description == "Own context."
     assert set(tools["with_ctx"].input_schema["properties"]) == {"session_key", "harness", "conversation_id"}
     # The registered wrapper hides call from its signature and its evaluated annotations.
     import inspect
@@ -606,16 +811,16 @@ async def test_schema_hides_call_and_adds_wake_args() -> None:
     assert fn.__annotations__["table"] is str and fn.__annotations__["return"] is str
     assert "wakeshift_context" in fn.__annotations__
     async with w.served() as (_, rpc):
-        assert texts(await call_tool(rpc, "with_ctx", {"harness": "codex"})) == ["h=codex"]
+        assert texts(await call_tool(rpc, "with_ctx", {"harness": "codex"})) == ["h=True"]
 
 
 async def test_personal_and_other_app_checks() -> None:
     w = Wrapped(identify=None)
-    other = Wakeshift(app_key("other"), core="http://core.test")
+    other = Wakeshift(app_key("other"), core="https://core.test")
     foreign = other.define_event("x.y", description="X.", args=TableArgs, payload=TurnMsg, text=lambda m, a: "")
     errs: list[BaseException] = []
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def join(call: ToolCall) -> str:
         for ev in (w.turn, foreign):
             try:
@@ -627,7 +832,7 @@ async def test_personal_and_other_app_checks() -> None:
     async with w.served() as (_, rpc):
         await call_tool(rpc, "join", {})
     assert isinstance(errs[0], WakeshiftError) and errs[0].code == "bad_arguments" and "personal" in str(errs[0])
-    assert is_code(errs[1], "unknown_event") and "another app" in str(errs[1])
+    assert isinstance(errs[1], UsageError) and errs[1].code == "unknown_event" and "another app" in str(errs[1])
     assert "/event-subscriptions" not in w.core.paths()
 
 
@@ -635,7 +840,7 @@ async def test_in_flight_subscribe_is_waited_for() -> None:
     w = Wrapped()
     w.core.delay = 0.1
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def join(call: ToolCall) -> str:
         asyncio.ensure_future(call.subscribe(w.shared, {"table": "oak"}))
         return "ok"
@@ -651,7 +856,7 @@ async def test_in_flight_subscribe_is_waited_for() -> None:
 
 
 async def test_native_callers() -> None:
-    w = Wrapped(events=EventsOptions(native=lambda ctx: ctx.request_context.request.headers.get("x-house") == "yes"))
+    w = Wrapped(is_native_client=lambda r: r.headers.get("x-house") == "yes")
     w.core.addition = {"text": 'To be woken by game.turn with {"table":"oak"}, subscribe to it (MCP Events).'}
     w.core.native = [
         {"id": "n1", "event": "game.turn", "arguments": {"table": "oak"}, "destination": "webhook"},
@@ -662,14 +867,14 @@ async def test_native_callers() -> None:
     subs: list[Subscription] = []
     ended: list[bool] = []
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def join(table: str, call: ToolCall) -> str:
         seen.append((call.native, call.native_conversation))
         subs.append(await call.subscribe(w.turn, {"table": table}))
         subs.append(await call.subscribe(w.turn, {"table": table}))  # once in the block
         return "Seated."
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def leave(table: str, call: ToolCall) -> str:
         ended.append(await call.unsubscribe(w.turn, {"table": table}))
         return "Left."
@@ -693,7 +898,7 @@ async def test_native_callers() -> None:
             res = await call_tool(rpc, "join", {"table": "oak"}, ua=ua, meta=meta)
             assert not res["result"].get("isError"), (name, res)
             assert seen == [(True, conv)], name
-            assert subs[0].native and subs[0].id == "" and not subs[0].created and subs[0].user == "ada", name
+            assert subs[0].state == "native" and subs[0].id == "" and subs[0].user == "ada", name
             assert w.core.paths() == ["/calls/addition"], name
             assert w.core.bodies("/calls/addition")[0]["native"] == [{"name": "game.turn", "arguments": {"table": "oak"}}]
             assert "subscribe to it (MCP Events)" in "\n".join(texts(res))
@@ -715,14 +920,14 @@ async def test_identify_client() -> None:
     native, and the request's own name wins."""
     clients = {"ada": "Claude Code", "gpt": "openai-mcp"}
 
-    def identify(ctx: Any) -> Identity:
-        user = ctx.request.headers.get("x-user") if ctx.request is not None else None
+    def identify(r: Request) -> Identity:
+        user = r.headers.get("x-user")
         return Identity(user=user, client=clients.get(user or ""))
 
     w = Wrapped(identify=identify)
     native: list[bool] = []
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def join(table: str, call: ToolCall) -> str:
         native.append(call.native)
         await call.subscribe(w.shared, {"table": table})
@@ -748,7 +953,7 @@ async def test_identify_client() -> None:
         await call_tool(rpc, "join", {"table": "oak"}, user="gpt", ua="x/1")
         assert native[-1] is True and w.core.bodies("/event-subscriptions") == [], "ChatGPT by identify's name"
         w.core.reset()
-        await call_tool(rpc, "subscribe_events", {"event": "table.news", "arguments": {"table": "oak"}})
+        await call_tool(rpc, "subscribe_events", {"event": "game.turn", "arguments": {"table": "oak"}})
         assert client_of() == "Claude Code", "subscribe_events"
 
 
@@ -859,7 +1064,7 @@ async def test_no_session_alias() -> None:
     w = Wrapped()
     got: list[str | None] = []
 
-    @w.attached.tool()
+    @w.attached.tool(subscribes=[w.turn, w.shared])
     async def join(table: str, call: ToolCall) -> str:
         got.append(call.session)
         return "ok"
@@ -916,7 +1121,7 @@ async def test_emit_recipients_golden() -> None:
                 lambda r, resp=resp: httpx2.Response(200, json=resp if r.url.path.endswith("/emit") else {})
             )
         )
-        wake = Wakeshift(app_key("cards"), core="http://core.test", http=http, on_warning=lambda m: None)
+        wake = Wakeshift(app_key("cards"), core="https://core.test", http_client=http)
         ev = wake.define_event(
             "game.turn", description="T.", args=TableArgs, payload=TurnMsg, text=lambda m, a: m.text, personal=True
         )
@@ -941,7 +1146,7 @@ async def test_emit_recipients_golden() -> None:
             )
         )
     )
-    wake = Wakeshift(app_key("cards"), core="http://core.test", http=http)
+    wake = Wakeshift(app_key("cards"), core="https://core.test", http_client=http)
     ev = wake.define_event(
         "game.turn", description="T.", args=TableArgs, payload=TurnMsg, text=lambda m, a: m.text, personal=True
     )
@@ -963,7 +1168,7 @@ async def test_emit_recipients_golden() -> None:
     one = f["one_user"]
     w.core.reset()
     await w.turn.status({"table": "oak"}, to=one["to"])
-    await w.turn.publish_url({"table": "oak"}, to=one["to"])
+    await w.turn.create_publish_url({"table": "oak"}, to=one["to"])
     assert w.core.bodies("/events/status")[0]["to"] == one["wire"]
     assert w.core.bodies("/events/publish-urls")[0]["to"] == one["wire"]
     w.core.reset()
@@ -972,7 +1177,7 @@ async def test_emit_recipients_golden() -> None:
             await w.turn.status({"table": "oak"}, to=to)
         assert e.value.code == one["refused_code"], repr(to)
         with pytest.raises(WakeshiftError) as e:
-            await w.turn.publish_url({"table": "oak"}, to=to)
+            await w.turn.create_publish_url({"table": "oak"}, to=to)
         assert e.value.code == one["refused_code"], repr(to)
     so = f["status_of"]
     await w.turn.status_of([Recipient(user=s["user"], subscription=s["subscription"]) for s in so["subscriptions"]])
@@ -1004,7 +1209,7 @@ async def test_emit_forms() -> None:
     with pytest.raises(WakeshiftError, match="isn't personal"):
         await w.shared.emit({"table": "oak"}, {"text": "go"}, to=Recipient(native="u1"))
     with pytest.raises(WakeshiftError, match="personal"):
-        await w.turn.publish_url({"table": "oak"})
+        await w.turn.create_publish_url({"table": "oak"})
 
 
 async def test_status() -> None:
@@ -1015,8 +1220,8 @@ async def test_status() -> None:
     w.core.reset()
     subs = await w.turn.status_of([Recipient(user="u1", subscription="s1"), Recipient(user="u2", subscription="s2")])
     assert subs == [
-        EventSubscriptionStatus(id="s1", user="u1", live=True, connected=True, via="stream"),
-        EventSubscriptionStatus(id="s2", user="u2", live=False, connected=False),
+        SubscriptionStatus(id="s1", user="u1", live=True, connected=True, via="stream"),
+        SubscriptionStatus(id="s2", user="u2", live=False, connected=False),
     ]
     assert w.core.bodies("/events/status")[0] == {
         "name": "game.turn",
@@ -1033,6 +1238,51 @@ async def test_status() -> None:
     with pytest.raises(WakeshiftError, match="at most 1000"):
         await w.turn.status_of([Recipient(user="u", subscription="s")] * 1001)
     assert w.core.bodies("/events/status") == []
+
+
+async def test_resolve_session_names_nothing() -> None:
+    """None, with no request, when nothing names the conversation; anything
+    that does (conversation-meta.json's keys too) asks Wakeshift."""
+    w = Wrapped()
+    got: list[Any] = []
+
+    @w.attached.tool(subscribes=[w.turn, w.shared])
+    async def look(call: ToolCall) -> str:
+        got.append(await call.resolve_session())
+        return "ok"
+
+    @w.attached.tool(subscribes=[w.turn, w.shared])
+    async def join(call: ToolCall) -> str:
+        await call.subscribe(w.shared, {"table": "oak"})
+        got.append(await call.resolve_session())
+        return "ok"
+
+    def nested(key: str) -> dict[str, Any]:
+        parts = key.split(".")
+        v: Any = "c1"
+        for p in reversed(parts[1:]):
+            v = {p: v}
+        return {parts[0]: v}
+
+    naming: list[tuple[dict[str, Any], dict[str, Any] | None]] = [
+        ({"session_key": "wsc_s1"}, None),
+        ({"conversation_id": "bc-1234"}, None),
+        ({}, {"threadId": "t0"}),
+        *[({}, nested(k)) for k in golden_file("conversation-meta.json")["keys"]],
+    ]
+    async with w.served() as (_, rpc):
+        await call_tool(rpc, "look", {})
+        assert got == [None] and w.core.paths() == []
+        # A session the call already resolved (a subscribe) is returned.
+        got.clear()
+        await call_tool(rpc, "join", {})
+        assert got == [SessionKey("wsc_s1")]
+        for args, meta in naming:
+            w.core.reset()
+            got.clear()
+            await call_tool(rpc, "look", args, meta=meta)
+            assert got == [SessionKey("wsc_resolved")], (args, meta)
+            assert w.core.paths()[:1] == ["/calls/session"], (args, meta)
 
 
 def test_conversation_meta_golden() -> None:
@@ -1052,7 +1302,7 @@ async def test_client_checks_golden() -> None:
     assert cases
     w = Wrapped()
     anon = Wrapped(identify=None)
-    other = Wakeshift(app_key("other"), core="http://core.test")
+    other = Wakeshift(app_key("other"), core="https://core.test")
     # Another app's event, by the same name as one of this app's.
     foreign = other.define_event(
         "game.turn", description="X.", args=TableArgs, payload=TurnMsg, text=lambda m, a: "", personal=True
@@ -1062,7 +1312,7 @@ async def test_client_checks_golden() -> None:
 
     for app in (w, anon):
 
-        @app.attached.tool()
+        @app.attached.tool(subscribes=[app.turn, app.shared])
         async def check(call: ToolCall) -> str:
             try:
                 await pending[0](call)
@@ -1086,9 +1336,9 @@ async def test_client_checks_golden() -> None:
         "emit_recipient_without_subscription": lambda: w.turn.emit(oak, msg, to=Recipient(user="ada", subscription=" ")),
         "emit_bad_arguments": lambda: w.turn.emit({"table": 7}, msg),
         "emit_bad_payload": lambda: w.turn.emit(oak, {"text": 7}),
-        "publish_url_personal_without_to": lambda: w.turn.publish_url(oak),
-        "publish_url_shared_with_to": lambda: w.shared.publish_url(oak, to="ada"),
-        "publish_url_two_users": lambda: w.turn.publish_url(oak, to=["ada", "bo"]),  # type: ignore[arg-type]
+        "publish_url_personal_without_to": lambda: w.turn.create_publish_url(oak),
+        "publish_url_shared_with_to": lambda: w.shared.create_publish_url(oak, to="ada"),
+        "publish_url_two_users": lambda: w.turn.create_publish_url(oak, to=["ada", "bo"]),  # type: ignore[arg-type]
         "status_personal_without_to": lambda: w.turn.status(oak),
         "status_shared_with_to": lambda: w.shared.status(oak, to="ada"),
         "status_two_users": lambda: w.turn.status(oak, to=["ada", "bo"]),  # type: ignore[arg-type]
@@ -1106,10 +1356,124 @@ async def test_client_checks_golden() -> None:
         assert c["op"] in ops, f"{c['name']}: no op {c['op']} here"
         w.core.reset()
         anon.core.reset()
-        with pytest.raises(WakeshiftError) as e:
+        # The next release's rule (client_checks_next): each is a UsageError
+        # with the same code, in the shared message format.
+        with pytest.raises(UsageError) as e:
             await ops[c["op"]]()
         err = e.value
-        assert (err.status, err.code, is_code(err, c["code"])) == (c["status"], c["code"], True), c["name"]
-        assert c["says"] in err.detail and not err.detail.startswith("wakeshift:"), (c["name"], err.detail)
+        assert err.code == c["code"], c["name"]
+        assert c["says"] in str(err), (c["name"], str(err))
+        assert str(err).startswith("wakeshift: ") and str(err).endswith(anchor(c["code"])), str(err)
         asked = [p for p in w.core.paths() + anon.core.paths() if p != "/calls/addition"]
         assert asked == [], (c["name"], asked)
+
+
+async def test_subscribe_replay_and_once_golden() -> None:
+    # replay and once reach Wakeshift as every SDK sends them (subscribe-options.json).
+    cases = golden_file("subscribe-options.json")["cases"]
+    w = Wrapped()
+
+    @w.attached.tool(subscribes=[w.shared])
+    async def watch(table: str, case: str, call: ToolCall) -> str:
+        """Watch a table."""
+        tc = next(c for c in cases if c["name"] == case)
+        await call.subscribe(w.shared, {"table": table}, replay=tc.get("replay_seconds"), once=bool(tc.get("once")))
+        return "ok"
+
+    async with w.served() as (_, rpc):
+        for tc in cases:
+            before = len(w.core.bodies("/event-subscriptions"))
+            await call_tool(rpc, "watch", {"table": "oak", "case": tc["name"]})
+            body = w.core.bodies("/event-subscriptions")[before]
+            assert {k: v for k, v in body.items() if k in ("replay", "once")} == tc["body"], tc["name"]
+
+
+#: client_checks_next cases test_identity.py runs.
+NEXT_PENDING = {"identify_throws", "identify_times_out", "require_user_anonymous"}
+
+
+async def test_client_checks_next() -> None:
+    """errors.json's client_checks_next: run inside a tool that declares
+    table.news only."""
+    w = Wrapped()
+    kept: list[ToolCall] = []
+    outcomes: dict[str, BaseException | None] = {}
+
+    @w.attached.tool(subscribes=[w.shared])
+    async def check(op: str, call: ToolCall) -> str:
+        kept.append(call)
+        try:
+            if op == "subscribe_undeclared":
+                await call.subscribe(w.turn, {"table": "oak"})
+            outcomes[op] = None
+        except Exception as err:
+            outcomes[op] = err
+        return "ok"
+
+    async with w.served() as (_, rpc):
+        await call_tool(rpc, "check", {"op": "subscribe_undeclared"})
+        await call_tool(rpc, "check", {"op": "subscribe_after_return"})
+    try:
+        w.wake.current_call()
+    except Exception as err:
+        outcomes["current_call_outside"] = err
+    try:
+        await kept[-1].subscribe(w.shared, {"table": "oak"})
+    except Exception as err:
+        outcomes["subscribe_after_return"] = err
+    for c in golden_file("errors.json")["client_checks_next"]["cases"]:
+        if (c.get("skip") or {}).get("python") or c["op"] in NEXT_PENDING:
+            continue
+        err = outcomes.get(c["op"])
+        assert isinstance(err, UsageError), (c["name"], err)
+        assert err.code == c["code"] and c["says"] in str(err), (c["name"], str(err))
+        assert c.get("must_not_contain", "\0") not in str(err)
+
+
+async def test_a_cancellation_during_a_rollback_reaches_the_caller() -> None:
+    """A tool call canceled while its rollback runs (here, a TaskGroup whose
+    other task failed) is canceled, as asyncio expects; the rollback, shielded,
+    still finishes."""
+    from types import SimpleNamespace
+
+    from wakeshift._toolcall import _SCOPE
+
+    w = Wrapped()
+    w.core.unsub_delay = 0.3
+
+    @w.attached.tool(subscribes=[w.shared])
+    async def watch(call: ToolCall) -> str:
+        return "unused: call_next below stands in for the host"
+
+    ctx = SimpleNamespace(
+        method="tools/call",
+        params={"name": "watch", "arguments": {}},
+        request=None,
+        session=None,
+        meta=None,
+        request_id=1,
+        protocol_version="2025-06-18",
+    )
+
+    async def call_next(c: Any) -> dict[str, Any]:
+        scope = _SCOPE.get()
+        assert scope is not None and scope.call is not None
+        await scope.call.subscribe(w.shared, {"table": "oak"})
+        return {"content": [{"type": "text", "text": "no"}], "isError": True}  # the call failed: roll back
+
+    class Boom(Exception):
+        pass
+
+    async def sibling() -> None:
+        await asyncio.sleep(0.05)
+        raise Boom()
+
+    tasks: list[asyncio.Task[Any]] = []
+    with pytest.raises(ExceptionGroup):
+        async with asyncio.TaskGroup() as tg:
+            tasks.append(tg.create_task(w.attached._middleware(ctx, call_next)))
+            tg.create_task(sibling())
+    assert tasks[0].cancelled(), "the cancellation isn't swallowed"
+    await asyncio.sleep(0.4)
+    ends = w.core.bodies("/event-subscriptions/unsubscribe")
+    assert len(ends) == 1 and ends[0]["reason"] == "rolled_back"
