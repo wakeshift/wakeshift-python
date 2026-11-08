@@ -1,6 +1,6 @@
 [project]
 name = "wakeshift"
-version = "0.10.0"
+version = "0.10.1"
 description = "Wakeshift lets an MCP server wake the AI agents that use it. The Python SDK: define events, serve them as MCP Events, and emit them."
 readme = "README.md"
 license = "Apache-2.0"

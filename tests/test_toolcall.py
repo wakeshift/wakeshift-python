@@ -1285,6 +1285,48 @@ async def test_resolve_session_names_nothing() -> None:
             assert w.core.paths()[:1] == ["/calls/session"], (args, meta)
 
 
+async def test_resolve_session_without_user_needs_the_key() -> None:
+    """Without a user, only the session_key finds the conversation: a
+    harness's conversation ID alone (Channel3's unwatch_product, called by
+    Codex with only its thread in _meta) is None, with no request."""
+    w = Wrapped(identify=None)
+    got: list[Any] = []
+
+    @w.attached.tool()
+    async def unwatch(call: ToolCall) -> str:
+        await call.unsubscribe(w.shared, {"table": "oak"})
+        got.append(await call.resolve_session())
+        return "ok"
+
+    def nested(key: str) -> dict[str, Any]:
+        parts = key.split(".")
+        v: Any = "c1"
+        for p in reversed(parts[1:]):
+            v = {p: v}
+        return {parts[0]: v}
+
+    codex = "codex-mcp-client/0.130.0"
+    unnamed: list[tuple[dict[str, Any], dict[str, Any] | None]] = [
+        ({}, None),
+        ({"conversation_id": "bc-1234"}, None),
+        ({}, {"threadId": "t0"}),
+        *[({}, nested(k)) for k in golden_file("conversation-meta.json")["keys"]],
+    ]
+    async with w.served() as (_, rpc):
+        for args, meta in unnamed:
+            w.core.reset()
+            got.clear()
+            await call_tool(rpc, "unwatch", args, meta=meta, ua=codex)
+            assert got == [None], (args, meta)
+            assert "/calls/session" not in w.core.paths(), (args, meta)
+        for meta in (None, nested("x-codex-turn-metadata.thread_id")):
+            w.core.reset()
+            got.clear()
+            await call_tool(rpc, "unwatch", {"session_key": "wsc_s1"}, meta=meta, ua=codex)
+            assert got == [SessionKey("wsc_resolved")]
+            assert "/calls/session" in w.core.paths()
+
+
 def test_conversation_meta_golden() -> None:
     assert list(CONVERSATION_META) == golden_file("conversation-meta.json")["keys"]
     assert conversation_key({"x-codex-turn-metadata": {"thread_id": "t1"}}) == "t1"

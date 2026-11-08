@@ -2,6 +2,16 @@
 
 What changed in each release of `wakeshift`. 0.4.0 is the first published release: to start with it, read the [README](README.md). Its notes below, and the earlier releases', are for apps that ran the preview builds.
 
+## 0.10.1 (2026-11-08)
+
+### Changed
+
+- **The wait tool's `harness` argument lists pi.** Its description names `pi` (earendil-works/pi, the terminal coding agent), so an agent in pi says so on a server that never sees its client name.
+
+### Fixed
+
+- **`call.resolve_session()` no longer starts a new session for a conversation it can't find.** Without a user (no `identify` user), Wakeshift finds a conversation only by its `session_key`: the ID a harness reports (a Codex thread, Antigravity's or Copilot's conversation ID, a `conversation_id`) goes to every MCP server the user has, so it never finds a session. Python 0.10.0 sent such a call to Wakeshift anyway, which started a second, unrelated session, so a tool that subscribes to nothing (an "unwatch") got a session back, `unsubscribe` ended nothing, and the tool told the agent it "wasn't watching" while the watch stayed live. It now returns `None`, with no request, so your tool can ask the agent for its `session_key`. With a user, a harness's conversation ID still finds that user's conversation, the same session `subscribe` uses there. Wakeshift answers an older SDK's request the same way (no session).
+
 ## 0.10.0 (2026-11-06)
 
 One release with TypeScript 0.11.0 and Go v0.10.0, per the SDK design (docs/sdk-design-next.md). It breaks APIs where that makes them simpler. Read "Who may subscribe" first.

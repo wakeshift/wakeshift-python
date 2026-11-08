@@ -583,20 +583,20 @@ class ToolCall:
         wakeable), and returns it (a SessionKey, which never prints). None,
         with no request to Wakeshift, when nothing names the conversation:
         no session_key, no conversation_id and no conversation in the call's
-        _meta (a Codex thread)."""
+        _meta (a Codex thread). Without a user (identify's), only the
+        session_key names it: a conversation ID alone is None too."""
         s = await self._enter()
         try:
             if s.pending and self.session:
                 return self.session
             wire = self._wire()
             meta = wire.get("meta")
-            if not (
-                wire.get("session")
-                or wire.get("conversation")
-                or conversation_key(meta)
-                or (meta and _meta_string(meta, "threadId"))
-            ):
-                # Nothing names the conversation: Wakeshift would only start a new one.
+            named = bool(wire.get("conversation") or conversation_key(meta) or (meta and _meta_string(meta, "threadId")))
+            if not (wire.get("session") or (named and wire.get("user"))):
+                # Without a session key, only a user's call finds its
+                # conversation by the ID its harness reports (a Codex
+                # thread): Wakeshift never finds a session by that ID alone,
+                # so for anything else it would only start a new one.
                 return None
             out = await s.attached._wake._request_app("POST", "/calls/session", {"call": wire})
             s.pending = out.get("pending") or ""
