@@ -344,8 +344,7 @@ async def test_a_vendors_own_server_discover_keeps_its_answer_and_gains_events(w
 async def test_the_events_capability_with_any_event(public: bool) -> None:
     """MCP Events is advertised (initialize and server/discover) whenever the
     server has an event, tools-only ones included: a native client subscribes
-    to those with the subscribe voucher a tool handed it
-    (docs/subscribe-vouchers.md §4.3)."""
+    to those with the subscribe voucher a tool handed it."""
     wake = Wakeshift(
         app_key("cards"),
         core="https://core.test",

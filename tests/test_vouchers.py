@@ -1,4 +1,4 @@
-"""Subscribe vouchers (docs/subscribe-vouchers.md §4.3, §4.4, §7): a tool
+"""Subscribe vouchers: a tool
 subscribing a native client (ChatGPT) to a tools-only event gives it a
 native line, whose voucher the core renders; the client writes it back as
 wakeshift_voucher, which the SDK takes out of the arguments and sends to
@@ -123,7 +123,8 @@ async def test_subscribe_with_a_voucher(case: dict[str, Any], dialect: str) -> N
     assert res.get("result") == case["result"], res
     body = _body(a.core, "/events/subscribe")
     call, d = body.pop("call"), body.pop("dialect")
-    assert d == dialect
+    # The client table names the dialect sent: a client it doesn't list speaks the spec (its codes are the draft's).
+    assert d == ("spec" if dialect == "draft" else dialect)
     assert body == case["core_request"]
     assert call.get("user") == case["call_user"]
     if "voucher" in case["core_request"]:
@@ -185,6 +186,26 @@ async def test_core_refusals(case: dict[str, Any], dialect: str) -> None:
     await asyncio.sleep(0.05)
     assert a.subscribed == []
     a.no_voucher_logged(case["name"])
+
+
+@pytest.mark.parametrize("case", golden_file("mcp-events-wire.json")["core_errors"]["cases"], ids=lambda c: c["name"])
+@pytest.mark.parametrize("dialect", ["draft", "chatgpt"])
+async def test_core_errors(case: dict[str, Any], dialect: str) -> None:
+    """Wakeshift's refusals of a webhook subscribe: the core's message as it
+    is, its hint as data.hint beside reason (mcp-events-wire.json core_errors)."""
+    a = App(case["user"])
+    a.core.on("POST", "/events/subscribe", lambda b: (case["core_status"], case["core_body"]))
+    async with served(a.server, stateless=False) as (_, rpc):
+        await initialize(rpc, DIALECTS[dialect])
+        res = await rpc(case["method"], case["params"])
+    err = res.get("error")
+    assert err is not None, res
+    want = case["error"]
+    assert (err["code"], err["message"], err.get("data")) == (want["code"][dialect], want["message"], want["data"])
+    for word in ("again", "retry"):
+        assert word not in err["message"].lower()
+    await asyncio.sleep(0.05)
+    assert a.subscribed == []
 
 
 @pytest.mark.parametrize(

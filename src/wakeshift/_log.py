@@ -65,6 +65,29 @@ CODES: dict[str, _Code] = {
         "once",
         ("tool", "reason"),
     ),
+    # MCP Events push (events/stream): the TypeScript SDK's codes.
+    "push_upstream_failed": _Code(
+        logging.WARNING,
+        "Nothing to change if it's rare: the client reconnects with its cursor. Check that this server can reach Wakeshift.",
+        "rate",
+    ),
+    "push_max_stream": _Code(logging.DEBUG, "Set attach's push max_stream_ms to change it.", "once"),
+    "push_recheck_failed": _Code(
+        logging.WARNING,
+        "Check identify and authorize: while they fail, an open stream goes on until its last successful check is "
+        "15 minutes old (three checks, if longer).",
+        "rate",
+    ),
+    "push_open_check_failed": _Code(
+        logging.WARNING,
+        "Check identify and authorize: the client retries, and its stream opens once they answer.",
+        "rate",
+    ),
+    "push_recheck_stale": _Code(
+        logging.WARNING,
+        "Check identify and authorize: the client reconnects with its cursor, and retries while they fail.",
+        "rate",
+    ),
     "event_closed": _Code(logging.WARNING, "Add authorize, personal or public: true to reopen it.", "each"),
     "wrap_unknown_tool": _Code(logging.WARNING, "Check the tool's name in wrap.", "once", ("tool",)),
     "wrap_arg_conflict": _Code(
@@ -97,9 +120,19 @@ CODES: dict[str, _Code] = {
     ),
     "watch_timeout": _Code(logging.INFO, "Raise the watch's timeout if the work can take longer.", "once", ("event",)),
     "key_refused": _Code(logging.ERROR, "Check WAKESHIFT_KEY: the key was revoked, or belongs to another console.", "rate"),
+    "manifest_refused": _Code(
+        logging.ERROR,
+        "Fix the event definitions the message names; until then Wakeshift serves none of this app's events (no push, vouchers or subscribes).",
+        "rate",
+    ),
     "block_failed": _Code(
         logging.WARNING,
         "Nothing to change; the tool's result went out as the tool gave it, without Wakeshift's addition.",
+        "rate",
+    ),
+    "core_unavailable": _Code(
+        logging.WARNING,
+        "Nothing to change; tool calls go on without Wakeshift (no wakes, results unchanged) until it answers again.",
         "rate",
     ),
     "subscribe_in_flight": _Code(
@@ -113,6 +146,18 @@ CODES: dict[str, _Code] = {
         ("event",),
     ),
     "config": _Code(logging.ERROR, "Fix the configuration the message names; the same error was raised.", "each"),
+    # Client requests (_clientrequests.py): Python's codes for now.
+    "client_request_refused": _Code(
+        logging.WARNING,
+        "Nothing to change; the request wasn't shown, and the result kept Wakeshift's usual text.",
+        "once",
+        ("reason",),
+    ),
+    "client_request_report_failed": _Code(
+        logging.WARNING,
+        "Nothing to change if it's rare; the result went out with the answer's text. Check that this server can reach Wakeshift.",
+        "rate",
+    ),
 }
 
 

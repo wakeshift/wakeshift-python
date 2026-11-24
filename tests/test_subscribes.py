@@ -1,7 +1,7 @@
 """@attached.tool(subscribes=[...]): tools/list adds a sentence to a
 declaring tool's description saying the tool is how the app notifies the
 agent, from its events' own descriptions (the shared fixture subscribes.json;
-the compact bench kept it as it was), and a subscribe the tool doesn't
+the compact wording kept it as it was), and a subscribe the tool doesn't
 declare is refused."""
 
 import time

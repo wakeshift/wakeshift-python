@@ -22,6 +22,7 @@ from importlib.metadata import PackageNotFoundError, version
 from ._client import (
     AgentScope,
     AppInfo,
+    CallTimeouts,
     Emitted,
     Manifest,
     PublishURL,
@@ -33,6 +34,7 @@ from ._client import (
 )
 from ._errors import APIConnectionError, APIError, ErrorCode, IdReusedError, UsageError, WakeshiftError
 from ._events import BuiltinTools, EventStatus, Identity, Request, Subscriber, SubscriptionStatus, WakeEvent
+from ._push import PushOptions
 from ._secrets import SessionKey, decode_arg_value, encode_arg_value, redact_secrets
 from ._toolcall import BUILTIN_NAMES as BUILTIN_TOOL_NAMES
 from ._toolcall import Attachment, Subscription, SubscriptionState, ToolCall
@@ -81,6 +83,10 @@ __all__ = [
     "BUILTIN_TOOL_NAMES",
     "Subscribed",
     "WatchResult",
+    # attach's push option.
+    "PushOptions",
+    # Added after: the in-call budget.
+    "CallTimeouts",
 ]
 
 for _name in __all__:

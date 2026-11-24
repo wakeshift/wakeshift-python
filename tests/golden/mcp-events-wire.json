@@ -1,6 +1,6 @@
 {
-  "_about": "The MCP Events wire format every SDK (pkg/wakeshift, sdk/typescript, sdk/python) serves for chat.message ({channel}), as a client that speaks the draft (SEP-3415) sees it: events/list's delivery modes, and for events/subscribe and events/poll, the client's params, what the SDK asks Wakeshift (core_request: the body without call and dialect), what Wakeshift answers (core_response) and the JSON-RPC result the client gets.",
-  "revision": "SEP-3415 (2026-10-27)",
+  "_about": "The MCP Events wire format every SDK (pkg/wakeshift, sdk/typescript, sdk/python) serves for chat.message ({channel}), as a client that speaks SEP-3415 sees it: events/list's delivery modes, and for events/subscribe and events/poll, the client's params, what the SDK asks Wakeshift (core_request: the body without call and dialect), what Wakeshift answers (core_response) and the JSON-RPC result the client gets.",
+  "revision": "SEP-3415 (2026-11-19, 8a18b4b)",
   "delivery": [
     "webhook",
     "poll"
@@ -235,7 +235,7 @@
     }
   ],
   "next": {
-    "_comment": "Next release (design §3, PR 6): who may subscribe, on the MCP Events wire and through a tool. Loaders that predate it ignore this key. Under the next release, chat.message in subscribe and poll above is defined with public: true (otherwise it's tools-only and those cases are refused); each case above still holds unchanged. Two more events: crawl.finished, tools-only (declares neither personal, authorize nor public), arguments {job: string, required}, payload {pages: number}; deploy.finished, with an authorize that allows only user u1, arguments {env: string, required}, payload {status: string}. user is what identify returns (null: no user). Every refusal is answered by the SDK itself: Wakeshift isn't asked (no request to /events/subscribe or /events/poll), and the error is the dialect's forbidden code, its message from event-tools.json, data null. A draft client is any client name (some-draft-client); chatgpt is ChatGPT's dialect, as in errors.json rpc.",
+    "_comment": "Next release: who may subscribe, on the MCP Events wire and through a tool. Loaders that predate it ignore this key. Under the next release, chat.message in subscribe and poll above is defined with public: true (otherwise it's tools-only and those cases are refused); each case above still holds unchanged. Two more events: crawl.finished, tools-only (declares neither personal, authorize nor public), arguments {job: string, required}, payload {pages: number}; deploy.finished, with an authorize that allows only user u1, arguments {env: string, required}, payload {status: string}. user is what identify returns (null: no user). Every refusal is answered by the SDK itself: Wakeshift isn't asked (no request to /events/subscribe or /events/poll), and the error is the dialect's forbidden code, its message from event-tools.json, data null. A draft client is any client name (some-draft-client); chatgpt is ChatGPT's dialect, as in errors.json rpc.",
     "_c1_dependent": "The core refuses the same requests (C1) for events whose manifest says subscribe: \"tools\", so an old SDK instance can't reopen them; these SDK fixtures check only the SDK's own refusal and that it never asks the core. Without C1 deployed, the SDK's refusal still holds.",
     "events_list": [
       "chat.message",
@@ -243,10 +243,12 @@
     ],
     "_events_list_comment": "events/list names only events a native client may subscribe to; crawl.finished (tools-only) is absent.",
     "precedence": [
-      "Mcp-Name header mismatch",
+      "Mcp-Name header: missing from a client that declares the extension, or not params.name (HTTP 400, HeaderMismatch; mcp-events-interop.json)",
+      "params.name missing, or not a string (invalid params)",
+      "events/stream (unsupported, value push)",
       "unknown event (not found)",
-      "tools-only (forbidden, native_tools_only; events/poll native_tools_only_poll)",
-      "delivery mode (unsupported)",
+      "tools-only (forbidden, native_tools_only; events/poll: unsupported, value poll, native_tools_only_poll)",
+      "delivery mode (missing: invalid params; another: unsupported, its value)",
       "arguments (invalid params)",
       "no user (forbidden, native_no_user)",
       "authorize (forbidden, native_refused)"
@@ -280,7 +282,7 @@
         }
       },
       {
-        "name": "poll a tools-only event, no cursor",
+        "name": "poll a tools-only event, no cursor: a mode its events/list entry doesn't offer (Unsupported, value poll)",
         "method": "events/poll",
         "user": "u1",
         "params": {
@@ -292,11 +294,14 @@
         },
         "error": {
           "code": {
-            "draft": -32024,
-            "chatgpt": -32012
+            "draft": -32026,
+            "chatgpt": -32602
           },
-          "message": "crawl.finished can't be polled: it's subscribed to only through this app's tools, with a webhook",
-          "data": null
+          "message": "crawl.finished can't be polled: it's subscribed to only through this app's tools, with a webhook or by push",
+          "data": {
+            "feature": "deliveryMode",
+            "value": "poll"
+          }
         }
       },
       {
@@ -312,11 +317,14 @@
         },
         "error": {
           "code": {
-            "draft": -32024,
-            "chatgpt": -32012
+            "draft": -32026,
+            "chatgpt": -32602
           },
-          "message": "crawl.finished can't be polled: it's subscribed to only through this app's tools, with a webhook",
-          "data": null
+          "message": "crawl.finished can't be polled: it's subscribed to only through this app's tools, with a webhook or by push",
+          "data": {
+            "feature": "deliveryMode",
+            "value": "poll"
+          }
         }
       },
       {
@@ -480,6 +488,139 @@
           },
           "message": "you may not subscribe to deploy.finished with these arguments",
           "data": null
+        }
+      },
+      {
+        "name": "subscribe without params.name: InvalidParams, before anything that needs the event",
+        "method": "events/subscribe",
+        "user": "u1",
+        "params": {
+          "arguments": {
+            "channel": "eng"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32602,
+            "chatgpt": -32602
+          },
+          "message": "params.name is required: the name of the event",
+          "data": null
+        }
+      },
+      {
+        "name": "poll without params.name",
+        "method": "events/poll",
+        "user": "u1",
+        "params": {
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32602,
+            "chatgpt": -32602
+          },
+          "message": "params.name is required: the name of the event",
+          "data": null
+        }
+      },
+      {
+        "name": "poll with a params.name that isn't a string",
+        "method": "events/poll",
+        "user": "u1",
+        "params": {
+          "name": 42,
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32602,
+            "chatgpt": -32602
+          },
+          "message": "params.name is required: the name of the event",
+          "data": null
+        }
+      },
+      {
+        "name": "subscribe without delivery.mode: InvalidParams",
+        "method": "events/subscribe",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "delivery": {
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32602,
+            "chatgpt": -32602
+          },
+          "message": "delivery.mode is required: \"webhook\", the only delivery offered",
+          "data": null
+        }
+      },
+      {
+        "name": "subscribe without delivery: InvalidParams",
+        "method": "events/subscribe",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32602,
+            "chatgpt": -32602
+          },
+          "message": "delivery.mode is required: \"webhook\", the only delivery offered",
+          "data": null
+        }
+      },
+      {
+        "name": "subscribe with a delivery mode not offered: Unsupported, naming it",
+        "method": "events/subscribe",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "delivery": {
+            "mode": "poll"
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32026,
+            "chatgpt": -32602
+          },
+          "message": "delivery.mode must be \"webhook\": the only delivery offered",
+          "data": {
+            "feature": "deliveryMode",
+            "value": "poll"
+          }
         }
       }
     ],
@@ -738,7 +879,7 @@
     }
   },
   "vouchers": {
-    "_comment": "Subscribe vouchers (docs/subscribe-vouchers.md §4.3, §4.4, §7.3). The events are next's: crawl.finished tools-only, chat.message public, deploy.finished authorize (only u1). feature: whether the core's manifest answer (PUT /manifest, POST /manifest/merge) reports features [\"subscribe_vouchers\"]; absent means true. A client writes the voucher a tool result handed it as the argument wakeshift_voucher. The SDK takes it out of arguments before anything else reads them (parsing, authorize, onSubscribe, logs, the subscription key) and, for a tools-only event while the feature is on, sends it to Wakeshift as the top-level voucher, skipping the no-user refusal (user null: identify gave none; the core then decides). core_request is the body without call and dialect; call_user is call.user on the wire (null: none sent). An open event ignores a voucher; events/poll of a tools-only event is refused, voucher or not; with the feature off a voucher is never forwarded. on_subscribe: what onSubscribe gets (null: it doesn't run); it runs when Wakeshift answers created with via tool:<name>. core_refused: Wakeshift's answer (status and body) and the JSON-RPC error the client gets. The voucher is a fake.",
+    "_comment": "Subscribe vouchers. The events are next's: crawl.finished tools-only, chat.message public, deploy.finished authorize (only u1). feature: whether the core's manifest answer (PUT /manifest, POST /manifest/merge) reports features [\"subscribe_vouchers\"]; absent means true. A client writes the voucher a tool result handed it as the argument wakeshift_voucher. The SDK takes it out of arguments before anything else reads them (parsing, authorize, onSubscribe, logs, the subscription key) and, for a tools-only event while the feature is on, sends it to Wakeshift as the top-level voucher, skipping the no-user refusal (user null: identify gave none; the core then decides). core_request is the body without call and dialect; call_user is call.user on the wire (null: none sent). An open event ignores a voucher; events/poll of a tools-only event is refused, voucher or not; with the feature off a voucher is never forwarded. on_subscribe: what onSubscribe gets (null: it doesn't run); it runs when Wakeshift answers created with via tool:<name>. core_refused: Wakeshift's answer (status and body) and the JSON-RPC error the client gets. The voucher is a fake.",
     "voucher": "wsv_fakefakefakefakefakefakefakefake",
     "subscribe": [
       {
@@ -1008,11 +1149,14 @@
         },
         "error": {
           "code": {
-            "draft": -32024,
-            "chatgpt": -32012
+            "draft": -32026,
+            "chatgpt": -32602
           },
-          "message": "crawl.finished can't be polled: it's subscribed to only through this app's tools, with a webhook",
-          "data": null
+          "message": "crawl.finished can't be polled: it's subscribed to only through this app's tools, with a webhook or by push",
+          "data": {
+            "feature": "deliveryMode",
+            "value": "poll"
+          }
         }
       },
       {
@@ -1222,5 +1366,1086 @@
         }
       ]
     }
+  },
+  "push": {
+    "_comment": "MCP Events push (events/stream), and the push contract. The events are next's: crawl.finished tools-only, chat.message public ({channel}), deploy.finished authorize (only u1). Push is served when the core's manifest answer reports features [\"push\"], the transport streams its responses (not JSON-response mode) and the app hasn't turned push off; then events/list's delivery is delivery (an open event) or delivery_tools_only (a tools-only event listed with a voucher), and otherwise events/stream answers not_served. streams: a client (draft dialect, user: identify's, null for none) sends params with JSON-RPC id; the SDK asks Wakeshift POST /api/apps/v1/events/stream with core_request (the body without call; call_user is call.user, null for none sent); Wakeshift answers 200 NDJSON with frames, one per line; the client gets notifications (each with _meta io.modelcontextprotocol/subscriptionId: the request's id, string or number, as sent), then result (the final StreamEventsResult, whose _meta carries the subscription ID too). terminated_codes: a terminated frame's error name as the notification's error code, by dialect. refused: answered before any upstream opens, with error (code by dialect; data null: none); core_status and core_error: Wakeshift's refusal of the upstream (no core_status: Wakeshift isn't asked for a stream; HTTP 400 for header, the Mcp-Name header, over HTTP). result instead of error (for the request's id, which the SDK stamps on it as on a stream's result): the client's stream ends with the final result, no notifications: for a 503, after Retry-After (retry_after, seconds, sent as the header; at most 10 s) plus up to 1 s of jitter, so at least retry_after seconds after the request (min_ms), or at once if the client aborts.",
+    "delivery": [
+      "webhook",
+      "poll",
+      "push"
+    ],
+    "delivery_tools_only": [
+      "webhook",
+      "push"
+    ],
+    "streams": [
+      {
+        "name": "open with null: active, an event and a heartbeat, then Wakeshift closes the stream",
+        "id": 7,
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": null
+        },
+        "core_request": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": null,
+          "max_age_ms": null,
+          "heartbeat_ms": null
+        },
+        "call_user": "u1",
+        "frames": [
+          {
+            "type": "active",
+            "cursor": "c2.k3x9.0.bWFj0",
+            "truncated": false,
+            "heartbeat_ms": 30000,
+            "created": true
+          },
+          {
+            "type": "event",
+            "occurrence": {
+              "eventId": "evt_1",
+              "name": "chat.message",
+              "timestamp": "2026-10-29T12:00:01Z",
+              "data": {
+                "from": "ada",
+                "text": "hi"
+              },
+              "cursor": "c2.k3x9.1.bWFj1",
+              "_meta": {
+                "ai.wakeshift/text": "ada: hi"
+              }
+            }
+          },
+          {
+            "type": "heartbeat",
+            "cursor": "c2.k3x9.1.bWFj1"
+          },
+          {
+            "type": "close"
+          }
+        ],
+        "notifications": [
+          {
+            "method": "notifications/events/active",
+            "params": {
+              "cursor": "c2.k3x9.0.bWFj0",
+              "truncated": false,
+              "heartbeatMs": 30000,
+              "_meta": {
+                "io.modelcontextprotocol/subscriptionId": 7
+              }
+            }
+          },
+          {
+            "method": "notifications/events/event",
+            "params": {
+              "eventId": "evt_1",
+              "name": "chat.message",
+              "timestamp": "2026-10-29T12:00:01Z",
+              "data": {
+                "from": "ada",
+                "text": "hi"
+              },
+              "cursor": "c2.k3x9.1.bWFj1",
+              "_meta": {
+                "ai.wakeshift/text": "ada: hi",
+                "io.modelcontextprotocol/subscriptionId": 7
+              }
+            }
+          },
+          {
+            "method": "notifications/events/heartbeat",
+            "params": {
+              "cursor": "c2.k3x9.1.bWFj1",
+              "_meta": {
+                "io.modelcontextprotocol/subscriptionId": 7
+              }
+            }
+          }
+        ],
+        "result": {
+          "resultType": "complete",
+          "_meta": {
+            "io.modelcontextprotocol/subscriptionId": 7
+          }
+        }
+      },
+      {
+        "name": "open with a cursor, a replay bound and a heartbeat suggestion, a string id: the cursor is past the replay window (truncated)",
+        "id": "s-1",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": "c2.k3x9.1.bWFj1",
+          "maxAgeMs": 300000,
+          "heartbeatMs": 15000
+        },
+        "core_request": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": "c2.k3x9.1.bWFj1",
+          "max_age_ms": 300000,
+          "heartbeat_ms": 15000
+        },
+        "call_user": "u1",
+        "frames": [
+          {
+            "type": "active",
+            "cursor": "c2.k3x9.4.bWFj4",
+            "truncated": true,
+            "heartbeat_ms": 15000
+          },
+          {
+            "type": "event",
+            "occurrence": {
+              "eventId": "evt_5",
+              "name": "chat.message",
+              "timestamp": "2026-10-29T12:00:05Z",
+              "data": {
+                "from": "bo",
+                "text": "back"
+              },
+              "cursor": "c2.k3x9.5.bWFj5",
+              "_meta": {
+                "ai.wakeshift/text": "bo: back"
+              }
+            }
+          },
+          {
+            "type": "close"
+          }
+        ],
+        "notifications": [
+          {
+            "method": "notifications/events/active",
+            "params": {
+              "cursor": "c2.k3x9.4.bWFj4",
+              "truncated": true,
+              "heartbeatMs": 15000,
+              "_meta": {
+                "io.modelcontextprotocol/subscriptionId": "s-1"
+              }
+            }
+          },
+          {
+            "method": "notifications/events/event",
+            "params": {
+              "eventId": "evt_5",
+              "name": "chat.message",
+              "timestamp": "2026-10-29T12:00:05Z",
+              "data": {
+                "from": "bo",
+                "text": "back"
+              },
+              "cursor": "c2.k3x9.5.bWFj5",
+              "_meta": {
+                "ai.wakeshift/text": "bo: back",
+                "io.modelcontextprotocol/subscriptionId": "s-1"
+              }
+            }
+          }
+        ],
+        "result": {
+          "resultType": "complete",
+          "_meta": {
+            "io.modelcontextprotocol/subscriptionId": "s-1"
+          }
+        }
+      },
+      {
+        "name": "a gap mid-stream: Wakeshift sends active again, with truncated",
+        "id": 8,
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": null
+        },
+        "core_request": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": null,
+          "max_age_ms": null,
+          "heartbeat_ms": null
+        },
+        "call_user": "u1",
+        "frames": [
+          {
+            "type": "active",
+            "cursor": "c2.k3x9.0.bWFj0",
+            "truncated": false,
+            "heartbeat_ms": 30000,
+            "created": true
+          },
+          {
+            "type": "event",
+            "occurrence": {
+              "eventId": "evt_1",
+              "name": "chat.message",
+              "timestamp": "2026-10-29T12:00:01Z",
+              "data": {
+                "from": "ada",
+                "text": "hi"
+              },
+              "cursor": "c2.k3x9.1.bWFj1",
+              "_meta": {
+                "ai.wakeshift/text": "ada: hi"
+              }
+            }
+          },
+          {
+            "type": "active",
+            "cursor": "c2.k3x9.3.bWFj3",
+            "truncated": true,
+            "heartbeat_ms": 30000
+          },
+          {
+            "type": "close"
+          }
+        ],
+        "notifications": [
+          {
+            "method": "notifications/events/active",
+            "params": {
+              "cursor": "c2.k3x9.0.bWFj0",
+              "truncated": false,
+              "heartbeatMs": 30000,
+              "_meta": {
+                "io.modelcontextprotocol/subscriptionId": 8
+              }
+            }
+          },
+          {
+            "method": "notifications/events/event",
+            "params": {
+              "eventId": "evt_1",
+              "name": "chat.message",
+              "timestamp": "2026-10-29T12:00:01Z",
+              "data": {
+                "from": "ada",
+                "text": "hi"
+              },
+              "cursor": "c2.k3x9.1.bWFj1",
+              "_meta": {
+                "ai.wakeshift/text": "ada: hi",
+                "io.modelcontextprotocol/subscriptionId": 8
+              }
+            }
+          },
+          {
+            "method": "notifications/events/active",
+            "params": {
+              "cursor": "c2.k3x9.3.bWFj3",
+              "truncated": true,
+              "heartbeatMs": 30000,
+              "_meta": {
+                "io.modelcontextprotocol/subscriptionId": 8
+              }
+            }
+          }
+        ],
+        "result": {
+          "resultType": "complete",
+          "_meta": {
+            "io.modelcontextprotocol/subscriptionId": 8
+          }
+        }
+      },
+      {
+        "name": "terminated: the notification, in the client's dialect's code, then the final result",
+        "id": 3,
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": "c2.k3x9.1.bWFj1"
+        },
+        "core_request": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": "c2.k3x9.1.bWFj1",
+          "max_age_ms": null,
+          "heartbeat_ms": null
+        },
+        "call_user": "u1",
+        "frames": [
+          {
+            "type": "active",
+            "cursor": "c2.k3x9.1.bWFj1",
+            "truncated": false,
+            "heartbeat_ms": 30000
+          },
+          {
+            "type": "terminated",
+            "error": {
+              "name": "Forbidden",
+              "message": "Access revoked",
+              "data": {
+                "reason": "revoked"
+              }
+            }
+          }
+        ],
+        "notifications": [
+          {
+            "method": "notifications/events/active",
+            "params": {
+              "cursor": "c2.k3x9.1.bWFj1",
+              "truncated": false,
+              "heartbeatMs": 30000,
+              "_meta": {
+                "io.modelcontextprotocol/subscriptionId": 3
+              }
+            }
+          },
+          {
+            "method": "notifications/events/terminated",
+            "params": {
+              "error": {
+                "code": -32024,
+                "message": "Access revoked",
+                "data": {
+                  "reason": "revoked"
+                }
+              },
+              "_meta": {
+                "io.modelcontextprotocol/subscriptionId": 3
+              }
+            }
+          }
+        ],
+        "result": {
+          "resultType": "complete",
+          "_meta": {
+            "io.modelcontextprotocol/subscriptionId": 3
+          }
+        }
+      },
+      {
+        "name": "a tools-only event with the voucher a tool handed out, no user: the voucher goes to Wakeshift",
+        "id": 9,
+        "user": null,
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1",
+            "wakeshift_voucher": "wsv_fakefakefakefakefakefakefakefake"
+          },
+          "cursor": null
+        },
+        "core_request": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1"
+          },
+          "cursor": null,
+          "max_age_ms": null,
+          "heartbeat_ms": null,
+          "voucher": "wsv_fakefakefakefakefakefakefakefake"
+        },
+        "call_user": null,
+        "frames": [
+          {
+            "type": "active",
+            "cursor": "c2.p7q2.0.bWFj0",
+            "truncated": false,
+            "heartbeat_ms": 30000,
+            "created": true
+          },
+          {
+            "type": "close"
+          }
+        ],
+        "notifications": [
+          {
+            "method": "notifications/events/active",
+            "params": {
+              "cursor": "c2.p7q2.0.bWFj0",
+              "truncated": false,
+              "heartbeatMs": 30000,
+              "_meta": {
+                "io.modelcontextprotocol/subscriptionId": 9
+              }
+            }
+          }
+        ],
+        "result": {
+          "resultType": "complete",
+          "_meta": {
+            "io.modelcontextprotocol/subscriptionId": 9
+          }
+        }
+      }
+    ],
+    "terminated_codes": [
+      {
+        "name": "Forbidden",
+        "code": {
+          "draft": -32024,
+          "chatgpt": -32012
+        }
+      },
+      {
+        "name": "NotFound",
+        "code": {
+          "draft": -32023,
+          "chatgpt": -32011
+        }
+      },
+      {
+        "name": "Unsupported",
+        "code": {
+          "draft": -32026,
+          "chatgpt": -32602
+        }
+      }
+    ],
+    "not_served": {
+      "code": {
+        "draft": -32026,
+        "chatgpt": -32602
+      },
+      "message": "push delivery isn't offered: use a webhook (events/subscribe) or poll (events/poll)",
+      "data": {
+        "feature": "deliveryMode",
+        "value": "push"
+      }
+    },
+    "refused": [
+      {
+        "name": "an Mcp-Name header naming another event",
+        "user": "u1",
+        "header": "chat.other",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32020,
+            "chatgpt": -32020
+          },
+          "message": "Header mismatch: Mcp-Name doesn't match params.name",
+          "data": null
+        }
+      },
+      {
+        "name": "an event the app doesn't offer",
+        "user": "u1",
+        "params": {
+          "name": "no.such.event",
+          "arguments": {},
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32023,
+            "chatgpt": -32011
+          },
+          "message": "this app offers no event named \"no.such.event\"",
+          "data": {
+            "kind": "event"
+          }
+        }
+      },
+      {
+        "name": "a tools-only event without a voucher",
+        "user": "u1",
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1"
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "crawl.finished can be subscribed only through this app's tools, or with the voucher one of them handed you",
+          "data": null
+        }
+      },
+      {
+        "name": "an open event with no user",
+        "user": null,
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "this app couldn't tell who you are, so it can't hold a subscription for you: sign in to it first",
+          "data": null
+        }
+      },
+      {
+        "name": "authorize refuses",
+        "user": "u2",
+        "params": {
+          "name": "deploy.finished",
+          "arguments": {
+            "env": "prod"
+          },
+          "cursor": null
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "you may not subscribe to deploy.finished with these arguments",
+          "data": null
+        }
+      },
+      {
+        "name": "Wakeshift: the event is gone",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": null
+        },
+        "core_status": 404,
+        "core_error": {
+          "code": "unknown_event",
+          "message": "no event chat.message"
+        },
+        "error": {
+          "code": {
+            "draft": -32023,
+            "chatgpt": -32011
+          },
+          "message": "no event chat.message",
+          "data": {
+            "kind": "event"
+          }
+        }
+      },
+      {
+        "name": "Wakeshift: the subscription was stopped (revoked), on every reconnect",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": "c2.k3x9.1.bWFj1"
+        },
+        "core_status": 403,
+        "core_error": {
+          "code": "subscription_stopped",
+          "message": "this subscription was stopped"
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "this subscription was stopped",
+          "data": {
+            "reason": "stopped"
+          }
+        }
+      },
+      {
+        "name": "Wakeshift: a used, expired or mismatched voucher",
+        "user": null,
+        "params": {
+          "name": "crawl.finished",
+          "arguments": {
+            "job": "j1",
+            "wakeshift_voucher": "wsv_fakefakefakefakefakefakefakefake"
+          },
+          "cursor": null
+        },
+        "core_status": 403,
+        "core_error": {
+          "code": "bad_voucher",
+          "message": "This voucher can't subscribe to this event."
+        },
+        "error": {
+          "code": {
+            "draft": -32024,
+            "chatgpt": -32012
+          },
+          "message": "this voucher can't subscribe to crawl.finished: it was used, it expired, or it's for other arguments",
+          "data": null
+        }
+      },
+      {
+        "name": "Wakeshift: the user's live push subscriptions are at the limit",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": null
+        },
+        "core_status": 403,
+        "core_error": {
+          "code": "subscription_limit",
+          "message": "at most 20 push subscriptions per user",
+          "max": 20
+        },
+        "error": {
+          "code": {
+            "draft": -32025,
+            "chatgpt": -32602
+          },
+          "message": "at most 20 push subscriptions per user",
+          "data": {
+            "limit": "subscriptions",
+            "max": 20
+          }
+        }
+      },
+      {
+        "name": "Wakeshift: the app's concurrent push streams are at the limit",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": null
+        },
+        "core_status": 403,
+        "core_error": {
+          "code": "subscription_limit",
+          "message": "at most 2000 push streams per app",
+          "limit": "streams",
+          "max": 2000
+        },
+        "error": {
+          "code": {
+            "draft": -32025,
+            "chatgpt": -32602
+          },
+          "message": "at most 2000 push streams per app",
+          "data": {
+            "limit": "streams",
+            "max": 2000
+          }
+        }
+      },
+      {
+        "name": "Wakeshift: a cursor that fails its MAC",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": "c2.k3x9.1.forged"
+        },
+        "core_status": 400,
+        "core_error": {
+          "code": "bad_request",
+          "message": "bad cursor"
+        },
+        "error": {
+          "code": {
+            "draft": -32602,
+            "chatgpt": -32602
+          },
+          "message": "bad cursor",
+          "data": null
+        }
+      },
+      {
+        "name": "Wakeshift: push is off (WAKESHIFT_MCP_EVENTS_PUSH)",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": null
+        },
+        "core_status": 501,
+        "core_error": {
+          "code": "unsupported",
+          "message": "push isn't served here"
+        },
+        "error": {
+          "code": {
+            "draft": -32026,
+            "chatgpt": -32602
+          },
+          "message": "push delivery isn't offered: use a webhook (events/subscribe) or poll (events/poll)",
+          "data": {
+            "feature": "deliveryMode",
+            "value": "push"
+          }
+        }
+      },
+      {
+        "name": "Wakeshift: the instance is at its stream limit (503): a retryable error (-32603), never a result with no active before it (SEP-3415: an error, or active first), and the client tries again",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": null
+        },
+        "core_status": 503,
+        "core_error": {
+          "code": "unavailable",
+          "message": "too many streams"
+        },
+        "error": {
+          "code": {
+            "draft": -32603,
+            "chatgpt": -32603
+          },
+          "message": "Wakeshift can't open this stream just now: try again shortly",
+          "data": null
+        },
+        "id": 5
+      },
+      {
+        "name": "Wakeshift: the instance is at its stream limit with Retry-After: the error comes no sooner than Retry-After",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "cursor": null
+        },
+        "core_status": 503,
+        "retry_after": 1,
+        "core_error": {
+          "code": "unavailable",
+          "message": "too many streams"
+        },
+        "min_ms": 1000,
+        "error": {
+          "code": {
+            "draft": -32603,
+            "chatgpt": -32603
+          },
+          "message": "Wakeshift can't open this stream just now: try again shortly",
+          "data": null
+        },
+        "id": 5
+      }
+    ],
+    "reauthorize": {
+      "_comment": "While a push stream is open, the SDK asks identify and the event's authorize again every interval (attach's push reauthorizeMs: default_ms by default; a value under min_ms or over max_ms is clamped, clamp[] pins it; invalid[] values are refused as a configuration error). A refusal (authorize false; identify giving no user, or another user, than at open; requireUser refusing) ends that stream as a revocation does: notification (the terminated notification, code by dialect: code), then result, and the upstream is aborted. The core isn't asked to end the subscription: a reconnect asks again and is refused, as at open. identify or authorize throwing or timing out (an error, not a refusal) keeps the stream and logs its category-only code (identify_error, authorize_failed). The stream: deploy.finished {env: prod}, user u1, JSON-RPC id stream_id, authorize allowing u1 at open and refusing at the first check.",
+      "default_ms": 300000,
+      "min_ms": 60000,
+      "max_ms": 3000000,
+      "clamp": [
+        {
+          "reauthorize_ms": 1000,
+          "want_ms": 60000
+        },
+        {
+          "reauthorize_ms": 60000,
+          "want_ms": 60000
+        },
+        {
+          "reauthorize_ms": 300000,
+          "want_ms": 300000
+        },
+        {
+          "reauthorize_ms": 3600000,
+          "want_ms": 3000000
+        }
+      ],
+      "invalid": [
+        0,
+        -1,
+        1.5,
+        "5m"
+      ],
+      "stream_id": 4,
+      "user": "u1",
+      "params": {
+        "name": "deploy.finished",
+        "arguments": {
+          "env": "prod"
+        },
+        "cursor": null
+      },
+      "code": {
+        "draft": -32024,
+        "chatgpt": -32012
+      },
+      "notification": {
+        "method": "notifications/events/terminated",
+        "params": {
+          "error": {
+            "code": -32024,
+            "message": "you may not subscribe to deploy.finished with these arguments",
+            "data": {
+              "reason": "revoked"
+            }
+          },
+          "_meta": {
+            "io.modelcontextprotocol/subscriptionId": 4
+          }
+        }
+      },
+      "result": {
+        "resultType": "complete",
+        "_meta": {
+          "io.modelcontextprotocol/subscriptionId": 4
+        }
+      }
+    }
+  },
+  "core_errors": {
+    "_comment": "Wakeshift's refusals of a webhook events/subscribe (chat.message, public; user u1) and the JSON-RPC error each SDK answers, in each dialect (draft: some-draft-client; chatgpt: openai-mcp). Where the callback can't be reached (not https, an address that isn't public, a failed verification), the core adds error.hint (kind callback_unreachable; alternatives: plugin with install, the docs for a client Wakeshift has a plugin for, and poll, with push when Wakeshift serves it, unless the client takes webhooks alone, as ChatGPT, OpenClaw and Hermes Agent do; it may be empty) and says what to do in its message: the SDK passes the message as it is, and the hint as data.hint, beside reason. No hint, no data.hint. The message never asks for a retry.",
+    "cases": [
+      {
+        "name": "the callback isn't https (ChatGPT, which takes webhooks alone): InvalidParams, with the core's message and hint, no alternative",
+        "method": "events/subscribe",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null,
+          "ttlMs": 3600000
+        },
+        "core_status": 400,
+        "core_body": {
+          "error": {
+            "code": "bad_request",
+            "message": "delivery.url must be https. This client needs a public HTTPS callback for webhook delivery.",
+            "hint": {
+              "alternatives": [],
+              "kind": "callback_unreachable"
+            }
+          }
+        },
+        "error": {
+          "code": {
+            "draft": -32602,
+            "chatgpt": -32602
+          },
+          "message": "delivery.url must be https. This client needs a public HTTPS callback for webhook delivery.",
+          "data": {
+            "hint": {
+              "alternatives": [],
+              "kind": "callback_unreachable"
+            }
+          }
+        }
+      },
+      {
+        "name": "the callback's address isn't public (Hermes Agent, which takes webhooks alone): CallbackEndpointError, its reason and the core's hint, the plugin alone",
+        "method": "events/subscribe",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null,
+          "ttlMs": 3600000
+        },
+        "core_status": 400,
+        "core_body": {
+          "error": {
+            "code": "callback_failed",
+            "message": "callback verification failed: the callback's address isn't public. This client needs a public HTTPS callback for webhook delivery. To be woken without one, install Wakeshift's plugin for Hermes Agent (https://wakeshift.ai/docs/hermes).",
+            "reason": "connection_refused",
+            "hint": {
+              "alternatives": [
+                "plugin"
+              ],
+              "install": "https://wakeshift.ai/docs/hermes",
+              "kind": "callback_unreachable"
+            }
+          }
+        },
+        "error": {
+          "code": {
+            "draft": -32027,
+            "chatgpt": -32015
+          },
+          "message": "callback verification failed: the callback's address isn't public. This client needs a public HTTPS callback for webhook delivery. To be woken without one, install Wakeshift's plugin for Hermes Agent (https://wakeshift.ai/docs/hermes).",
+          "data": {
+            "reason": "connection_refused",
+            "hint": {
+              "alternatives": [
+                "plugin"
+              ],
+              "install": "https://wakeshift.ai/docs/hermes",
+              "kind": "callback_unreachable"
+            }
+          }
+        }
+      },
+      {
+        "name": "the callback answered 404 (a client that may poll or push, from a Wakeshift that serves push): CallbackEndpointError, its reason and the core's hint",
+        "method": "events/subscribe",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null,
+          "ttlMs": 3600000
+        },
+        "core_status": 400,
+        "core_body": {
+          "error": {
+            "code": "callback_failed",
+            "message": "callback verification failed: the callback answered HTTP 404. This client needs a public HTTPS callback for webhook delivery. Without one, use poll or push if the client supports them.",
+            "reason": "http_4xx",
+            "hint": {
+              "alternatives": [
+                "poll",
+                "push"
+              ],
+              "kind": "callback_unreachable"
+            }
+          }
+        },
+        "error": {
+          "code": {
+            "draft": -32027,
+            "chatgpt": -32015
+          },
+          "message": "callback verification failed: the callback answered HTTP 404. This client needs a public HTTPS callback for webhook delivery. Without one, use poll or push if the client supports them.",
+          "data": {
+            "reason": "http_4xx",
+            "hint": {
+              "alternatives": [
+                "poll",
+                "push"
+              ],
+              "kind": "callback_unreachable"
+            }
+          }
+        }
+      },
+      {
+        "name": "a bad secret: InvalidParams, no hint",
+        "method": "events/subscribe",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null,
+          "ttlMs": 3600000
+        },
+        "core_status": 400,
+        "core_body": {
+          "error": {
+            "code": "bad_request",
+            "message": "delivery.secret must be whsec_ and the base64 of 24 to 64 bytes"
+          }
+        },
+        "error": {
+          "code": {
+            "draft": -32602,
+            "chatgpt": -32602
+          },
+          "message": "delivery.secret must be whsec_ and the base64 of 24 to 64 bytes",
+          "data": null
+        }
+      },
+      {
+        "name": "a failed verification without a hint (a core from before hints): the reason alone",
+        "method": "events/subscribe",
+        "user": "u1",
+        "params": {
+          "name": "chat.message",
+          "arguments": {
+            "channel": "eng"
+          },
+          "delivery": {
+            "mode": "webhook",
+            "url": "https://agent.example/hooks/1?mcp_event_subscription=a1",
+            "secret": "whsec_dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQtdGVzdA=="
+          },
+          "cursor": null,
+          "ttlMs": 3600000
+        },
+        "core_status": 400,
+        "core_body": {
+          "error": {
+            "code": "callback_failed",
+            "message": "callback verification failed: the callback answered HTTP 500",
+            "reason": "http_5xx"
+          }
+        },
+        "error": {
+          "code": {
+            "draft": -32027,
+            "chatgpt": -32015
+          },
+          "message": "callback verification failed: the callback answered HTTP 500",
+          "data": {
+            "reason": "http_5xx"
+          }
+        }
+      }
+    ]
   }
 }

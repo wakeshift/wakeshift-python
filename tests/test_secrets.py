@@ -1,4 +1,4 @@
-"""Secrets and argument values (design §2.13, §4, PR 9): secret-pattern.json and
+"""Secrets and argument values: secret-pattern.json and
 arg-values.json, SessionKey in every printer, and the canary leak test: a
 canary caller token, a canary session key and the test key appear in no log
 line, result, error or printed SDK object, nor in the locals Sentry captures

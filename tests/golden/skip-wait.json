@@ -1,0 +1,14 @@
+{
+  "about": "call.shouldSkipWait (Python should_skip_wait, Go ShouldSkipWait): whether a tool skips a wait the agent asked for (a vendor's wait_seconds) and returns at once. True only when call.wakes is true and the wait reaches call.callLimit, the program's per-call limit in seconds (null: not known). seconds null: no wait was asked for. Each SDK runs every case on a stand-in call made with wakes and call_limit, after one subscribe.",
+  "cases": [
+    { "name": "Claude Code's 60 s, a 300 s wait, woken", "wakes": true, "call_limit": 60, "seconds": 300, "skip": true },
+    { "name": "a wait as long as the limit doesn't fit either", "wakes": true, "call_limit": 60, "seconds": 60, "skip": true },
+    { "name": "a wait inside the limit runs", "wakes": true, "call_limit": 60, "seconds": 30, "skip": false },
+    { "name": "Codex's 300 s, a 300 s wait", "wakes": true, "call_limit": 300, "seconds": 300, "skip": true },
+    { "name": "Codex's 300 s, a 120 s wait", "wakes": true, "call_limit": 300, "seconds": 120, "skip": false },
+    { "name": "not woken (the user's notify choice pending, say): the wait runs", "wakes": false, "call_limit": 60, "seconds": 300, "skip": false },
+    { "name": "the limit isn't known: the wait runs", "wakes": true, "call_limit": null, "seconds": 300, "skip": false },
+    { "name": "no wait asked for", "wakes": true, "call_limit": 60, "seconds": null, "skip": false },
+    { "name": "a fractional wait past the limit", "wakes": true, "call_limit": 60, "seconds": 60.5, "skip": true }
+  ]
+}

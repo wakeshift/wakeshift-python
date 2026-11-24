@@ -1,6 +1,6 @@
 """subscribing-tools-list.json: the tools/list a server serves for tools that
 subscribe, a tool with subscribes=[], a tool that doesn't subscribe and the
-built-ins (design §2.4, §2.12, §3). Every scenario runs through
+built-ins. Every scenario runs through
 @attached.tool and through wrap, on MCPServer (FastMCP with
 WAKESHIFT_TEST_SERVER=fastmcp), and through wrap on the low-level Server;
 each gives the same tools/list."""

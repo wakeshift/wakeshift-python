@@ -1,4 +1,4 @@
-"""Secrets and argument values (design §2.13, §4).
+"""Secrets and argument values.
 
 - ``SessionKey``: a conversation's session key, which never prints: its
   ``repr``, ``str`` and ``format`` are ``[redacted]``, pickling it is refused,

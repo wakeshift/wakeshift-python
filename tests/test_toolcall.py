@@ -64,6 +64,10 @@ class WakeCore:
         self.app_name: str | None = None
         #: Seconds GET /app takes.
         self.app_delay = 0.0
+        #: /event-subscriptions's wakes answer: None leaves it out, as an older core does.
+        self.wakes: Any = None
+        #: /event-subscriptions's call_limit answer: None leaves it out (a limit that isn't known).
+        self.call_limit: Any = None
 
     def paths(self) -> list[str]:
         return [p for p, _ in self.calls if p not in ("/manifest", "/manifest/merge")]
@@ -108,7 +112,9 @@ class WakeCore:
                     "session": "wsc_s1",
                     "agent": {"harness": "claude-code", "via": "user_agent"},
                     "pending": body.get("pending") or "pa_first",
-                },
+                }
+                | ({} if self.wakes is None else {"wakes": self.wakes})
+                | ({} if self.call_limit is None else {"call_limit": self.call_limit}),
             )
         if path == "/calls/session":
             return httpx2.Response(
@@ -889,6 +895,23 @@ async def test_native_callers() -> None:
             None,
         ),
         ("ChatGPT's client name", "x/1", {"io.modelcontextprotocol/clientInfo": {"name": "openai-mcp", "version": "1"}}, None),
+        (
+            "a Work chat on the web",
+            "openai-mcp/1.0.0 (Codex)",
+            {
+                "openai/session": "chat-w",
+                "io.modelcontextprotocol/clientInfo": {"name": "openai-mcp (Codex)", "version": "1.0.0"},
+                "traceparent": "00-x",
+                "io.modelcontextprotocol/clientCapabilities": {
+                    "experimental": {"openai/visibility": {"enabled": True}},
+                    "extensions": {
+                        "io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]},
+                        "openai/elicitation": {"userVerification": {}},
+                    },
+                },
+            },
+            "chat-w",
+        ),
     ]
     async with w.served() as (_, rpc):
         for name, ua, meta, conv in cases:
@@ -908,6 +931,39 @@ async def test_native_callers() -> None:
         seen.clear()
         await call_tool(rpc, "join", {"table": "oak"})
         assert seen == [(False, None)]  # Claude Code isn't native
+        seen.clear()
+        desktop = {
+            "openai/session": "chat-d",
+            "sessionId": "s-1",
+            "windowId": "s-1:0",
+            "io.modelcontextprotocol/clientInfo": {"name": "openai-mcp (Codex)", "version": "1.0.0"},
+            "io.modelcontextprotocol/clientCapabilities": {
+                "experimental": {"openai/visibility": {"enabled": True}},
+                "elicitation": {"form": {}, "url": {}},
+                "extensions": {
+                    "io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app", "text/html+skybridge"]},
+                    "openai/elicitation": {"form": {}, "userVerification": {}},
+                    "openai/form": {},
+                },
+            },
+        }
+        await call_tool(rpc, "join", {"table": "oak"}, ua="openai-mcp/1.0.0 (Codex)", meta=desktop)
+        assert seen == [(False, None)]  # ChatGPT's desktop app isn't native
+        seen.clear()
+        regular = {
+            "openai/session": "chat-r",
+            "openai/userAgent": "Codex Desktop/26.1103.60933 (Mac OS; arm64)",
+            "openai/locale": "en-US",
+            "timezone": "UTC",
+            "timezone_offset_minutes": 0,
+            "io.modelcontextprotocol/clientInfo": {"name": "openai-mcp", "version": "1.0.0"},
+            "io.modelcontextprotocol/clientCapabilities": {
+                "experimental": {"openai/visibility": {"enabled": True}},
+                "extensions": {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]}},
+            },
+        }
+        await call_tool(rpc, "join", {"table": "oak"}, ua="openai-mcp/1.0.0", meta=regular)
+        assert seen == [(False, None)]  # nor is its regular chat (as observed)
         w.core.reset()
         await call_tool(rpc, "leave", {"table": "oak"}, ua="openai-mcp/1.0.0")
     ends = w.core.bodies("/event-subscriptions/end")
@@ -1287,7 +1343,7 @@ async def test_resolve_session_names_nothing() -> None:
 
 async def test_resolve_session_without_user_needs_the_key() -> None:
     """Without a user, only the session_key finds the conversation: a
-    harness's conversation ID alone (Channel3's unwatch_product, called by
+    harness's conversation ID alone (an unwatch_product tool, called by
     Codex with only its thread in _meta) is None, with no request."""
     w = Wrapped(identify=None)
     got: list[Any] = []

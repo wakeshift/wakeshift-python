@@ -1,0 +1,153 @@
+{
+  "_about": "The MCP Events client table: the one source of truth for which clients are exceptions to SEP-3415's capability negotiation, and which wire dialect each needs. Wakeshift's core embeds a byte-for-byte copy (internal/mcpevents/event/mcp-events-clients.json); the TypeScript and Python SDKs ship it as generated constants without its documentation (_about, reason, source, about) or webhook_only (sdk/typescript/src/clients.ts, sdk/python/src/wakeshift/_clients.py); the Go SDK compiles in the core's copy. `go run ./internal/mcpevents/clientsgen/gen` regenerates all three, and a test in the core and in each SDK fails when a copy drifts. Test cases live in mcp-events-interop.json native_client. INPUTS: the clientInfo name (the request's _meta io.modelcontextprotocol/clientInfo, else the session's initialize), the HTTP User-Agent, the request's _meta, the session's initialize extensions (none on a stateless server), and whether the server serves push (events/stream). MATCH SEMANTICS: an entry matches when every field in its match holds (fields are ANDed); a field holds when any of its values does (values are ORed). NORMALIZING is ASCII only, the same in every language: a name is trimmed of spaces and tabs and its ASCII letters lowercased, anything else left as it is (Turkish İ never matches i, and NEL or a BOM neither trims nor separates tokens). client: the clientInfo name, so normalized, equals a value. client_prefix: that name starts with a value. ua_product: a User-Agent product equals a value, where the products are each token's text before its first '/', ASCII-lowercased, the tokens split on spaces and tabs only (so 'ai-sdk/2.0.97 node.js/26' has the products 'ai-sdk' and 'node.js'). meta_key: the request's _meta has a non-empty string at that key. detector: a built-in check named here and written in each codebase (chatgpt_desktop: ChatGPT's desktop app, in Codex mode or a regular chat). Values are lowercase. An entry with without_push applies only while the server doesn't serve push. The first matching entry, in file order, wins; the core's lint test fails when two entries could match the same input ambiguously. EFFECT: native never (never treated as native, whatever it declares), undeclared (native whether or not it declares the extension), or capabilities (native when it declares io.modelcontextprotocol/events in the request's _meta clientCapabilities.extensions or its session's initialize extensions). No entry matched: capabilities decide, with the spec dialect. dialect names one of dialects. webhook_only (read by the core only, so the SDKs' copies leave it out as they leave out the documentation): the client takes events by webhook alone, never poll or push, so Wakeshift's hint for an unreachable callback never suggests them (internal/appapi/callbackhint.go). An app's isNativeClient answers before any of this, for its own agents. Each entry exists only while a client deviates from the spec: the list should shrink. Nothing here is public SDK API.",
+  "schema": 1,
+  "dialects": {
+    "spec": {
+      "errors": "spec",
+      "webhook_id": "message",
+      "envelopes": true,
+      "about": "SEP-3415 as accepted: a webhook-id of its own per message, kept for its retries; gap and terminated envelopes; the spec's error codes."
+    },
+    "draft": {
+      "errors": "spec",
+      "webhook_id": "event_id",
+      "envelopes": true,
+      "about": "webhook-id equals the body's eventId (OpenAI's webhook profile); gap and terminated envelopes. The name is historical: every webhook made before dialects were per client was draft, and keeps it."
+    },
+    "openclaw": {
+      "errors": "spec",
+      "webhook_id": "event_id",
+      "envelopes": false,
+      "about": "webhook-id equals eventId; no gap or terminated (OpenClaw answers them 400); the body always has the cursor key (a missing one is 400)."
+    },
+    "chatgpt": {
+      "errors": "chatgpt",
+      "webhook_id": "event_id",
+      "envelopes": false,
+      "about": "OpenAI's guide: webhook-id equals eventId, no gap or terminated, ChatGPT's own error codes."
+    }
+  },
+  "entries": [
+    {
+      "id": "chatgpt-desktop",
+      "match": { "detector": ["chatgpt_desktop"] },
+      "native": "never",
+      "dialect": "chatgpt",
+      "webhook_only": true,
+      "reason": "ChatGPT's desktop app, in Codex mode (openai-mcp (Codex) with the openai/form and text/html+skybridge capabilities) or a regular chat (openai-mcp with _meta openai/userAgent 'Codex Desktop/...'): it can't subscribe, so it keeps subscribe_events",
+      "source": "#1128; docs/harnesses.md"
+    },
+    {
+      "id": "chatgpt-session",
+      "match": { "meta_key": ["openai/session"] },
+      "native": "undeclared",
+      "dialect": "chatgpt",
+      "webhook_only": true,
+      "reason": "A ChatGPT Work chat names its conversation in _meta openai/session; it subscribes without declaring the extension (it reads top-level events)",
+      "source": "Wakeshift's subscribe vouchers"
+    },
+    {
+      "id": "chatgpt-name",
+      "match": { "client_prefix": ["openai-mcp"] },
+      "native": "undeclared",
+      "dialect": "chatgpt",
+      "webhook_only": true,
+      "reason": "ChatGPT's MCP client (openai-mcp, openai-mcp (Codex)) subscribes without declaring and follows OpenAI's guide",
+      "source": "https://developers.openai.com/plugins/build/mcp-events"
+    },
+    {
+      "id": "chatgpt-ua",
+      "match": { "ua_product": ["openai-mcp"] },
+      "native": "undeclared",
+      "dialect": "chatgpt",
+      "webhook_only": true,
+      "reason": "ChatGPT by User-Agent (openai-mcp/1.0.0), for a request without clientInfo",
+      "source": "https://developers.openai.com/plugins/build/mcp-events"
+    },
+    {
+      "id": "openclaw",
+      "match": { "client": ["openclaw"] },
+      "native": "undeclared",
+      "dialect": "openclaw",
+      "webhook_only": true,
+      "reason": "OpenClaw's mcp-events plugin reads only top-level events and never declares; it refuses a webhook-id other than eventId, any gap or terminated envelope, and a body without cursor. This is the events plugin's name, not OpenClaw's tool-calling client (openclaw-bundle-mcp, bridged): if OpenClaw's tool calls ever sent openclaw, they would turn native and get vouchers nothing redeems, so the interop tests assert the name its tool calls send",
+      "source": "OpenClaw 2026.11.3 docs/automation/mcp-events.md; interop tests"
+    },
+    {
+      "id": "opencode",
+      "match": { "client": ["opencode"] },
+      "without_push": true,
+      "native": "never",
+      "dialect": "spec",
+      "reason": "opencode subscribes only with push (events/stream), which this server doesn't serve; Wakeshift's plugin wakes it. Once the server serves push, capabilities decide",
+      "source": "anomalyco/opencode#63254, #63269"
+    },
+    {
+      "id": "opencode-ua",
+      "match": { "ua_product": ["opencode"] },
+      "without_push": true,
+      "native": "never",
+      "dialect": "spec",
+      "reason": "opencode by User-Agent product, as opencode by name",
+      "source": "anomalyco/opencode#63254, #63269"
+    },
+    {
+      "id": "hermes",
+      "match": { "client": ["hermes-agent"] },
+      "native": "never",
+      "dialect": "spec",
+      "webhook_only": true,
+      "reason": "Hermes Agent, bridged like the harnesses below (Wakeshift's plugin wakes it), in an entry of its own because it takes events by webhook alone: an unreachable callback's hint never suggests poll or push to it",
+      "source": "docs/harnesses.md; interop tests"
+    },
+    {
+      "id": "bridged",
+      "match": { "client": ["claude-code", "codex-mcp-client", "cursor", "cursor-vscode", "copilot-cli", "antigravity-client", "openclaw-bundle-mcp", "capy", "muse-custom-connector"] },
+      "native": "never",
+      "dialect": "spec",
+      "reason": "Harnesses Wakeshift wakes through its own paths (a Monitor, hooks, a connector, a plugin): treating one as native would leave it with nothing listening",
+      "source": "docs/harnesses.md"
+    },
+    {
+      "id": "hermes-ua",
+      "match": { "ua_product": ["hermes-agent"] },
+      "native": "never",
+      "dialect": "spec",
+      "webhook_only": true,
+      "reason": "Hermes Agent by User-Agent product, as Hermes by name",
+      "source": "docs/harnesses.md; interop tests"
+    },
+    {
+      "id": "bridged-ua",
+      "match": { "ua_product": ["claude-code", "codex-mcp-client", "cursor", "cursor-vscode", "copilot-cli", "antigravity-client", "openclaw-bundle-mcp", "capy", "muse-custom-connector"] },
+      "native": "never",
+      "dialect": "spec",
+      "reason": "The bridged harnesses by User-Agent product, for a request without clientInfo",
+      "source": "docs/harnesses.md"
+    },
+    {
+      "id": "ai-sdk",
+      "match": { "client": ["ai-sdk-mcp-client"] },
+      "native": "capabilities",
+      "dialect": "draft",
+      "reason": "The Vercel AI SDK's default client name; its webhook receiver refuses a webhook-id other than eventId",
+      "source": "@ai-sdk/mcp 2.0.97; interop tests"
+    },
+    {
+      "id": "ai-sdk-ua",
+      "match": { "ua_product": ["ai-sdk"] },
+      "native": "capabilities",
+      "dialect": "draft",
+      "reason": "The Vercel AI SDK by User-Agent (ai-sdk/<version>), which a renamed client still sends",
+      "source": "@ai-sdk/mcp 2.0.97; interop tests"
+    },
+    {
+      "id": "tanstack",
+      "match": { "client": ["tanstack-ai-mcp"] },
+      "native": "capabilities",
+      "dialect": "draft",
+      "reason": "TanStack AI's default client name; it declares the extension but refuses a webhook-id other than eventId",
+      "source": "@tanstack/ai-mcp 1.2.0; interop tests"
+    }
+  ]
+}

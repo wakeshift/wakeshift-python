@@ -1,4 +1,4 @@
-"""attach on FastMCP 4 (docs/fastmcp.md): what's FastMCP's own, over the wire
+"""attach on FastMCP 4: what's FastMCP's own, over the wire
 and through FastMCP's own client. The rest of the suite runs against FastMCP
 with WAKESHIFT_TEST_SERVER=fastmcp (conftest.py)."""
 
@@ -468,7 +468,7 @@ async def test_in_memory_client() -> None:
 
 def test_sdk_bounds_are_checked_at_attach(monkeypatch: pytest.MonkeyPatch) -> None:
     """The extras' bounds hold only where pip resolved them, so attach checks
-    them (design §5): FastMCP before 2.12 is refused, never told to install
+    them: FastMCP before 2.12 is refused, never told to install
     [mcp]; FastMCP 2.12+ and 3.x pass on their own mcp 1.x
     (test_fastmcp23.py serves on them)."""
     from wakeshift import _hosts

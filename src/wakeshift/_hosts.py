@@ -3,8 +3,8 @@ official SDK's MCPServer, its low-level Server, and FastMCP 4 (the
 ``fastmcp`` package). All three are, or sit on, the official SDK's low-level
 ``Server`` (``mcp`` 2.x), so the native ``events/*`` handlers, the wait tool
 and attach's middleware are the same for each; only registering a tool, the
-Context type a tool asks for and where the middleware goes differ
-(docs/fastmcp.md). FastMCP 2.12+ and 3.x sit on ``mcp`` 1.x: their host is
+Context type a tool asks for and where the middleware goes differ.
+FastMCP 2.12+ and 3.x sit on ``mcp`` 1.x: their host is
 in _fastmcp23.py, with the same middleware and no MCP Events.
 """
 
@@ -228,7 +228,7 @@ class FastMCPHost(Host):
         low = getattr(server, "_mcp_server", None)
         if low is None or not any(isinstance(m, FastMCPServerMiddleware) for m in getattr(low, "middleware", ())):
             # attach relies on FastMCP's middleware sitting in the official
-            # SDK's list (docs/fastmcp.md, "What stays fragile").
+            # SDK's list.
             raise TypeError(
                 f"wakeshift: this FastMCP ({_fastmcp_version()}) doesn't serve requests the way attach expects: "
                 "attach supports FastMCP 4.1 and later 4.x"

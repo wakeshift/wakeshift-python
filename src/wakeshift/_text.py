@@ -3,7 +3,7 @@ place, the same in every SDK (sdk/typescript/test/event-tools.json,
 subscribing-tools-list.json, wake-args.json, tool-output-schemas.json).
 
 COMPACT is subscribing-tools-list.json's compact_strings: the compact
-tools/list text that held in the bench (November 5, 2026), word for word.
+tools/list text, which tested as well as the longer wording, word for word.
 Compact is the only behavior. The subscribes sentence stays as it was: it's
 what gets agents to ask.
 """
@@ -26,7 +26,7 @@ COMPACT: dict[str, str] = {
     ),
     "unsubscribe_description": "Stop a subscription: the event and arguments, or its id.",
     "list_description": "List your subscriptions to this app's events, with ids.",
-    # The subscribes sentence, which the bench kept as it was.
+    # The subscribes sentence, kept as it was.
     "notifies": (
         "This tool is how {app} notifies you in this conversation{when}. {App} delivers its notifications through "
         "Wakeshift; the result may ask you to start a background listener and to offer the user a one-time install. "
@@ -59,7 +59,7 @@ TEXT: dict[str, str] = {
     "native_refused": "you may not subscribe to {event} with these arguments",
     "native_bad_voucher": "this voucher can't subscribe to {event}: it was used, it expired, or it's for other arguments",
     "native_tools_only": "{event} can be subscribed only through this app's tools, or with the voucher one of them handed you",
-    "native_tools_only_poll": "{event} can't be polled: it's subscribed to only through this app's tools, with a webhook",
+    "native_tools_only_poll": "{event} can't be polled: it's subscribed to only through this app's tools, with a webhook or by push",
     "native_unknown_event": "this app offers no event named {event}",
     "need": "Pass the event and its arguments, or a subscription's id from list_subscriptions.",
     "no_such_id": "No subscription of yours has the id {id}: it may have ended already.",

@@ -1,5 +1,4 @@
-"""Construction, the disabled client and the client's lifecycle (design §2.1,
-PR 3): disabled-client.json's construction cases and each method on a
+"""Construction, the disabled client and the client's lifecycle (PR 3): disabled-client.json's construction cases and each method on a
 disabled client, construction making no request, and one client shared by
 event loops and threads."""
 
@@ -94,7 +93,7 @@ class Turn(BaseModel):
     text: str
 
 
-#: Ops Python has no counterpart for (design §5's Python surface has no actAs).
+#: Ops Python has no counterpart for (the Python surface has no actAs).
 NOT_IN_PYTHON = {"act_as": "Python has no act_as in this release"}
 
 #: Ops a later commit of this release implements.
@@ -282,3 +281,33 @@ async def test_aclose_is_idempotent_and_never_closes_a_callers_client() -> None:
     async with Wakeshift(app_key(), core="https://core.test", http_client=theirs) as w2:
         assert await w2.forget_user("ada") is True
     assert not theirs.is_closed, "a caller's http_client is never closed"
+
+
+async def test_events_stream_upstreams_have_their_own_uncapped_client() -> None:
+    # SEP-3415 exempts events/stream from concurrency caps: open streams hold
+    # connections of their own client, never the API client's pool (100).
+    core = FakeCore(default_ok=True)
+    core.on("POST", "/users/forget", lambda b: (200, {"forgotten": True}))
+    core.on("POST", "/events/stream", lambda b: (200, {}))
+    wake = Wakeshift(app_key(), core="https://core.test")
+    real = wake._new_stream_http()
+    pool = getattr(getattr(real, "_transport", None), "_pool", None)
+    assert pool is not None and pool._max_connections > 10_000, "no connection cap"
+    await real.aclose()
+    made: dict[str, httpx2.AsyncClient] = {}
+
+    def maker(kind: str) -> Any:
+        def new() -> httpx2.AsyncClient:
+            made[kind] = httpx2.AsyncClient(transport=httpx2.MockTransport(core.handler))
+            return made[kind]
+
+        return new
+
+    wake._new_http = maker("api")  # type: ignore[method-assign]
+    wake._new_stream_http = maker("stream")  # type: ignore[method-assign]
+    async with wake._open_stream("/events/stream", {"name": "x"}):
+        pass
+    assert await wake.forget_user("ada") is True
+    assert set(made) == {"api", "stream"} and made["api"] is not made["stream"]
+    await wake.aclose()
+    assert made["api"].is_closed and made["stream"].is_closed

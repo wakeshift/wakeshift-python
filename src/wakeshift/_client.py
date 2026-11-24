@@ -12,16 +12,17 @@ import threading
 import time
 import weakref
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, TypeVar, cast, overload
 from urllib.parse import quote, urlsplit
 
 import httpx2
 from mcp_types import CallToolResult, TextContent
 from pydantic import BaseModel
 
+from . import _breaker
 from ._errors import FIXES, APIConnectionError, APIError, IdReusedError, UsageError, anchor, usage
 from ._key import AppKey, is_test_key, parse_key, sign_assertion
 from ._log import _SDK_REQUEST, Log, quiet_http_logs
@@ -30,6 +31,7 @@ from ._secrets import SessionKey, redact_secrets
 
 if TYPE_CHECKING:
     from ._events import BuiltinTools, Identity, Request, Subscriber, WakeEvent
+    from ._push import PushOptions
     from ._toolcall import Attachment, ToolCall, _Scope
     from ._watch import Subscribed, _Watch
 
@@ -47,6 +49,19 @@ DEFAULT_CORE = "https://app.wakeshift.ai"
 #: "this app" ("wait", seconds), and how long after a failed or unanswered
 #: fetch it doesn't ask again ("retry"). Tests shorten them.
 _NAME_FETCH: dict[str, float] = {"wait": 3.0, "retry": 60.0}
+
+
+@dataclass(frozen=True)
+class CallTimeouts:
+    """How long a tool call waits for Wakeshift, in seconds, in all (a
+    manifest send it waits for included), with no retries: ``subscribe`` for
+    what the tool awaits (call.subscribe, unsubscribe, resolve_session),
+    ``block`` for the result's addition and a failed call's rollback. Past
+    it, the request raises APIConnectionError ``timeout``."""
+
+    subscribe: float = 5.0
+    block: float = 1.0
+
 
 #: The tool arguments Wakeshift adds: the conversation's session key, the
 #: program the agent runs in, and its own ID for the conversation.
@@ -151,6 +166,10 @@ class _Call:
     #: For a native caller: the SHA-256 (hex) of the request's Mcp-Session-Id,
     #: when it has one. An anonymous subscribe voucher is bound to it.
     transport_session: str | None = None
+    #: The request declares the MCP Events extension (its _meta's
+    #: capabilities, or its session's initialize), sent only to a core that
+    #: serves push: the core may then answer a subscribe with native_line.
+    events_ext: bool = False
 
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {"client": self.client}
@@ -160,6 +179,8 @@ class _Call:
                 out[k] = v
         if self.tasks:
             out["tasks"] = True
+        if self.events_ext:
+            out["events_ext"] = True
         return out
 
 
@@ -327,16 +348,18 @@ def _request_info(ctx: Any) -> tuple[str, dict[str, Any], Mapping[str, str]]:
     else:
         dump = getattr(meta_obj, "model_dump", None)
         meta = dump(by_alias=True, exclude_none=True) if dump else {}
+    # The request's _meta clientInfo first (every 2026-07-28 request), then the
+    # session's initialize, as in the Go SDK.
     client = ""
-    session = getattr(rc, "session", None)
-    params = getattr(session, "client_params", None) if session is not None else None
-    info = getattr(params, "client_info", None) if params is not None else None
-    if info is not None and getattr(info, "name", ""):
-        client = info.name
+    ci = meta.get("io.modelcontextprotocol/clientInfo")
+    if isinstance(ci, Mapping) and isinstance(ci.get("name"), str):
+        client = ci["name"]
     if not client:
-        ci = meta.get("io.modelcontextprotocol/clientInfo")
-        if isinstance(ci, Mapping) and isinstance(ci.get("name"), str):
-            client = ci["name"]
+        session = getattr(rc, "session", None)
+        params = getattr(session, "client_params", None) if session is not None else None
+        info = getattr(params, "client_info", None) if params is not None else None
+        if info is not None and getattr(info, "name", ""):
+            client = info.name
     headers: Mapping[str, str] = {}
     req = getattr(rc, "request", None)
     if req is not None and getattr(req, "headers", None) is not None:
@@ -388,6 +411,7 @@ def _call_of(
     tool: str | None = None,
     tasks: bool = False,
     transport_session: str | None = None,
+    events_ext: bool = False,
 ) -> _Call:
     """Packs a tool call: tool is the name of the tool being called
     (Wakeshift's hooks act on a connector beacon only from that tool's result)."""
@@ -402,12 +426,16 @@ def _call_of(
         tool=(tool or "").strip() or None,
         tasks=tasks,
         transport_session=transport_session or None,
+        events_ext=events_ext,
     )
 
 
 #: The core's feature: it hands out subscribe vouchers for tools-only events
-#: to native callers (docs/subscribe-vouchers.md).
+#: to native callers.
 SUBSCRIBE_VOUCHERS = "subscribe_vouchers"
+
+#: The core's feature: it serves MCP Events push (POST /events/stream).
+PUSH_FEATURE = "push"
 
 
 def _transport_session(headers: Mapping[str, str] | None) -> str | None:
@@ -475,16 +503,65 @@ def _core_url(core: str) -> str:
     return core.strip().rstrip("/")
 
 
+#: The longest line read from a push upstream: an occurrence is at most 256 KiB.
+_MAX_LINE = 1024 * 1024
+
+
+class _Upstream(Protocol):
+    """An open events/stream upstream: its status, and its body as a whole
+    (a refusal) or one NDJSON line at a time (a stream)."""
+
+    status: int
+    #: The response's Retry-After, as sent (a 503 at the core's stream limit carries one).
+    retry_after: str | None
+
+    async def text(self) -> str: ...
+
+    def lines(self) -> AsyncIterator[str]: ...
+
+
+class _HTTPUpstream:
+    """An events/stream upstream on httpx2's streaming response."""
+
+    def __init__(self, resp: httpx2.Response) -> None:
+        self._resp = resp
+        self.status = resp.status_code
+        self.retry_after = resp.headers.get("retry-after")
+
+    async def text(self) -> str:
+        body = await self._resp.aread()
+        return body[:4096].decode("utf-8", "replace")
+
+    async def lines(self) -> AsyncIterator[str]:
+        buf = b""
+        async for chunk in self._resp.aiter_bytes():
+            buf += chunk
+            while True:
+                i = buf.find(b"\n")
+                if i < 0:
+                    break
+                line, buf = buf[:i].strip(), buf[i + 1 :]
+                if line:
+                    yield line.decode("utf-8", "replace")
+            if len(buf) > _MAX_LINE:
+                raise ValueError("line too long")
+        if buf.strip():
+            yield buf.strip().decode("utf-8", "replace")
+
+
 class _Loop:
     """What the client keeps per running event loop: its own HTTP client
     (created on first use), and the locks that order its sends."""
 
-    __slots__ = ("app_lock", "http", "manifest_lock", "watch_checks")
+    __slots__ = ("app_lock", "http", "manifest_lock", "stream_http", "watch_checks")
 
     def __init__(self) -> None:
         from ._watch import MAX_CONCURRENT_CHECKS
 
         self.http: httpx2.AsyncClient | None = None
+        #: events/stream's upstreams' own client, with no connection cap
+        #: (_new_stream_http): created on the first stream.
+        self.stream_http: httpx2.AsyncClient | None = None
         self.app_lock = asyncio.Lock()
         self.manifest_lock = asyncio.Lock()
         #: The watches' checks running at once (event.watch).
@@ -522,7 +599,17 @@ class Wakeshift:
     The client may be shared across threads and event loops: it keeps one
     HTTP client per running loop (a caller's ``http_client`` is used as it
     is, and never closed). ``await wake.aclose()`` closes the current loop's
-    own; it's never required."""
+    own; it's never required.
+
+    ``timeout`` (seconds) and ``max_retries`` apply to emits and every
+    request outside tool calls. Requests made inside a tool call (subscribe,
+    unsubscribe, resolve_session, the result's addition, a rollback) aren't
+    retried and take at most ``call_timeouts`` in all (a CallTimeouts: 5
+    seconds for what the tool awaits, 1 for the addition), so Wakeshift never
+    holds up a tool call for long. After 5 of them fail in a row
+    (unreachable, a timeout, a 5xx), tool calls skip Wakeshift for 30
+    seconds: a subscribe raises APIConnectionError ``unreachable`` at once
+    (catch it to go on without wakes), and results go out unchanged."""
 
     def __init__(
         self,
@@ -532,6 +619,7 @@ class Wakeshift:
         required: bool = False,
         timeout: float = 20.0,
         max_retries: int = 2,
+        call_timeouts: CallTimeouts | None = None,
         http_client: httpx2.AsyncClient | None = None,
     ) -> None:
         self._log = Log()
@@ -544,6 +632,14 @@ class Wakeshift:
             raise usage("config", "timeout must be a number of seconds above zero")
         if not isinstance(max_retries, int) or isinstance(max_retries, bool) or max_retries < 0:
             raise usage("config", "max_retries must be zero or more")
+        if call_timeouts is None:
+            call_timeouts = CallTimeouts()
+        if not isinstance(call_timeouts, CallTimeouts):
+            raise usage("config", "call_timeouts must be a CallTimeouts")
+        for name in ("subscribe", "block"):
+            v = getattr(call_timeouts, name)
+            if not isinstance(v, int | float) or isinstance(v, bool) or not 0 < v < float("inf"):
+                raise usage("config", f"call_timeouts.{name} must be a number of seconds above zero")
         if not raw and required:
             raise usage("config", f"{source} is missing or empty, and required=True needs a key")
         self._key: AppKey | None = None
@@ -574,6 +670,10 @@ class Wakeshift:
         self._name_failed_at: float | None = None
         self._timeout = float(timeout)
         self._max_retries = max_retries
+        self._call_timeouts = call_timeouts
+        self._breaker = _breaker.Breaker()
+        #: Manifest sends an in-call request started, kept so they aren't collected.
+        self._manifest_tasks: set[asyncio.Task[None]] = set()
         self._http = http_client
         self._loops: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _Loop] = weakref.WeakKeyDictionary()
         self._loops_lock = threading.Lock()
@@ -643,6 +743,14 @@ class Wakeshift:
     def _new_http(self) -> httpx2.AsyncClient:
         return httpx2.AsyncClient(timeout=self._timeout)
 
+    def _new_stream_http(self) -> httpx2.AsyncClient:
+        """The client events/stream's upstreams hold their connections on:
+        one per open stream, for as long as it's open, so it has no connection
+        cap and isn't the API client, whose pool (100 connections) every other
+        call to Wakeshift shares. SEP-3415 exempts events/stream from
+        concurrency caps."""
+        return httpx2.AsyncClient(timeout=self._timeout, limits=httpx2.Limits(max_connections=None, max_keepalive_connections=20))
+
     # ── Subscribe vouchers' contexts ───────────────────────────────────────
 
     def _remember_voucher(self, token: str, context: Any) -> None:
@@ -684,11 +792,14 @@ class Wakeshift:
         loop = asyncio.get_running_loop()
         with self._loops_lock:
             st = self._loops.get(loop)
-            http, st_http = (st.http, st) if st is not None else (None, None)
-            if st_http is not None:
-                st_http.http = None
+            http, stream_http = (st.http, st.stream_http) if st is not None else (None, None)
+            if st is not None:
+                st.http = None
+                st.stream_http = None
         if http is not None:
             await http.aclose()
+        if stream_http is not None:
+            await stream_http.aclose()
 
     async def __aenter__(self) -> Wakeshift:
         return self
@@ -830,7 +941,15 @@ class Wakeshift:
         }
         if "events" not in body:
             return  # nothing to add (attach refuses with no events, but never send an empty list)
-        out = await self._request("POST", "/manifest/merge", body)
+        try:
+            out = await self._request("POST", "/manifest/merge", body)
+        except APIError as e:
+            # Refused for the app's event definitions (a 4xx but a refused
+            # key, which key_refused covers): Wakeshift's own message about
+            # them, and its code; never a body otherwise.
+            if e.status is not None and 400 <= e.status < 500 and e.status not in (401, 403):
+                self._log("manifest_refused", f"Wakeshift refused this app's events: {e.detail}", reason=e.code)
+            raise
         self._sends += 1
         self._log_changes(out)
         self._note_features(out)
@@ -846,6 +965,77 @@ class Wakeshift:
         try:
             await self._ensure_events()
         except Exception:
+            return False
+        return SUBSCRIBE_VOUCHERS in self._features
+
+    async def _push_offered(self) -> bool:
+        """Whether the core serves push (events/stream): its manifest answer
+        reports push. Sends the manifest first if it hasn't been; a failed
+        send is no."""
+        try:
+            await self._ensure_events()
+        except Exception:
+            return False
+        return PUSH_FEATURE in self._features
+
+    @property
+    def _push_known(self) -> bool:
+        """Whether the core's last manifest answer reported push, without
+        asking: a call's events_ext goes only to a core that reported it (an
+        older one refuses fields it doesn't know)."""
+        return PUSH_FEATURE in self._features
+
+    @contextlib.asynccontextmanager
+    async def _open_stream(self, path: str, body: Any) -> AsyncIterator[_Upstream]:
+        """Opens a streaming POST to the app API (events/stream), after the
+        manifest: one attempt, no retries, a timeout only until the response's
+        headers arrive; its body is read for as long as the core keeps it
+        open. Leaving the context closes the connection. Raises
+        APIConnectionError when there was no answer."""
+        self._need_key()
+        await self._ensure_events()
+        # An http_client the app passed carries every request, streams too.
+        h = self._http
+        if h is None:
+            st = self._loop()
+            if st.stream_http is None:
+                st.stream_http = self._new_stream_http()
+            h = st.stream_http
+        headers = {
+            "Authorization": "Bearer " + self._assertion(),
+            "Content-Type": "application/json",
+            "Accept": "application/x-ndjson",
+        }
+        # No read timeout: the core writes a heartbeat at its grant, and the
+        # relay ends a silent stream itself (3 x the grant).
+        timeout = httpx2.Timeout(self._timeout, read=None)
+        quiet = _SDK_REQUEST.set(True)
+        try:
+            cm = h.stream("POST", self.core + "/api/apps/v1" + path, content=json.dumps(body), headers=headers, timeout=timeout)
+            try:
+                resp = await cm.__aenter__()
+            except httpx2.TimeoutException as err:
+                raise APIConnectionError(
+                    f"wakeshift: Wakeshift at {self.core} didn't answer in time. {FIXES['timeout']} {anchor('timeout')}",
+                    code="timeout",
+                ) from err
+            except httpx2.HTTPError as err:
+                raise self._unreachable(str(err) or type(err).__name__) from err
+        finally:
+            _SDK_REQUEST.reset(quiet)
+        try:
+            yield _HTTPUpstream(resp)
+        finally:
+            with contextlib.suppress(Exception):
+                await cm.__aexit__(None, None, None)
+
+    async def _vouchers_offered_in_call(self) -> bool:
+        """_vouchers_offered inside a tool call: no, too, for a manifest send
+        that takes longer than call_timeouts.subscribe (it goes on in the background)."""
+        try:
+            async with asyncio.timeout(self._call_timeouts.subscribe):
+                await self._ensure_events_shielded()
+        except Exception:  # a failed send, or no answer in time
             return False
         return SUBSCRIBE_VOUCHERS in self._features
 
@@ -969,6 +1159,8 @@ class Wakeshift:
         wrap: Mapping[str, Sequence[WakeEvent[Any, Any]]] | Callable[[str], Sequence[WakeEvent[Any, Any]] | None] | None = None,
         builtin_tools: BuiltinTools | Literal[False] | None = None,
         is_native_client: Callable[[Request], bool] | None = None,
+        push: PushOptions | Literal[False] | None = None,
+        client_requests: bool = True,
     ) -> Attachment:
         """Attaches Wakeshift to an MCP server before you run it: an
         MCPServer, a FastMCP server (4, or 2.12+ and 3.x without native MCP
@@ -996,8 +1188,23 @@ class Wakeshift:
         the request is refused (your tool still runs). ``require_user=True``
         refuses an anonymous caller the same way, so a session_key is never
         a bearer. ``is_native_client`` tells, for callers the SDK can't
-        recognize (an app's own house agents), whether the client subscribes
-        to events itself. On a disabled client, attach adds nothing."""
+        recognize (an app's own first-party agents), whether the client subscribes
+        to events itself. ``push`` tunes MCP Events push (``events/stream``),
+        served where Wakeshift offers it and the server answers with streams:
+        ``False`` serves none (a host that can't hold a response open), and
+        ``{"max_stream_ms": …, "max_heartbeat_ms": …}`` ends each stream
+        before the host's request duration cap and asks for heartbeats under
+        a load balancer's idle timeout. ``client_requests`` (on by default):
+        during a subscribing call, Wakeshift may describe one request for the
+        SDK to make of the MCP client, an elicitation form (Codex's install
+        offer in its own dialog), which the SDK runs only within fixed bounds
+        and only where the transport carries a server-to-client request during
+        the call: stdio, or streamable HTTP with sessions and streamed
+        responses. ``False`` turns it off, and results keep Wakeshift's usual
+        text: for a server behind something that won't hold a streamed
+        response for up to two minutes, or that can't route the client's
+        answer back to the process holding the call. On a disabled client,
+        attach adds nothing."""
         with self._config_logged():
             return self._attach(
                 server,
@@ -1006,6 +1213,8 @@ class Wakeshift:
                 wrap=wrap,
                 builtin_tools=builtin_tools,
                 is_native_client=is_native_client,
+                push=push,
+                client_requests=client_requests,
             )
 
     @contextlib.contextmanager
@@ -1033,11 +1242,15 @@ class Wakeshift:
         wrap: Mapping[str, Sequence[WakeEvent[Any, Any]]] | Callable[[str], Sequence[WakeEvent[Any, Any]] | None] | None,
         builtin_tools: BuiltinTools | Literal[False] | None,
         is_native_client: Callable[[Request], bool] | None,
+        push: PushOptions | Literal[False] | None = None,
+        client_requests: bool = True,
     ) -> Attachment:
         from ._events import attach_events
         from ._hosts import check_sdks, host_of
         from ._toolcall import Attachment
 
+        if not isinstance(client_requests, bool):
+            raise usage("config", "attach's client_requests is True or False")
         check_sdks(server)
         try:
             seen = server in _ATTACHED
@@ -1067,7 +1280,9 @@ class Wakeshift:
             builtin_tools=builtin_tools,
             wrap=wrap,
             host=host,
+            push=push,
         )
+        attached._client_requests = client_requests
         self._serving = True  # the manifest is sent automatically from now on
         return attached
 
@@ -1148,6 +1363,62 @@ class Wakeshift:
                 raise
             if self._manifest_version == version:
                 self._published = True
+
+    async def _ensure_events_shielded(self) -> None:
+        """_ensure_events in a task of its own: a tool call that stops waiting
+        for it (its budget ran out) leaves the send to finish, so a slow core
+        still gets the manifest once."""
+        if self._published or not self._serving:
+            return
+        task = asyncio.ensure_future(self._ensure_events())
+        self._manifest_tasks.add(task)
+
+        def settled(t: asyncio.Task[None]) -> None:
+            self._manifest_tasks.discard(t)
+            if not t.cancelled():
+                t.exception()  # retrieved: a waiter that gave up leaves no "never retrieved" warning
+
+        task.add_done_callback(settled)
+        await asyncio.shield(task)
+
+    async def _in_call(self, budget: Literal["subscribe", "block"], method: str, path: str, body: Any) -> dict[str, Any]:
+        """A request to the app API made inside a tool call: never retried,
+        and within call_timeouts' budget in all, the manifest send it may wait
+        for first included; body may be a function, called after that send.
+        While the breaker is open it's skipped (unreachable, at once);
+        otherwise the breaker counts its outcome."""
+        self._need_key()
+        probe = self._breaker.admit()
+        if probe is None:
+            self._log(
+                "core_unavailable",
+                f"Wakeshift failed {_breaker.BREAKER_FAILURES} times in a row inside tool calls, so tool calls skip it for "
+                f"{_breaker.BREAKER_PAUSE:g} seconds",
+            )
+            raise self._unreachable(
+                f"skipped: {_breaker.BREAKER_FAILURES} requests in a row failed inside tool calls, so they pause for "
+                f"{_breaker.BREAKER_PAUSE:g} seconds"
+            )
+        ok: bool | None = None
+        try:
+            try:
+                async with asyncio.timeout(getattr(self._call_timeouts, budget)):
+                    await self._ensure_events_shielded()
+                    budget_s = getattr(self._call_timeouts, budget)
+                    out = await self._request(method, path, body() if callable(body) else body, timeout=budget_s, retries=0)
+            except TimeoutError as err:
+                raise self._timed_out() from err
+            ok = True
+            return out
+        except APIConnectionError:
+            ok = False
+            raise
+        except APIError as err:
+            # A 4xx, or a 2xx that isn't JSON, is the core answering.
+            ok = err.status is not None and err.status < 500
+            raise
+        finally:
+            self._breaker.done(probe, ok)
 
     async def _emit_event(
         self,
@@ -1251,9 +1522,12 @@ class Wakeshift:
 
     # ── HTTP ───────────────────────────────────────────────────────────────
 
-    async def _send(self, method: str, url: str, *, timeout: float | None = None, **kw: Any) -> tuple[httpx2.Response, str]:
+    async def _send(
+        self, method: str, url: str, *, timeout: float | None = None, retries: int | None = None, **kw: Any
+    ) -> tuple[httpx2.Response, str]:
         # A request the load balancer refused during a rollout is sent again (retry.py).
-        limit = max(timeout or 0, self._timeout)
+        # A request inside a tool call (retries=0) has its own, shorter budget; others at least the client's.
+        limit = timeout if retries == 0 and timeout else max(timeout or 0, self._timeout)
         h = self._http
         if h is None:
             st = self._loop()
@@ -1261,23 +1535,21 @@ class Wakeshift:
                 st.http = self._new_http()
             h = st.http
         try:
-            return await self._send_with(h, method, url, limit, **kw)
+            return await self._send_with(h, method, url, limit, retries=retries, **kw)
         except httpx2.TimeoutException as err:
-            raise APIConnectionError(
-                f"wakeshift: Wakeshift at {self.core} didn't answer in time. {FIXES['timeout']} {anchor('timeout')}",
-                code="timeout",
-            ) from err
+            raise self._timed_out() from err
         except httpx2.HTTPError as err:
             raise self._unreachable(str(err) or type(err).__name__) from err
 
     async def _send_with(
-        self, h: httpx2.AsyncClient, method: str, url: str, timeout: float, **kw: Any
+        self, h: httpx2.AsyncClient, method: str, url: str, timeout: float, *, retries: int | None = None, **kw: Any
     ) -> tuple[httpx2.Response, str]:
-        """Sends a request, again (up to max_retries times) when it never
-        reached Wakeshift: the load balancer refused it, or the connection
-        failed. An answer that may have come from Wakeshift, or a timeout,
-        isn't sent again here: its outcome is unknown (an emit carries an id,
-        so a retry of it wakes nobody twice)."""
+        """Sends a request, again (up to retries times, max_retries by
+        default) when it never reached Wakeshift: the load balancer refused
+        it, or the connection failed. An answer that may have come from
+        Wakeshift, or a timeout, isn't sent again here: its outcome is unknown
+        (an emit carries an id, so a retry of it wakes nobody twice)."""
+        limit = self._max_retries if retries is None else retries
         attempt = 0
         while True:
             # httpx2 logs a line per request at INFO: not for the SDK's own.
@@ -1285,24 +1557,28 @@ class Wakeshift:
             try:
                 resp = await h.request(method, url, timeout=timeout, **kw)
             except httpx2.ConnectError:
-                if attempt >= self._max_retries:
+                if attempt >= limit:
                     raise
             else:
                 text = resp.text
-                if attempt >= self._max_retries or not refused(method, resp):
+                if attempt >= limit or not refused(method, resp):
                     return resp, text
             finally:
                 _SDK_REQUEST.reset(quiet)
             await asyncio.sleep(self._retry_pauses[min(attempt, len(self._retry_pauses) - 1)])
             attempt += 1
 
-    async def _request(self, method: str, path: str, body: Any = None, *, timeout: float | None = None) -> dict[str, Any]:
+    async def _request(
+        self, method: str, path: str, body: Any = None, *, timeout: float | None = None, retries: int | None = None
+    ) -> dict[str, Any]:
+        """A call to the app API. retries: how many times a request that never
+        reached Wakeshift is sent again (max_retries by default)."""
         headers = {"Authorization": "Bearer " + self._assertion()}
         kw: dict[str, Any] = {"headers": headers}
         if body is not None:
             headers["Content-Type"] = "application/json"
             kw["content"] = json.dumps(body)
-        resp, text = await self._send(method, self.core + "/api/apps/v1" + path, timeout=timeout, **kw)
+        resp, text = await self._send(method, self.core + "/api/apps/v1" + path, timeout=timeout, retries=retries, **kw)
         try:
             data = json.loads(text) if text else None
         except ValueError:
@@ -1326,6 +1602,7 @@ class Wakeshift:
                 status=resp.status_code,
                 reason=string("reason") or None,
                 request_id=resp.headers.get("x-request-id") or None,
+                _hint=e.get("hint") if isinstance(e.get("hint"), dict) else None,
             )
         # A 2xx that isn't Wakeshift's JSON: a proxy's page, or a wrong core.
         if not isinstance(data, dict):
@@ -1337,6 +1614,12 @@ class Wakeshift:
                 request_id=resp.headers.get("x-request-id") or None,
             )
         return data
+
+    def _timed_out(self) -> APIConnectionError:
+        return APIConnectionError(
+            f"wakeshift: Wakeshift at {self.core} didn't answer in time. {FIXES['timeout']} {anchor('timeout')}",
+            code="timeout",
+        )
 
     def _unreachable(self, why: str) -> APIConnectionError:
         # Name the core it went to: a wrong or missing WAKESHIFT_CORE is the usual cause.

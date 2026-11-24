@@ -36,6 +36,7 @@ from ._client import (
     _transport_session,
 )
 from ._errors import APIConnectionError, APIError, UsageError, usage, what_of
+from ._http400 import header_mismatch_as_400
 from ._spec import (
     DELIVERY,
     EXTENSION_KEY,
@@ -43,11 +44,17 @@ from ._spec import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
     NAME_HEADER,
+    PUSH,
     RESULT_TYPE,
+    STREAM_REFUSAL,
     Codes,
+    ParamHeader,
     codes_for,
     dialect_of,
-    header_value,
+    name_header_refusal,
+    param_header_refusal,
+    param_headers_of,
+    transport_header_refusal,
 )
 from ._tasks import TOOL_ANNOTATIONS, TaskServer
 from ._text import OUTPUT_SCHEMAS, TEXT, wake_args
@@ -56,6 +63,7 @@ if TYPE_CHECKING:
     from mcp.server.auth.provider import AccessToken
 
     from ._client import Wakeshift
+    from ._push import PushOptions
     from ._toolcall import Attachment
     from ._watch import Subscribed, WatchResult
 
@@ -257,8 +265,8 @@ def fill(key: str, **vars: Any) -> str:
     return _PLACEHOLDER.sub(lambda m: str(vars[m.group(1)]) if m.group(1) in vars else m.group(0), TEXT[key])
 
 
-#: The event argument a native client passes a subscribe voucher in
-#: (docs/subscribe-vouchers.md §4.4): reserved, and taken out before anything
+#: The event argument a native client passes a subscribe voucher in:
+#: reserved, and taken out before anything
 #: reads the arguments.
 VOUCHER_ARG = "wakeshift_voucher"
 
@@ -569,9 +577,15 @@ class WakeEvent(Generic[A, P]):
             raise usage("config", f"event {name}: args is an object schema")
         if p.get("type") != "object":
             raise usage("config", f"event {name}: payload is an object schema")
+        # An invalid x-mcp-header makes a spec client drop the event type (SEP-3415).
+        annotated, problem = param_headers_of(a)
+        if problem is not None:
+            raise usage("config", f"event {name}: arguments: {problem}")
+        #: The arguments its x-mcp-header annotations mirror into Mcp-Param headers.
+        self._param_headers: list[ParamHeader] = annotated
         props: Mapping[str, Any] = a.get("properties") or {}
         if VOUCHER_ARG in props:
-            # A native client writes a subscribe voucher there (docs/subscribe-vouchers.md §4.4).
+            # A native client writes a subscribe voucher there.
             raise usage(
                 "config",
                 f"event {name}: {VOUCHER_ARG} is Wakeshift's: a native client passes a subscribe voucher in it. "
@@ -726,11 +740,38 @@ class WakeEvent(Generic[A, P]):
             )
             return False
 
-    def _definition(self, voucher_app: str | None = None) -> dict[str, Any]:
+    async def _still_allows(self, subscriber: Subscriber, args: Any, opening: bool = False) -> bool | None:
+        """authorize asked again for an open push stream: True or False, or
+        None when it raised or took too long (the stream goes on; the next
+        ask, or the next reconnect, decides). opening: asked as a stream
+        opens, where None is answered with a retryable error."""
+        if self._authorize is None:
+            return True
+        try:
+            r = self._authorize(subscriber, args)
+            if inspect.isawaitable(r):
+                r = await asyncio.wait_for(r, LIMITS["authorize"])
+            return bool(r)
+        except Exception as err:
+            what = (
+                "as a push stream opened, so the client was answered with a retryable error"
+                if opening
+                else "on an open push stream, so the stream goes on until it answers"
+            )
+            self._wake._log(
+                "authorize_failed",
+                f"authorize for {self.name} raised {type(err).__name__} {what}",
+                event=self.name,
+                error_type=type(err).__name__,
+            )
+            return None
+
+    def _definition(self, voucher_app: str | None = None, push: bool = False) -> dict[str, Any]:
         """The events/list entry. With voucher_app (a tools-only event listed
         to a native request while the core hands out subscribe vouchers), its
         arguments gain the required wakeshift_voucher, described with the
-        app's name."""
+        app's name. push: push is served for this request, so its delivery
+        lists it, last."""
         schema: dict[str, Any] = self.manifest["arguments"]
         if voucher_app is not None:
             props = dict(schema.get("properties") or {})
@@ -740,8 +781,9 @@ class WakeEvent(Generic[A, P]):
             "name": self.name,
             "description": self.description,
             # A tools-only event is subscribed to only with a voucher, and only
-            # with a webhook: events/poll of one is refused, voucher or not.
-            "delivery": ["webhook"] if voucher_app is not None else list(DELIVERY),
+            # with a webhook or a push stream: events/poll of one is refused,
+            # voucher or not.
+            "delivery": (["webhook"] if voucher_app is not None else list(DELIVERY)) + ([PUSH] if push else []),
             "inputSchema": schema,
             "payloadSchema": self.manifest["payload"],
         }
@@ -973,7 +1015,7 @@ def _rfc3339(s: str) -> str:
 
 def _poll_result(out: Mapping[str, Any]) -> dict[str, Any]:
     """An events/poll result: what Wakeshift answered, in the draft's names
-    (tests/golden/mcp-events-wire.json)."""
+    (the shared golden file mcp-events-wire.json)."""
     return {
         "resultType": RESULT_TYPE,
         "events": list(out.get("events") or []),
@@ -984,7 +1026,22 @@ def _poll_result(out: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _rpc_error_of(err: BaseException, codes: Codes, event: str = "") -> Exception:
+#: The InvalidParams messages for a request without params.name, and an
+#: events/subscribe without delivery.mode (mcp-events-wire.json next.refused).
+NAME_REQUIRED = "params.name is required: the name of the event"
+MODE_REQUIRED = 'delivery.mode is required: "webhook", the only delivery offered'
+
+
+def _require_name(name: object) -> None:
+    """params.name must be a non-empty string: InvalidParams otherwise, in
+    every dialect (SEP-3415's statically invalid request)."""
+    if not isinstance(name, str) or not name:
+        from mcp.shared.exceptions import MCPError
+
+        raise MCPError(INVALID_PARAMS, NAME_REQUIRED)
+
+
+def _rpc_error_of(err: BaseException, codes: Codes, event: str = "", mode: str = "") -> Exception:
     """The JSON-RPC error for a failed native call, in the client's dialect's
     codes. A conversation that isn't the caller's is Forbidden, whether it
     exists or not."""
@@ -996,14 +1053,16 @@ def _rpc_error_of(err: BaseException, codes: Codes, event: str = "") -> Exceptio
         return MCPError(INTERNAL_ERROR, "Wakeshift couldn't be reached")
     c = err.code
     if c == "bad_voucher":
-        # One answer, whatever the reason (docs/subscribe-vouchers.md §6.2).
+        # One answer, whatever the reason.
         return MCPError(codes.forbidden, fill("native_bad_voucher", event=event or "this event"))
+    hint = {"hint": err._hint} if err._hint else {}  # the core's, as it is (an unreachable callback)
     if c == "callback_failed":
-        return MCPError(codes.callback_endpoint, err.detail, {"reason": err.reason or ""})
-    if c == "unknown_event":
+        return MCPError(codes.callback_endpoint, err.detail, {"reason": err.reason or "", **hint})
+    if c in ("unknown_event", "not_found"):
         return MCPError(codes.not_found, err.detail, {"kind": "event"})
     if c == "unsupported":
-        return MCPError(codes.unsupported, err.detail, {"feature": "deliveryMode"})
+        # The mode the request asked for ("poll", or the delivery's), when known.
+        return MCPError(codes.unsupported, err.detail, {"feature": "deliveryMode", **({"value": mode} if mode else {})})
     if c == "subscription_limit":
         return MCPError(codes.resource_exhausted, err.detail, {"limit": "subscriptions"})
     if c == "subscription_stopped":
@@ -1011,7 +1070,7 @@ def _rpc_error_of(err: BaseException, codes: Codes, event: str = "") -> Exceptio
     if c == "tools_only":
         return MCPError(codes.forbidden, fill("native_tools_only", event=event or "this event"))
     if c in ("bad_request", "bad_arguments"):
-        return MCPError(INVALID_PARAMS, err.detail)
+        return MCPError(INVALID_PARAMS, err.detail, hint or None)
     if c in ("unknown_session", "other_client", "unknown_conversation"):
         return MCPError(codes.forbidden, "another client of yours holds that subscription")
     return MCPError(INTERNAL_ERROR, "Wakeshift refused the subscription: " + err.detail)
@@ -1054,6 +1113,7 @@ def attach_events(
     builtin_tools: BuiltinTools | Literal[False] | None = None,
     wrap: Mapping[str, Sequence[WakeEvent]] | Callable[[str], Sequence[WakeEvent] | None] | None = None,
     host: Any = None,
+    push: PushOptions | Literal[False] | None = None,
 ) -> Attachment:
     """Wakeshift.attach on an MCPServer (mcp.server.mcpserver.MCPServer), a
     low-level Server or a FastMCP server: Wakeshift's middleware on every
@@ -1063,6 +1123,7 @@ def attach_events(
     from mcp_types import RequestParams
 
     from ._hosts import host_of
+    from ._push import PushRun, check_failed, push_config, relay_push, streams_for
     from ._toolcall import Attachment
     from ._watch import fire
 
@@ -1083,6 +1144,9 @@ def attach_events(
     attached._wait = wait
     attached._any_open = any(e.access != "tools" for e in events)
     attached._set_wrap(wrap)
+    # Push (events/stream): served where the core reports it, the request's
+    # response streams, and the app hasn't turned it off (the listing rule).
+    attached._push = push_config(wake, push)
 
     async def caller_of(ctx: Any) -> tuple[str | None, str | None, str | None]:
         # Who's calling: the user, the client's name identify gave, and why
@@ -1109,41 +1173,241 @@ def attach_events(
         _, identified, _ = await caller_of(rc)
         return attached._native_of(rc, rc, client or identified or "")[0]
 
+    async def push_served(ctx: Any) -> bool:
+        # Whether push is served for this request, asking the core first.
+        return attached._push.on and attached._advertises and streams_for(ctx) and await wake._push_offered()
+
     async def events_list(ctx: Any, _params: Any) -> dict[str, Any]:
         # The events a native client may subscribe to, and, to a native
         # request while the core hands out subscribe vouchers, the tools-only
-        # ones with a required wakeshift_voucher (docs/subscribe-vouchers.md §4.3).
+        # ones with a required wakeshift_voucher.
+        # Asked first: whether push is served decides the delivery modes, and
+        # a client that push wakes is decided by what it declares.
+        transport_check(ctx, "events/list")
+        pushed = await push_served(ctx)
         app: str | None = None
         if any(e.access == "tools" for e in events) and await native_request(ctx) and await wake._vouchers_offered():
             app = await wake._app_name()
         if app is None:
-            return {"resultType": RESULT_TYPE, "events": [e._definition() for e in events if e.access != "tools"]}
-        return {"resultType": RESULT_TYPE, "events": [e._definition(app if e.access == "tools" else None) for e in events]}
+            return {"resultType": RESULT_TYPE, "events": [e._definition(None, pushed) for e in events if e.access != "tools"]}
+        return {
+            "resultType": RESULT_TYPE,
+            "events": [e._definition(app if e.access == "tools" else None, pushed) for e in events],
+        }
+
+    def _duplicated(fields: Callable[[str], Sequence[str]]) -> str | None:
+        # More than one Mcp-Method or MCP-Protocol-Version field is refused: a
+        # gateway may read another than the one checked here.
+        for k, shown in (("mcp-method", "Mcp-Method"), ("mcp-protocol-version", "MCP-Protocol-Version")):
+            if len(fields(k)) > 1:
+                return f"Header mismatch: more than one {shown} header"
+        return None
+
+    def transport_check(ctx: Any, method: str) -> None:
+        # The transport's standard headers (transport_header_refusal), first
+        # thing on every events/* request over HTTP; a request with no HTTP
+        # headers (stdio, in-memory) carries none. -32020, HTTP 400 (also on
+        # initialize sessions: _hosts.header_mismatch_as_400).
+        rc = getattr(ctx, "request_context", ctx)
+        req = getattr(rc, "request", None)
+        if req is None or getattr(req, "headers", None) is None:
+            return
+        _, meta, headers = _request_info(ctx)
+        getlist: Any = getattr(headers, "getlist", None)
+        refused = _duplicated(lambda k: list(getlist(k)) if getlist is not None else []) or transport_header_refusal(
+            method, meta, headers
+        )
+        if refused:
+            raise MCPError(HEADER_MISMATCH, refused)
+
+    def http_refusal(method: str, params: dict[str, Any], fields: Callable[[str], Sequence[str]]) -> str | None:
+        # What transport_check, name_refusal and param_refusal refuse, from
+        # the HTTP request before the host sees it (_http400.py): the same
+        # checks, in order.
+        meta = params.get("_meta")
+        first = {k: v[0] for k in ("mcp-method", "mcp-protocol-version") if (v := fields(k))}
+        refused = _duplicated(fields) or transport_header_refusal(method, meta if isinstance(meta, Mapping) else None, first)
+        if refused or method == "events/list":
+            return refused
+        names = fields(NAME_HEADER)
+        if len(names) > 1:
+            return "Header mismatch: more than one Mcp-Name header"
+        name = params.get("name")
+        refused = name_header_refusal(names[0] if names else "", name)
+        ev = by_name.get(name) if isinstance(name, str) else None
+        if refused or ev is None or not ev._param_headers:
+            return refused
+        args, _ = _take_voucher(params.get("arguments"))
+        return param_header_refusal(ev._param_headers, args, lambda k: list(fields(k)) or None)
+
+    def name_refusal(ctx: Any, name: object) -> str | None:
+        # Why a request is refused for its Mcp-Name header (name_header_refusal),
+        # or None. The MCP SDK sends -32020 with HTTP 400 on protocol
+        # 2026-07-28.
+        # More than one Mcp-Name field is refused: a gateway may read another
+        # than the one checked here.
+        _, _, headers = _request_info(ctx)
+        getlist: Any = getattr(headers, "getlist", None)
+        fields: list[str] = list(getlist(NAME_HEADER)) if getlist is not None else []
+        if len(fields) > 1:
+            return "Header mismatch: more than one Mcp-Name header"
+        header = headers.get(NAME_HEADER, "") if headers else ""
+        return name_header_refusal(header, name)
+
+    def param_refusal(ctx: Any, name: object, args: object) -> str | None:
+        # Why a request is refused for its Mcp-Param headers
+        # (param_header_refusal), or None: for a known event whose arguments
+        # carry x-mcp-header annotations, over HTTP only (a client on another
+        # transport sends none). -32020, HTTP 400 on protocol 2026-07-28.
+        ev = by_name.get(name) if isinstance(name, str) else None
+        if ev is None or not ev._param_headers:
+            return None
+        rc = getattr(ctx, "request_context", ctx)
+        req = getattr(rc, "request", None)
+        headers: Any = getattr(req, "headers", None) if req is not None else None
+        if headers is None:
+            return None
+        getlist: Any = getattr(headers, "getlist", None)
+
+        def values(key: str) -> list[str] | None:
+            if getlist is not None:
+                got = list(getlist(key))
+                return got or None
+            v = headers.get(key)
+            return None if v is None else [v]
+
+        return param_header_refusal(ev._param_headers, args, values)
 
     async def events_stream(ctx: Any, _params: Any) -> dict[str, Any]:
-        client, _, headers = _request_info(ctx)
-        codes = codes_for(dialect_of(client, headers.get("user-agent", "") if headers else ""))
-        raise MCPError(
-            codes.unsupported,
-            "push delivery isn't offered: use a webhook (events/subscribe) or poll (events/poll)",
-            {"feature": "deliveryMode", "value": "stream"},
-        )
-
-    async def native(ctx: Any, method: str) -> dict[str, Any]:
-        unsubscribe = method == "unsubscribe"
+        # Push: refused as events/poll refuses (after the Mcp-Name check), and
+        # with Unsupported, value "push", where push isn't served; otherwise
+        # relayed from Wakeshift's upstream (_push.py).
+        transport_check(ctx, "events/stream")
         p: dict[str, Any] = dict(ctx.params or {})
-        # The voucher leaves the arguments before anything reads them (parsing,
-        # authorize, on_subscribe, logs, the subscription key).
+        # The voucher leaves the arguments before anything reads them.
         p["arguments"], offered = _take_voucher(p.get("arguments"))
+        refused_name = name_refusal(ctx, p.get("name")) or param_refusal(ctx, p.get("name"), p.get("arguments"))
+        if refused_name:
+            raise MCPError(HEADER_MISMATCH, refused_name)
+        _require_name(p.get("name"))
         client, meta, headers = _request_info(ctx)
         who, identified, refused = await caller_of(ctx_of(ctx))
         client = client or identified or ""
         ua = headers.get("user-agent", "") if headers else ""
-        dialect = dialect_of(client, ua)
+        codes = codes_for(dialect_of(client, ua, meta))
+        # Not served: Unsupported for any event, known or not.
+        if not await push_served(ctx):
+            raise MCPError(codes.unsupported, STREAM_REFUSAL, {"feature": "deliveryMode", "value": "push"})
+        name = p.get("name")
+        ev = by_name.get(name) if isinstance(name, str) else None
+        if ev is None:
+            raise MCPError(codes.not_found, fill("native_unknown_event", event=_compact(name)), {"kind": "event"})
+        # A tools-only event streams only with the voucher one of the app's
+        # tools handed out, while the core hands them out; an open event
+        # ignores a voucher.
+        voucher = offered if ev.access == "tools" and offered is not None and await wake._vouchers_offered() else None
+        if ev.access == "tools" and voucher is None:
+            raise MCPError(codes.forbidden, fill("native_tools_only", event=ev.name))
+        cursor = p.get("cursor")
+        if cursor is not None and not isinstance(cursor, str):
+            raise MCPError(INVALID_PARAMS, "cursor is a string, or null")
+        for k in ("maxAgeMs", "heartbeatMs"):
+            v = p.get(k)
+            if v is not None and (not isinstance(v, int) or isinstance(v, bool) or v < 0):
+                raise MCPError(INVALID_PARAMS, f"{k} is a whole number of milliseconds, or null")
+        try:
+            a_obj, a_json = ev._parse_args(p.get("arguments") or {})
+        except UsageError as err:
+            raise MCPError(INVALID_PARAMS, what_of(err)) from None
+        # identify failing (an error, not a refusal) is retryable, never
+        # Forbidden: the client reconnects once the app's check answers (#1212).
+        if refused == "failed":
+            raise check_failed(wake, ev.name)
+        if refused:
+            if refused == "anonymous":
+                wake._log("user_required", f"require_user refused this stream of {ev.name}: identify gave no user")
+            raise MCPError(codes.forbidden, _refused_text(refused))
+        if not who and voucher is None:
+            raise MCPError(codes.forbidden, fill("native_no_user"))
+        # Each stream (each reconnect too) asks authorize again; its failing
+        # is retryable, as identify's is.
+        request = attached._request(ctx_of(ctx))
+        allowed = await ev._still_allows(Subscriber(user=who, client=client, native=True, request=request), a_obj, opening=True)
+        if allowed is None:
+            raise check_failed(wake, ev.name)
+        if not allowed:
+            raise MCPError(codes.forbidden, fill("native_refused", event=ev.name))
+        call: dict[str, Any] = {"client": client, "meta": meta}
+        if who:
+            call["user"] = who
+        if ua:
+            call["user_agent"] = ua
+        ts = _transport_session(headers) if voucher is not None else None
+        if ts:
+            call["transport_session"] = ts
+
+        def on_created(frame: Mapping[str, Any]) -> None:
+            # A redeemed voucher's subscription is the handing-out tool's.
+            via = frame.get("via")
+            tool = None
+            if isinstance(via, str) and via.startswith("tool:"):
+                t = frame.get("tool")
+                tool = t if isinstance(t, str) and t else via[len("tool:") :]
+            if tool:
+                context = wake._take_voucher_context(voucher) if voucher is not None else None
+                fire(wake, ev, a_obj, who, "tool", tool, context=context)
+            else:
+                fire(wake, ev, a_obj, who, "native")
+
+        async def reauthorize() -> bool | None:
+            # The open stream's caller, asked again: identify, fresh (a user
+            # at open who now gets no user, another user, or require_user's
+            # refusal is refused; identify failing can't tell), then
+            # authorize. A voucher's stream with no user skips identify.
+            if who:
+                again, refused_again = await attached._ask(ctx_of(ctx))
+                if refused_again == "failed":
+                    return None
+                if refused_again or again.user != who:
+                    return False
+            return await ev._still_allows(Subscriber(user=who, client=client, native=True, request=request), a_obj)
+
+        return await relay_push(
+            PushRun(
+                wake=wake,
+                ctx=ctx,
+                event=ev.name,
+                args=a_json,
+                call=call,
+                voucher=voucher,
+                cursor=cursor,
+                max_age_ms=p.get("maxAgeMs"),
+                heartbeat_ms=p.get("heartbeatMs"),
+                codes=codes,
+                config=attached._push,
+                on_created=on_created,
+                reauthorize=reauthorize,
+                refused_message=fill("native_refused", event=ev.name),
+            )
+        )
+
+    async def native(ctx: Any, method: str) -> dict[str, Any]:
+        unsubscribe = method == "unsubscribe"
+        transport_check(ctx, f"events/{method}")
+        p: dict[str, Any] = dict(ctx.params or {})
+        # The voucher leaves the arguments before anything reads them (parsing,
+        # authorize, on_subscribe, logs, the subscription key).
+        p["arguments"], offered = _take_voucher(p.get("arguments"))
+        name_refused = name_refusal(ctx, p.get("name")) or param_refusal(ctx, p.get("name"), p.get("arguments"))
+        if name_refused:
+            raise MCPError(HEADER_MISMATCH, name_refused)
+        _require_name(p.get("name"))
+        client, meta, headers = _request_info(ctx)
+        who, identified, refused = await caller_of(ctx_of(ctx))
+        client = client or identified or ""
+        ua = headers.get("user-agent", "") if headers else ""
+        dialect = dialect_of(client, ua, meta)
         codes = codes_for(dialect)
-        name_header = headers.get(NAME_HEADER, "") if headers else ""
-        if name_header and header_value(name_header) != p.get("name"):
-            raise MCPError(HEADER_MISMATCH, "Header mismatch: Mcp-Name doesn't match params.name")
         name = p.get("name")
         ev = by_name.get(name) if isinstance(name, str) else None
         if ev is None:
@@ -1156,13 +1420,23 @@ def attach_events(
         if ev.access == "tools" and method != "poll" and offered is not None and await wake._vouchers_offered():
             voucher = offered
         if not unsubscribe and ev.access == "tools" and voucher is None:
-            # A poll is never offered for one, voucher or not: the text names the webhook.
-            raise MCPError(
-                codes.forbidden, fill("native_tools_only_poll" if method == "poll" else "native_tools_only", event=ev.name)
-            )
+            if method == "poll":
+                # A poll is never offered for one, voucher or not: a mode its
+                # events/list entry doesn't offer (Unsupported); the text
+                # names the webhook.
+                raise MCPError(
+                    codes.unsupported,
+                    fill("native_tools_only_poll", event=ev.name),
+                    {"feature": "deliveryMode", "value": "poll"},
+                )
+            raise MCPError(codes.forbidden, fill("native_tools_only", event=ev.name))
         raw_delivery = p.get("delivery")
         delivery: Mapping[str, Any] = raw_delivery if isinstance(raw_delivery, Mapping) else {}
-        if method == "subscribe" and delivery.get("mode") != "webhook":
+        mode = delivery.get("mode")
+        if method == "subscribe" and (not isinstance(mode, str) or not mode):
+            # No delivery, or no delivery.mode: statically invalid.
+            raise MCPError(INVALID_PARAMS, MODE_REQUIRED)
+        if method == "subscribe" and mode != "webhook":
             raise MCPError(
                 codes.unsupported,
                 'delivery.mode must be "webhook": the only delivery offered',
@@ -1201,7 +1475,7 @@ def attach_events(
             try:
                 polled = await wake._request_app("POST", "/events/poll", poll)
             except Exception as err:
-                raise _rpc_error_of(err, codes, ev.name) from err
+                raise _rpc_error_of(err, codes, ev.name, "poll") from err
             if polled.get("created"):
                 fire(wake, ev, a_obj, who, "native")  # this poll started the subscription
             return _poll_result(polled)
@@ -1240,7 +1514,7 @@ def attach_events(
                 res["deliveryStatus"] = out["delivery_status"]
             return res
         except Exception as err:
-            raise _rpc_error_of(err, codes, ev.name) from err
+            raise _rpc_error_of(err, codes, ev.name, mode if isinstance(mode, str) else "") from err
 
     async def events_subscribe(ctx: Any, _params: Any) -> dict[str, Any]:
         return await native(ctx, "subscribe")
@@ -1270,10 +1544,13 @@ def attach_events(
         # Advertised whenever the server has an event: one open natively
         # (personal, authorize or public), or a tools-only one, which a native
         # client subscribes to with the subscribe voucher a tool handed it,
-        # while the core hands them out (docs/subscribe-vouchers.md §4.3). With
+        # while the core hands them out. With
         # an old core, events/list lists only open events.
         attached._advertises = True
         low.extensions[EXTENSION_KEY] = {"listChanged": False}
+        # A refusal the handlers above would answer in-band goes out with
+        # HTTP 400 on every HTTP path, initialize sessions too (_http400.py).
+        header_mismatch_as_400(low, http_refusal)
 
     # ── Bridged: subscribe_events, unsubscribe_events, list_subscriptions ─
 

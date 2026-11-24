@@ -1,0 +1,102 @@
+{
+  "_about": "Client requests: the core's /calls/addition answer can carry one request (requests[0]) for the SDK to make of the MCP client during a Wakeshift subscribing call. Every SDK runs it only within these bounds, whatever the core sends, and the vectors pin what each SDK decides. validate: the request as the core sent it and the app's name; want is \"\" (run it) or the first bound it breaks, checked in this order: kind, message, lines, secret, schema, fields, field, options, title, outcomes, outcome_text, placement, beacon. outcome: the client's elicitation result for a valid request, and the outcome key the SDK reports and whose text it uses. offer: whether the SDK offers \"elicit.form\" in call.client_requests (true) or not, from what the SDK can see of the call. The protocols are an allowlist: 2025-06-18, 2025-11-25, or none on the request (stdio, from initialize); any other (2026-07-28, or one this SDK doesn't know) gets none.",
+  "bounds": {
+    "message_max": 1200,
+    "message_lines_max": 20,
+    "title_max": 80,
+    "fields_max": 2,
+    "options_max": 4,
+    "outcome_text_max": 4000,
+    "timeout_ms": 120000,
+    "report_wait_ms": 2000,
+    "session_window_ms": 600000
+  },
+  "prefix": "Wakeshift, for {app}:",
+  "_prefix_comment": "The SDK writes the message's first line itself, then a newline, then the core's message. {app} is the app's name (wake's app name; else its ID; else \"an app\"), trimmed to 80 characters. The message bounds apply to the whole message the client is sent, prefix included.",
+  "outcome_keys": ["decline", "cancel", "timeout", "unsupported"],
+  "_outcome_keys_comment": "Besides <field>=<value> for an accepted answer. Every request must give a text for each of these and for every value of every field; a missing one makes it invalid (outcomes). Anything the SDK can't map (an error, an answer that isn't one of the values) is unsupported.",
+  "validate": [
+    {
+      "name": "the core's Codex form",
+      "app": "Shipyard",
+      "request": {
+        "token": "wse_00000000-0000-4000-8000-000000000000_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "kind": "elicit.form",
+        "message": "Shipyard sends its notifications through Wakeshift.\n1. In a terminal, run:\n   codex plugin marketplace add wakeshift/agent-plugins\n   codex plugin add wakeshift@wakeshift\n2. Restart Codex.",
+        "schema": {"type": "object", "required": ["choice"], "properties": {"choice": {"type": "string", "title": "Notifications in this conversation", "oneOf": [{"const": "later", "title": "Not now"}, {"const": "setup", "title": "I'll set it up"}]}}},
+        "outcomes": {
+          "choice=setup": {"text": "Set up.", "placement": "before", "beacon": "keep"},
+          "choice=later": {"text": "Not now.", "placement": "after", "beacon": "keep"},
+          "decline": {"text": "Today's text.", "placement": "after", "beacon": "keep"},
+          "cancel": {"text": "Today's text.", "placement": "after", "beacon": "keep"},
+          "timeout": {"text": "Today's text.", "placement": "after", "beacon": "keep"},
+          "unsupported": {"text": "Today's text.", "placement": "after", "beacon": "keep"}
+        }
+      },
+      "want": ""
+    },
+    {"name": "URL mode", "app": "Shipyard", "base": 0, "patch": {"kind": "elicit.url"}, "want": "kind"},
+    {"name": "a message too long with the prefix", "app": "Shipyard", "base": 0, "patch": {"message": "{1176 x}"}, "want": "message"},
+    {"name": "a message at the limit with the prefix", "app": "Shipyard", "base": 0, "patch": {"message": "{1175 x}"}, "want": ""},
+    {"name": "too many lines with the prefix", "app": "Shipyard", "base": 0, "patch": {"message": "{20 lines}"}, "want": "lines"},
+    {"name": "lines at the limit with the prefix", "app": "Shipyard", "base": 0, "patch": {"message": "{19 lines}"}, "want": ""},
+    {"name": "a secret in the message", "app": "Shipyard", "base": 0, "patch": {"message": "Paste wsc_abcdefghijklmnop into the form."}, "want": "secret"},
+    {"name": "not an object schema", "app": "Shipyard", "base": 0, "patch": {"schema": {"type": "array"}}, "want": "schema"},
+    {"name": "three fields", "app": "Shipyard", "base": 0, "patch": {"schema": {"type": "object", "required": [], "properties": {"a": {"type": "boolean", "title": "A"}, "b": {"type": "boolean", "title": "B"}, "c": {"type": "boolean", "title": "C"}}}}, "want": "fields"},
+    {"name": "a free-text field", "app": "Shipyard", "base": 0, "patch": {"schema": {"type": "object", "required": ["note"], "properties": {"note": {"type": "string", "title": "Your API key"}}}}, "want": "field"},
+    {"name": "a number field", "app": "Shipyard", "base": 0, "patch": {"schema": {"type": "object", "required": ["n"], "properties": {"n": {"type": "number", "title": "N"}}}}, "want": "field"},
+    {"name": "five options", "app": "Shipyard", "base": 0, "patch": {"schema": {"type": "object", "required": ["choice"], "properties": {"choice": {"type": "string", "title": "T", "oneOf": [{"const": "a", "title": "A"}, {"const": "b", "title": "B"}, {"const": "c", "title": "C"}, {"const": "d", "title": "D"}, {"const": "e", "title": "E"}]}}}}, "want": "options"},
+    {"name": "a field title too long", "app": "Shipyard", "base": 0, "patch": {"schema": {"type": "object", "required": ["choice"], "properties": {"choice": {"type": "string", "title": "{81 x}", "oneOf": [{"const": "later", "title": "Not now"}, {"const": "setup", "title": "I'll set it up"}]}}}}, "want": "title"},
+    {"name": "an option title too long", "app": "Shipyard", "base": 0, "patch": {"schema": {"type": "object", "required": ["choice"], "properties": {"choice": {"type": "string", "title": "T", "oneOf": [{"const": "later", "title": "{81 x}"}, {"const": "setup", "title": "I'll set it up"}]}}}}, "want": "title"},
+    {"name": "an outcome missing", "app": "Shipyard", "base": 0, "drop_outcome": "timeout", "want": "outcomes"},
+    {"name": "an answer's outcome missing", "app": "Shipyard", "base": 0, "drop_outcome": "choice=later", "want": "outcomes"},
+    {"name": "an outcome text too long", "app": "Shipyard", "base": 0, "patch_outcome": {"key": "decline", "text": "{4001 x}"}, "want": "outcome_text"},
+    {"name": "an outcome text at the limit (today's Codex text offer runs about 2,400)", "app": "Shipyard", "base": 0, "patch_outcome": {"key": "decline", "text": "{4000 x}"}, "want": ""},
+    {"name": "a placement that isn't one", "app": "Shipyard", "base": 0, "patch_outcome": {"key": "decline", "placement": "instead"}, "want": "placement"},
+    {"name": "a beacon use that isn't one", "app": "Shipyard", "base": 0, "patch_outcome": {"key": "decline", "beacon": "move"}, "want": "beacon"},
+    {
+      "name": "a boolean field",
+      "app": "Shipyard",
+      "request": {
+        "token": "wse_00000000-0000-4000-8000-000000000000_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "kind": "elicit.form",
+        "message": "Notifications?",
+        "schema": {"type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean", "title": "Notify me"}}},
+        "outcomes": {
+          "ok=true": {"text": "Yes.", "placement": "after", "beacon": "keep"},
+          "ok=false": {"text": "No.", "placement": "after", "beacon": "drop"},
+          "decline": {"text": "T.", "placement": "after", "beacon": "keep"},
+          "cancel": {"text": "T.", "placement": "after", "beacon": "keep"},
+          "timeout": {"text": "T.", "placement": "after", "beacon": "keep"},
+          "unsupported": {"text": "T.", "placement": "after", "beacon": "keep"}
+        }
+      },
+      "want": ""
+    }
+  ],
+  "_validate_comment": "base: the request of the vector at that index; patch: its top-level fields replaced; drop_outcome: that outcome removed; patch_outcome: that outcome's fields replaced. In strings, {N x} is the letter x N times, and {N lines} is N lines of \"x\" joined by newlines.",
+  "outcome": [
+    {"name": "accept, set up", "base": 0, "result": {"action": "accept", "content": {"choice": "setup"}}, "want": "choice=setup"},
+    {"name": "accept, not now", "base": 0, "result": {"action": "accept", "content": {"choice": "later"}}, "want": "choice=later"},
+    {"name": "accept with a value that isn't one", "base": 0, "result": {"action": "accept", "content": {"choice": "maybe"}}, "want": "unsupported"},
+    {"name": "accept with no content", "base": 0, "result": {"action": "accept"}, "want": "unsupported"},
+    {"name": "decline (codex exec, or a person)", "base": 0, "result": {"action": "decline"}, "want": "decline"},
+    {"name": "cancel (claude -p, Esc)", "base": 0, "result": {"action": "cancel"}, "want": "cancel"},
+    {"name": "an action that isn't one", "base": 0, "result": {"action": "later"}, "want": "unsupported"},
+    {"name": "a boolean, true", "base": 20, "result": {"action": "accept", "content": {"ok": true}}, "want": "ok=true"},
+    {"name": "a boolean, false", "base": 20, "result": {"action": "accept", "content": {"ok": false}}, "want": "ok=false"}
+  ],
+  "offer": [
+    {"name": "stdio, the client takes forms", "capabilities": {"elicitation": {"form": {}, "url": {}}}, "protocol": "2025-06-18", "http": false, "session": "", "want": true},
+    {"name": "stdio, elicitation declared empty (2025-06-18: forms)", "capabilities": {"elicitation": {}}, "protocol": "2025-06-18", "http": false, "session": "", "want": true},
+    {"name": "stateful HTTP", "capabilities": {"elicitation": {"form": {}}}, "protocol": "2025-11-25", "http": true, "session": "s1", "want": true},
+    {"name": "stateless HTTP", "capabilities": {"elicitation": {"form": {}}}, "protocol": "2025-06-18", "http": true, "session": "", "want": false},
+    {"name": "URL mode only", "capabilities": {"elicitation": {"url": {}}}, "protocol": "2025-06-18", "http": false, "session": "", "want": false},
+    {"name": "no elicitation", "capabilities": {}, "protocol": "2025-06-18", "http": false, "session": "", "want": false},
+    {"name": "protocol 2026-07-28", "capabilities": {"elicitation": {"form": {}}}, "protocol": "2026-07-28", "http": false, "session": "", "want": false},
+    {"name": "a protocol this SDK doesn't know", "capabilities": {"elicitation": {"form": {}}}, "protocol": "2027-01-01", "http": false, "session": "", "want": false},
+    {"name": "no protocol on the request (stdio)", "capabilities": {"elicitation": {"form": {}}}, "protocol": "", "http": false, "session": "", "want": true},
+    {"name": "turned off (attach's clientRequests: false)", "capabilities": {"elicitation": {"form": {}}}, "protocol": "2025-06-18", "http": false, "session": "", "off": true, "want": false},
+    {"name": "a form already in this session within the window", "capabilities": {"elicitation": {"form": {}}}, "protocol": "2025-06-18", "http": false, "session": "", "recent": true, "want": false}
+  ]
+}

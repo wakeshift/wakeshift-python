@@ -24,6 +24,32 @@ class Crawl(BaseModel):
     status: str
 
 
+@pytest.mark.parametrize(("kw", "want"), [({}, True), ({"wakes": True}, True), ({"wakes": False}, False)])
+async def test_the_test_client_wakes_option_sets_call_wakes_on_served_calls(kw: dict[str, Any], want: bool) -> None:
+    """TestClient(wakes=False): a served tool call's call.wakes is False, to test the fallback through a real server."""
+    wake = TestClient(**kw)
+    ev = wake.define_event("crawl.finished", description="A crawl finished", args=Job, payload=Crawl)
+    server = MCPServer("crawler")
+    attached = wake.attach(server)
+    seen: list[bool] = []
+
+    @attached.tool(subscribes=[ev])
+    async def start_crawl(job: str, call: ToolCall) -> str:
+        """Crawl a site."""
+        await call.subscribe(ev, {"job": job})
+        seen.append(call.wakes)
+        return "started"
+
+    async with served(server) as (_, rpc):
+        await rpc(
+            "tools/call",
+            {"name": "start_crawl", "arguments": {"job": "j1", "session_key": "wsc_a"}},
+            headers={"User-Agent": "claude-code/2"},
+        )
+    assert seen == [want]
+    assert len(wake.subscriptions) == 1
+
+
 async def test_the_test_client_is_enabled_offline_and_records() -> None:
     wake = TestClient(app="Crawler")
     assert wake.enabled and "Crawler" in repr(wake)

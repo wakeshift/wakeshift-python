@@ -405,7 +405,7 @@
       }
     },
     {
-      "name": "an unsupported delivery mode",
+      "name": "an unsupported delivery mode: data names the mode the request asked for (mode: poll for events/poll, the request's delivery.mode for events/subscribe)",
       "error": {
         "code": "unsupported",
         "message": "No such delivery mode."
@@ -417,9 +417,11 @@
         },
         "message": "No such delivery mode.",
         "data": {
-          "feature": "deliveryMode"
+          "feature": "deliveryMode",
+          "value": "poll"
         }
-      }
+      },
+      "mode": "poll"
     },
     {
       "name": "the subscription limit",
@@ -1031,9 +1033,9 @@
       "note": "thrown by call.subscribe when requireUser is on and identify gave no user (identify_failed before this release; the log line was already user_required); built-ins answer isError and native methods forbidden instead"
     }
   ],
-  "_codes_comment": "Next release (design §2.10, PR 2). codes is the one list of codes shared by the three SDKs and the HTTP API, in this order: the API's, then the SDK's own (unreachable onward). Per code: the class an SDK raises before sending (null: never) and for the core's answer (null: never); the HTTP status the core usually answers with (informative, not checked); the fix, one clause; the docs anchor. Class names are the same in the three SDKs: WakeshiftError is the base (TS, Python; Go has none); APIError; APIConnectionError, an APIError with no status; IdReusedError, an APIError; UsageError (Python: also a ValueError). Go has *APIError (Status 0 for APIConnectionError's codes, IsCode for id_reused) and *UsageError. TypeScript's isWakeshiftError(err, code) narrows to the classes listed for that code; its code parameter accepts exactly these codes. TypeScript KnownCode, Python ErrorCode and Go's Code constants (CodeBadRequest, …, CodeIDReused, …) list exactly these codes. Loaders: check the SDK's list equals this one, and that every class an SDK raises for a code is listed here. A code's fix_python, where given, is the fix as the Python SDK says it, with Python's names (define_event, resolve_session, raise); the others say fix.",
+  "_codes_comment": "Next release. codes is the one list of codes shared by the three SDKs and the HTTP API, in this order: the API's, then the SDK's own (unreachable onward). Per code: the class an SDK raises before sending (null: never) and for the core's answer (null: never); the HTTP status the core usually answers with (informative, not checked); the fix, one clause; the docs anchor. Class names are the same in the three SDKs: WakeshiftError is the base (TS, Python; Go has none); APIError; APIConnectionError, an APIError with no status; IdReusedError, an APIError; UsageError (Python: also a ValueError). Go has *APIError (Status 0 for APIConnectionError's codes, IsCode for id_reused) and *UsageError. TypeScript's isWakeshiftError(err, code) narrows to the classes listed for that code; its code parameter accepts exactly these codes. TypeScript KnownCode, Python ErrorCode and Go's Code constants (CodeBadRequest, …, CodeIDReused, …) list exactly these codes. Loaders: check the SDK's list equals this one, and that every class an SDK raises for a code is listed here. A code's fix_python, where given, is the fix as the Python SDK says it, with Python's names (define_event, resolve_session, raise); the others say fix.",
   "messages": {
-    "_comment": "Next release (design §2.10 'Messages say what failed, the fix in one clause, and a docs anchor'). Every message the SDK writes itself (every UsageError, unreachable and timeout) has the format below and contains the code's fix from codes verbatim. Messages from the core's answer keep responses[].want.text unchanged in this release. No message contains the key or any fragment or length of it, a session key, a caller's token or header, a signing secret, a publish URL token, a payload, tool arguments, or the vendor's own error message (for identify and authorize, only the error's type).",
+    "_comment": "Next release. Every message the SDK writes itself (every UsageError, unreachable and timeout) has the format below and contains the code's fix from codes verbatim. Messages from the core's answer keep responses[].want.text unchanged in this release. No message contains the key or any fragment or length of it, a session key, a caller's token or header, a signing secret, a publish URL token, a payload, tool arguments, or the vendor's own error message (for identify and authorize, only the error's type).",
     "format": "wakeshift: {what}. {fix} {anchor}",
     "checks": [
       "starts with \"wakeshift: \"",

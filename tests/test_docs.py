@@ -3,7 +3,9 @@ python blocks run in order, in one namespace, against a fake core (its FastMCP b
 a namespace of its own), and so do site/docs/low-level.md's low-level Server block and
 AGENTS.md's (site/llms/agents.md); the quickstart's Python tab is the typing gate's
 quickstart; every other python block in site/docs at least compiles. The README's are
-tested in test_readme.py. The published copy of the SDK has no site, so this skips there."""
+tested in test_readme.py. The published copy of the SDK has no site, so this skips there,
+and the server's public tree has site/docs but neither AGENTS.md nor the landing page, so
+their tests skip there."""
 
 from __future__ import annotations
 
@@ -45,6 +47,7 @@ def blocks(page: Path, name: str | None = None) -> list[str]:
 
 #: /AGENTS.md, the instructions for coding agents the site serves.
 AGENTS = DOCS.parent / "llms" / "agents.md"
+needs_agents = pytest.mark.skipif(not AGENTS.is_file(), reason="no site/llms/agents.md here")
 
 
 def subscribed(b: Any) -> tuple[int, Any]:
@@ -77,7 +80,7 @@ def signed_in(subject: str) -> Any:
 
 
 def test_every_python_block_compiles() -> None:
-    pages = [*sorted(DOCS.glob("*.md")), AGENTS]
+    pages = [*sorted(DOCS.glob("*.md")), *([AGENTS] if AGENTS.is_file() else [])]
     found = 0
     for page in pages:
         for b in blocks(page):
@@ -109,11 +112,11 @@ def checks_arguments(b: Any) -> tuple[int, Any]:
 
 
 async def test_the_quickstarts_python_tab_runs_with_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The quickstart's Python tab and step 3's stand-in crawl run as one module, with the
+    """The quickstart's Python tab and step 4's stand-in crawl run as one module, with the
     key set, against a fake core that checks arguments as the core does: start_crawl
     subscribes once, with arguments the core accepts."""
     tabs = re.findall(r"^```python tab:Python\n(.*?)^```", (DOCS / "quickstart.md").read_text(), re.S | re.M)
-    assert len(tabs) == 2, "the quickstart has two Python blocks: the code, and step 3"
+    assert len(tabs) == 2, "the quickstart has two Python blocks: the code, and step 4"
     monkeypatch.setenv("WAKESHIFT_KEY", app_key("crawler"))
     monkeypatch.setenv("WAKESHIFT_CORE", "https://core.test")
     ns: dict[str, Any] = {"__name__": "quickstart"}
@@ -134,6 +137,7 @@ async def test_the_quickstarts_python_tab_runs_with_a_key(monkeypatch: pytest.Mo
     assert all(ARG_VALUE.fullmatch(str(v)) for v in subs[0]["arguments"].values()), subs[0]["arguments"]
 
 
+@needs_agents
 async def test_the_agents_files_python_example_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     """AGENTS.md's server.py runs as shown, against a fake core: its start_crawl tool
     subscribes the calling conversation once, crawl.finished is open only to the
@@ -273,6 +277,7 @@ async def test_the_low_level_pages_python_example_runs(monkeypatch: pytest.Monke
 
 
 LANDING = DOCS.parent / "templates" / "landing.html"
+needs_landing = pytest.mark.skipif(not LANDING.is_file(), reason="no site/templates/landing.html here")
 
 
 def landing_sample() -> str:
@@ -284,6 +289,7 @@ def landing_sample() -> str:
     return "\n".join(html.unescape(re.sub(r"<[^>]+>", "", line)) for line in lines) + "\n"
 
 
+@needs_landing
 def test_the_landing_pages_python_sample_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     """The landing page's server.py runs as shown, against a fake core: it attaches
     the subscribe tools and emits crawl.finished. (site/landing_examples_test.go checks
@@ -311,6 +317,7 @@ def test_the_landing_pages_python_sample_runs(monkeypatch: pytest.MonkeyPatch) -
     assert emitted[0]["payload"] == {"pages": 1834}, emitted
 
 
+@needs_landing
 def test_the_landing_pages_python_sample_type_checks(tmp_path: Path) -> None:
     """pyright, as CI runs it on the SDK, finds nothing in the landing page's sample."""
     f = tmp_path / "server.py"

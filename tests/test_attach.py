@@ -1,4 +1,4 @@
-"""attach at the protocol layer (design §2.3, §2.4, PR 5b): Wakeshift's
+"""attach at the protocol layer: Wakeshift's
 arguments taken out of every tool call before the host or vendor middleware
 sees them, wrap on MCPServer, FastMCP and the low-level Server, current_call
 from inside a tool's call chain or from its context, one attach per server."""

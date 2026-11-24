@@ -1,5 +1,5 @@
 {
-  "_about": "encodeArgValue / decodeArgValue (Python encode_arg_value / decode_arg_value, Go wakeshift.EncodeArgValue / DecodeArgValue), design \u00a72.13. Encoding works on the input's UTF-8 bytes: a-z, 0-9, - and _ pass through unchanged, so ordinary IDs (dep-abc123, snake_case) read as they are; the escape character is . (which a routing value allows and IDs rarely carry): A-Z becomes . and the lowercase letter; every other byte, . itself included, becomes .. and two lowercase hex digits. A result over 100 characters becomes ..h and the first 40 lowercase hex digits of SHA-256 over the input's UTF-8 bytes (43 characters), which no encoding of a byte can produce. No Unicode normalization. Every result is a-z 0-9 . _ - and at most 100 characters. Decoding is strict: it parses, requires valid UTF-8, re-encodes and compares, and refuses anything else, the hashed form included.",
+  "_about": "encodeArgValue / decodeArgValue (Python encode_arg_value / decode_arg_value, Go wakeshift.EncodeArgValue / DecodeArgValue). Encoding works on the input's UTF-8 bytes: a-z, 0-9, - and _ pass through unchanged, so ordinary IDs (dep-abc123, snake_case) read as they are; the escape character is . (which a routing value allows and IDs rarely carry): A-Z becomes . and the lowercase letter; every other byte, . itself included, becomes .. and two lowercase hex digits. A result over 100 characters becomes ..h and the first 40 lowercase hex digits of SHA-256 over the input's UTF-8 bytes (43 characters), which no encoding of a byte can produce. No Unicode normalization. Every result is a-z 0-9 . _ - and at most 100 characters. Decoding is strict: it parses, requires valid UTF-8, re-encodes and compares, and refuses anything else, the hashed form included.",
   "_errors": "A refusal is UsageError with code bad_arguments (Python: also a ValueError; Go: *wakeshift.UsageError, IsCode(err, CodeBadArguments)). The message never contains the input.",
   "_go": "Go's JSON decoder turns lone surrogates into U+FFFD, so Go reads refused_encode cases from go_input_hex (the raw bytes) instead of input. EncodeArgValue(string) string returns no error: bytes that aren't UTF-8 are encoded byte by byte like any other (go_want), which stays injective, and DecodeArgValue refuses the result because it isn't UTF-8. DecodeArgValue(string) (string, error).",
   "encode": [
@@ -44,9 +44,9 @@
       "want": ".j.o.b7"
     },
     {
-      "name": "a Magic Hour style ID",
-      "input": "mh_9QxZ2kLp",
-      "want": "mh_9.qx.z2k.lp"
+      "name": "a prefixed mixed-case ID",
+      "input": "rq_9QxZ2kLp",
+      "want": "rq_9.qx.z2k.lp"
     },
     {
       "name": "a lowercase UUID passes through",

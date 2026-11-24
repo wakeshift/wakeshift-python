@@ -1,4 +1,4 @@
-"""Identity and authorization (design §2.8, §2.9, PR 7): identify gets a
+"""Identity and authorization: identify gets a
 wakeshift.Request, may be async, runs lazily and at most once per request; a
 failing, hanging or (with require_user) anonymous identify refuses
 Wakeshift's part of the request and nothing else; each POST of a stateful

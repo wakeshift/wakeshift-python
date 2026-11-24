@@ -1,5 +1,5 @@
 """WAKESHIFT_TEST_SERVER=fastmcp runs the suite against FastMCP 4 instead of
-the official SDK's MCPServer (docs/fastmcp.md): each test module's MCPServer
+the official SDK's MCPServer: each test module's MCPServer
 and Context become a FastMCP subclass that answers the few MCPServer calls the
 tests make, and FastMCP's Context. tests/test_fastmcp.py covers what's
 FastMCP's own, whichever server the rest runs on."""

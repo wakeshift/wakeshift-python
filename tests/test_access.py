@@ -1,4 +1,4 @@
-"""Who may subscribe (design §3, PR 6): an event that declares neither
+"""Who may subscribe: an event that declares neither
 personal, authorize nor public is subscribed only by the app's own tools.
 mcp-events-wire.json's next section (refusals on the MCP Events wire,
 subscribe_events, and call.subscribe's state per access and caller),
@@ -293,18 +293,18 @@ async def _with_session_key(session_key: str, call: ToolCall) -> str:
 
 
 async def test_a_server_with_its_own_mcp_events_keeps_them() -> None:
-    """Appwrite's own events/* handlers survive attach (#70), and its native
+    """A server's own events/* handlers survive attach (#70), and its native
     callers get no line for Wakeshift's events."""
     a_core = FakeCore(default_ok=True)
     wake = Wakeshift(
-        app_key("aw"), core="https://core.test", http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(a_core.handler))
+        app_key("oe"), core="https://core.test", http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(a_core.handler))
     )
     turn = wake.define_event("game.turn", description="Your move", args=Table, payload=Text, personal=True)
-    server = OfficialMCPServer("appwrite")
+    server = OfficialMCPServer("own-events")
     from mcp_types import RequestParams
 
     async def own(ctx: Any, params: Any) -> dict[str, Any]:
-        return {"resultType": "complete", "events": [{"name": "appwrite.own"}]}
+        return {"resultType": "complete", "events": [{"name": "vendor.own"}]}
 
     server._lowlevel_server.add_request_handler("events/list", RequestParams, own)
     logged = Logged(logging.INFO)
@@ -321,7 +321,7 @@ async def test_a_server_with_its_own_mcp_events_keeps_them() -> None:
         assert "events" not in init["result"]["capabilities"]
         listed = await rpc("events/list", {})
         await rpc("tools/call", {"name": "watch", "arguments": {}}, headers={"User-Agent": "openai-mcp/1.0"})
-    assert listed["result"]["events"] == [{"name": "appwrite.own"}]
+    assert listed["result"]["events"] == [{"name": "vendor.own"}]
     # Info, not a warning: serving its own MCP Events is the server's choice.
     assert [(r.wakeshift_code, r.levelname) for r in logged.records if r.wakeshift_code == "events_capability_kept"] == [
         ("events_capability_kept", "INFO")

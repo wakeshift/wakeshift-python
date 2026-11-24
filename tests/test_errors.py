@@ -167,6 +167,6 @@ def test_the_json_rpc_error_each_becomes(case: dict[str, Any], dialect: Any) -> 
         err = APIConnectionError(e["message"])
     else:
         err = APIError(e["message"], code=e["code"], status=400, reason=e.get("reason"))
-    got = _rpc_error_of(err, codes_for(dialect))
+    got = _rpc_error_of(err, codes_for(dialect), "", case.get("mode", ""))
     want = case["want"]
     assert (got.code, got.message, got.data) == (want["code"][dialect], want["message"], want["data"])  # type: ignore[attr-defined]

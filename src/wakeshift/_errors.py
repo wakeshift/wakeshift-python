@@ -125,6 +125,7 @@ class APIError(WakeshiftError):
         status: int | None,
         reason: str | None = None,
         request_id: str | None = None,
+        _hint: dict[str, Any] | None = None,
     ) -> None:
         text = f"wakeshift: {code or 'error'} ({status}): {message}" if status is not None else message
         super().__init__(text, code=code)
@@ -132,6 +133,9 @@ class APIError(WakeshiftError):
         self.detail = message
         self.reason = reason
         self.request_id = request_id
+        # What the core says the client can do instead (an unreachable MCP
+        # Events callback's hint), passed into the JSON-RPC error's data as it is.
+        self._hint = _hint
 
 
 class APIConnectionError(APIError):

@@ -15,8 +15,8 @@
     }
   },
   "compact": {
-    "_comment": "Next release (design §2.12), what tools/list adds to a tool's inputSchema: subscribing (a tool whose subscribes isn't empty, and subscribe_events) gets all three; subscribes_nothing (a tool with subscribes: [], and unsubscribe_events) gets only session_key, as does list_subscriptions (it lists the calling conversation's subscriptions when there's no user); a tool that doesn't subscribe gets none. Only tools/list changes: the tools still accept all three. The SDK no longer exports these (WAKESHIFT_ARGUMENTS_JSON_SCHEMA, WAKE_ARGS_SCHEMA and WakeArgsJSONSchema are deleted); test them through tools/list. properties above stays today's until PR 10.",
-    "_status": "FINAL (compact tools/list bench, 2026-11-05: compact matched or beat the baseline in every cell). compact_strings in subscribing-tools-list.json is the one place these strings live; every literal that uses them (wake-args.json compact, subscribes.json compact_cases, event-tools.json, events-list.json tools, subscribing-tools-list.json scenarios, tool-output-schemas.json) is generated from it.",
+    "_comment": "Next release, what tools/list adds to a tool's inputSchema: subscribing (a tool whose subscribes isn't empty, and subscribe_events) gets all three; subscribes_nothing (a tool with subscribes: [], and unsubscribe_events) gets only session_key, as does list_subscriptions (it lists the calling conversation's subscriptions when there's no user); a tool that doesn't subscribe gets none. Only tools/list changes: the tools still accept all three. The SDK no longer exports these (WAKESHIFT_ARGUMENTS_JSON_SCHEMA, WAKE_ARGS_SCHEMA and WakeArgsJSONSchema are deleted); test them through tools/list. properties above stays today's until PR 10.",
+    "_status": "FINAL. compact_strings in subscribing-tools-list.json is the one place these strings live; every literal that uses them (wake-args.json compact, subscribes.json compact_cases, event-tools.json, events-list.json tools, subscribing-tools-list.json scenarios, tool-output-schemas.json) is generated from it.",
     "subscribing": {
       "properties": {
         "session_key": {

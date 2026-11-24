@@ -1,5 +1,5 @@
 {
-  "_about": "Which situations log, at which level and with which code (design §2.11, PR 3). No prose matching: tests check the code, the level and the fields; the message is free, except that it contains the code's fix verbatim and never anything design §2.11 'Never logged' lists (keys, session keys, tokens, headers, signing secrets, publish URL tokens, stream links, task IDs, payloads, tool arguments, request bodies, query strings, the vendor's error messages). A code's fix_python, where given, is the fix as the Python SDK says it, with Python's names (require_user, define_event, raise); the others say fix.",
+  "_about": "Which situations log, at which level and with which code. No prose matching: tests check the code, the level and the fields; the message is free, except that it contains the code's fix verbatim and never anything the SDKs never log (keys, session keys, tokens, headers, signing secrets, publish URL tokens, stream links, task IDs, payloads, tool arguments, request bodies, query strings, the vendor's error messages). A code's fix_python, where given, is the fix as the Python SDK says it, with Python's names (require_user, define_event, raise); the others say fix.",
   "levels": {
     "_comment": "Each SDK's level for each name.",
     "typescript": {
@@ -163,7 +163,74 @@
         ]
       },
       "fix": "To serve MCP Events clients, give the event personal, authorize or public, and sign callers in.",
-      "when": "call.subscribe resolved to state unavailable (reason client_unsupported, no_user or refused), or a call whose only Wakeshift work was native lines got no addition from Wakeshift, so its result went out without one (reason addition_failed; docs/subscribe-vouchers.md §7.2)"
+      "when": "call.subscribe resolved to state unavailable (reason client_unsupported, no_user or refused), or a call whose only Wakeshift work was native lines got no addition from Wakeshift, so its result went out without one (reason addition_failed)"
+    },
+    {
+      "code": "push_upstream_failed",
+      "level": "warn",
+      "fields": [
+        "reason"
+      ],
+      "policy": {
+        "kind": "rate_limited",
+        "window_seconds": 300,
+        "count_field": "count"
+      },
+      "fix": "Nothing to change if it's rare: the client reconnects with its cursor. Check that this server can reach Wakeshift.",
+      "when": "an events/stream (MCP Events push) couldn't reach Wakeshift, Wakeshift answered it with a 5xx, its upstream went silent for three heartbeat intervals, broke off or ended without closing, or ending a cancelled stream's subscription failed; reason says which (unreachable, status, silent, broken, ended, end_failed)"
+    },
+    {
+      "code": "push_max_stream",
+      "level": "debug",
+      "fields": [],
+      "policy": {
+        "kind": "once_per_client"
+      },
+      "fix": "Set attach's push.maxStreamMs to change it.",
+      "fix_python": "Set attach's push max_stream_ms to change it.",
+      "when": "attach runs on a host with a request duration cap (VERCEL, AWS_LAMBDA_FUNCTION_NAME, K_SERVICE) and its push option sets no maximum stream duration, so each events/stream ends before the cap"
+    },
+    {
+      "code": "push_recheck_failed",
+      "level": "warn",
+      "fields": [
+        "event"
+      ],
+      "policy": {
+        "kind": "rate_limited",
+        "window_seconds": 300,
+        "count_field": "count"
+      },
+      "fix": "Check identify and authorize: while they fail, an open stream goes on until its last successful check is 15 minutes old (three checks, if longer).",
+      "when": "an open events/stream (MCP Events push) asked identify and the event's authorize again, and either failed (threw, rejected, returned an error or ran over 10 seconds) rather than refused: the stream goes on"
+    },
+    {
+      "code": "push_open_check_failed",
+      "level": "warn",
+      "fields": [
+        "event"
+      ],
+      "policy": {
+        "kind": "rate_limited",
+        "window_seconds": 300,
+        "count_field": "count"
+      },
+      "fix": "Check identify and authorize: the client retries, and its stream opens once they answer.",
+      "when": "an events/stream (MCP Events push), at open or a reconnect, ran identify or the event's authorize and either failed (threw, rejected, returned an error or ran over 10 seconds) rather than refused: the client was answered with a retryable Internal error (-32603), not Forbidden"
+    },
+    {
+      "code": "push_recheck_stale",
+      "level": "warn",
+      "fields": [
+        "event"
+      ],
+      "policy": {
+        "kind": "rate_limited",
+        "window_seconds": 300,
+        "count_field": "count"
+      },
+      "fix": "Check identify and authorize: the client reconnects with its cursor, and retries while they fail.",
+      "when": "an open events/stream's recheck failed when its last successful check (or its open) was at least 15 minutes old, or three reauthorize intervals if longer: the stream ended with the final result, as maxStreamMs ends it, and the client reconnects with its cursor"
     },
     {
       "code": "event_closed",
@@ -352,6 +419,20 @@
       "when": "Wakeshift answered 401 or 403 to the app's own key (each call also fails with unauthenticated)"
     },
     {
+      "code": "manifest_refused",
+      "level": "error",
+      "fields": [
+        "reason"
+      ],
+      "policy": {
+        "kind": "rate_limited",
+        "window_seconds": 300,
+        "count_field": "count"
+      },
+      "fix": "Fix the event definitions the message names; until then Wakeshift serves none of this app's events (no push, vouchers or subscribes).",
+      "when": "Wakeshift refused the SDK's automatic manifest send (POST /manifest/merge, which serving or emitting an event triggers) with a 4xx other than 401 or 403 (key_refused): the app's event definitions are invalid, e.g. two events whose topics can make the same topic. reason is Wakeshift's error code (bad_request); the message gives Wakeshift's own message about the definitions, never a request or response body otherwise. An explicit publishManifest that throws to its caller doesn't log it."
+    },
+    {
       "code": "block_failed",
       "level": "warn",
       "fields": [
@@ -365,6 +446,18 @@
       },
       "fix": "Nothing to change; the tool's result went out as the tool gave it, without Wakeshift's addition.",
       "when": "Wakeshift's addition to a result of a tool that subscribes failed (an error answer, a timeout, the core unreachable, a refused key): the tool's result goes out as the tool gave it, never as an error and with nothing asking the agent to call again; what the call subscribed is rolled back"
+    },
+    {
+      "code": "core_unavailable",
+      "level": "warn",
+      "fields": [],
+      "policy": {
+        "kind": "rate_limited",
+        "window_seconds": 300,
+        "count_field": "count"
+      },
+      "fix": "Nothing to change; tool calls go on without Wakeshift (no wakes, results unchanged) until it answers again.",
+      "when": "the in-call circuit breaker is open: 5 requests in a row made inside tool calls (subscribe, unsubscribe, resolveSession, the result's addition, a rollback) failed with a connection error, a timeout or a 5xx (never a 4xx), so for 30 seconds the SDK skips them, then lets one call through to probe; count is the requests skipped since the previous line. Emits, watches and other requests outside tool calls aren't affected"
     },
     {
       "code": "subscribe_in_flight",
@@ -420,6 +513,34 @@
       "fix": "Fix the configuration the message names; the same error was thrown.",
       "fix_python": "Fix the configuration the message names; the same error was raised.",
       "when": "a configuration mistake the SDK throws (errors.json config) while attaching or registering a tool: logged as well, since a framework may turn the throw into a bare HTTP 500 (createMcpHandler). The message is the error's own, which names no secret"
+    },
+    {
+      "code": "client_request_refused",
+      "level": "warn",
+      "fields": [
+        "reason"
+      ],
+      "policy": {
+        "kind": "once_per_client",
+        "per": [
+          "reason"
+        ]
+      },
+      "fix": "Nothing to change; the request wasn't shown, and the result kept Wakeshift's usual text.",
+      "when": "Wakeshift's addition carried a client request (client-requests.json) past the SDK's bounds, or of a kind the call didn't offer: never shown, reported unsupported. reason is the bound it broke (client-requests.json validate)"
+    },
+    {
+      "code": "client_request_report_failed",
+      "level": "warn",
+      "fields": [
+        "error_type"
+      ],
+      "policy": {
+        "kind": "rate_limited",
+        "window_seconds": 300
+      },
+      "fix": "Nothing to change if it's rare; the result went out with the answer's text. Check that this server can reach Wakeshift.",
+      "when": "reporting a client request's outcome (POST /requests/outcome) failed; the call's result isn't affected"
     }
   ],
   "situations": {
@@ -429,7 +550,7 @@
         "op": "quickstart_keyless",
         "name": "the quickstart with no key",
         "logs": [],
-        "note": "the end state of design §'The end state' run with WAKESHIFT_KEY unset: construct, defineEvent, attach, register the tool, tools/list, call it, emit; no_key is debug, so nothing at info or above"
+        "note": "the full app flow run with WAKESHIFT_KEY unset: construct, defineEvent, attach, register the tool, tools/list, call it, emit; no_key is debug, so nothing at info or above"
       },
       {
         "op": "quickstart_with_key",
@@ -681,6 +802,18 @@
         "note": "each emit also fails with APIError unauthenticated; rate-limited like rollback_failed"
       },
       {
+        "op": "manifest_refused",
+        "name": "attach (no tools of its own needed), then three emits of chat.message within a minute, the core answering 400 bad_request to /manifest/merge",
+        "logs": [
+          {
+            "code": "manifest_refused",
+            "reason": "bad_request",
+            "count": 1
+          }
+        ],
+        "note": "each emit sends the manifest first and fails with the manifest's error (APIError bad_request); rate-limited like key_refused. The core's message: events \"a\" and \"b\": topics can make the same topic"
+      },
+      {
         "op": "addition_failed",
         "name": "a tool that subscribed, the core answering 503 to /calls/addition, three times in a minute",
         "logs": [
@@ -691,6 +824,17 @@
           }
         ],
         "note": "each call returns the tool's own result unchanged (no isError, no Wakeshift text); its subscriptions are rolled back; rate-limited like rollback_failed"
+      },
+      {
+        "op": "core_unavailable",
+        "name": "a tool that subscribes to table.news and catches call.subscribe's error, the core answering 503 to /event-subscriptions, called seven times without a session_key",
+        "logs": [
+          {
+            "code": "core_unavailable",
+            "count": 1
+          }
+        ],
+        "note": "the first five calls each send a subscribe that fails, which opens the breaker; the sixth and seventh send nothing (call.subscribe throws unreachable at once) and log one line, rate-limited. Every call returns the tool's own result unchanged"
       },
       {
         "op": "subscribe_in_flight",

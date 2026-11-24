@@ -1,5 +1,5 @@
 {
-  "_about": "The disabled client (design §2.1, §10 decisions 5 and 6, PR 3): construction inputs and what each gives, the option checks that hold on every client, and each method's behavior on a disabled client. Test values are fake: the key is app-keys.json's S key.",
+  "_about": "The disabled client (PR 3): construction inputs and what each gives, the option checks that hold on every client, and each method's behavior on a disabled client. Test values are fake: the key is app-keys.json's S key.",
   "construction": {
     "_comment": "Each case sets exactly env (every other variable unset: clear WAKESHIFT_KEY and WAKESHIFT_CORE first) and constructs with options, mapped per SDK: key (absent or null: TS key left out or undefined, Python key=None, Go no WithKey; a string: TS { key }, Python Wakeshift(key), Go WithKey(k)); required (TS required: true, Python required=True, Go Required()); core (TS core, Python core=, Go WithCore); max_retries (TS maxRetries, Python max_retries=, Go WithMaxRetries); timeout_seconds (TS timeoutMs = seconds * 1000, Python timeout=); log_level (TS logLevel); unknown (TS: an extra property with that name and value). want: enabled and the resolved core (only checked through the URL the SDK would call; no request is made); logs: exactly these warnings.json codes at construction (none: []); or error: construction throws (Go: New returns) UsageError with that code, its message containing says and none of must_not_contain (the key, fragments of it, its length). Construction makes no network request in any case. no_key logs once per client, at debug (logs here counts every level).",
     "cases": [
@@ -513,7 +513,7 @@
     ]
   },
   "option_checks": {
-    "_comment": "Checked at defineEvent, attach and registration, on enabled and disabled clients alike: UsageError (error is its code), the message containing says. go: \"panics\" means Go panics at registration instead of returning (design §2.3 'Go: panics and errors').",
+    "_comment": "Checked at defineEvent, attach and registration, on enabled and disabled clients alike: UsageError (error is its code), the message containing says. go: \"panics\" means Go panics at registration instead of returning.",
     "cases": [
       {
         "op": "define_event_public_not_boolean",

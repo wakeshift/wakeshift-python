@@ -1,5 +1,5 @@
 """attach's own tools go through the app's own tools/list pipeline: a vendor
-middleware that amends every listed tool (Magic Hour's securitySchemes for
+middleware that amends every listed tool (securitySchemes for
 ChatGPT) amends the built-ins too, on MCPServer, the low-level Server and
 FastMCP 4 (test_fastmcp23.py covers FastMCP 2/3)."""
 

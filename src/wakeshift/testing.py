@@ -1,12 +1,15 @@
 """Unit-testing tools that subscribe, without a network or a real key.
 
-- ``TestClient(app="Test app")``: a ``Wakeshift`` that's enabled and
+- ``TestClient(app="Test app", wakes=True)``: a ``Wakeshift`` that's enabled and
   offline. A small fake of Wakeshift answers it in memory, so ``attach``,
   ``tools/list`` (with Wakeshift's arguments and sentence), tool calls that
   subscribe (and their block), the built-in tools, ``emit``,
   ``create_publish_url`` and ``status`` all work. It records ``emits``,
   ``subscriptions``, ``unsubscribes`` and ``publish_urls``; ``clear()``
   empties them. It never reads ``WAKESHIFT_KEY`` or ``WAKESHIFT_CORE``.
+  ``wakes=False`` makes its fake Wakeshift answer that it can't wake the
+  conversations its subscribes name, so ``call.wakes`` stays ``False`` on a
+  served tool call: for testing a tool's fallback through a real server.
 - ``tool_call(...)``: a stand-in ``ToolCall`` for calling a tool's function
   directly; its ``subscribe`` returns a real ``Subscription`` and records it.
 - ``with_call(wake, call)``: inside it, ``wake.current_call()`` returns
@@ -20,6 +23,11 @@
   for a tools-only event; ``await wake.redeem(voucher, webhook_url)``
   subscribes with it as ChatGPT would, and runs the event's on_subscribe
   with the subscribing call's ``context=``.
+- Push: a client's ``events/stream`` to a server attached with a TestClient
+  gets ``active``, then an event for each matching emit, and heartbeats; a
+  stream that creates its subscription records it (``via`` ``native``, or
+  the handing-out tool's with a voucher). ``aclose()`` ends open streams as
+  Wakeshift does on a deploy (the final result; clients reconnect).
 - ``await wake.aclose()`` first waits for the watch checks in flight (and
   their emits) and on_subscribe work, so what they emit is in ``emits``.
 
@@ -42,22 +50,23 @@ the environment, pass an empty key: ``Wakeshift("")`` never reads it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import itertools
 import json
 import secrets
 import warnings
 import zlib
-from collections.abc import Sequence
-from dataclasses import dataclass
-from datetime import timedelta
+from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal
 
 from ._client import Recognized, Wakeshift
 from ._errors import APIConnectionError, APIError, usage
 from ._secrets import SessionKey
-from ._toolcall import _SENTINEL, _TEST_CALL, MAX_REPLAY, Subscription, ToolCall, _seconds
+from ._toolcall import _SENTINEL, _TEST_CALL, MAX_REPLAY, Subscription, ToolCall, _seconds, call_limit_of
 from ._watch import fire, settle
 
 if TYPE_CHECKING:
@@ -189,6 +198,52 @@ _BAD_VOUCHER = "This voucher can't subscribe to this event: it was used, it expi
 _B32 = "abcdefghijklmnopqrstuvwxyz234567"
 
 
+class _TestStream:
+    """A push upstream as the TestClient's fake serves it (an _Upstream):
+    NDJSON frames, active first, an event for each matching emit, heartbeats
+    at the grant, and close when the TestClient closes."""
+
+    def __init__(self, status: int, text: str = "", *, sub: TestSubscription | None = None, grant_ms: int = 30_000) -> None:
+        self.status = status
+        self.retry_after: str | None = None
+        self._text = text
+        self.sub = sub
+        self.sub_id = ""
+        self.seq = 0
+        self.grant_ms = grant_ms
+        self.queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def text(self) -> str:
+        return self._text
+
+    def write(self, frame: dict[str, Any]) -> None:
+        self.queue.put_nowait(json.dumps(frame))
+
+    def end(self) -> None:
+        self.queue.put_nowait(None)
+
+    def cursor(self) -> str:
+        return f"c2.test.{self.sub_id}.{self.seq}"
+
+    async def lines(self) -> AsyncIterator[str]:
+        while True:
+            try:
+                line = await asyncio.wait_for(self.queue.get(), self.grant_ms / 1000)
+            except TimeoutError:
+                yield json.dumps({"type": "heartbeat", "cursor": self.cursor()})
+                continue
+            if line is None:
+                return
+            yield line
+
+
+@dataclass
+class _PushSub:
+    sub: TestSubscription
+    seq: int = 0
+    streams: list[_TestStream] = field(default_factory=list)
+
+
 def _key(event: str, args: Any) -> str:
     return event + json.dumps(args or {}, sort_keys=True, separators=(",", ":"))
 
@@ -224,10 +279,12 @@ class TestClient(Wakeshift):
 
     __test__ = False
 
-    def __init__(self, app: str = "Test app") -> None:
+    def __init__(self, app: str = "Test app", *, wakes: bool = True) -> None:
         super().__init__(_test_key(), core=TEST_CORE)
         self._app_id = "test-app"
         self._test_app_name = app
+        #: What a subscribe answers for wakes: False tests a tool's fallback.
+        self._test_wakes = wakes
         #: Every emit, in order.
         self.emits: list[TestEmit] = []
         #: Every subscribe, in order (renewals too).
@@ -243,6 +300,9 @@ class TestClient(Wakeshift):
         #: The vouchers handed out: their event, arguments, tool and options,
         #: and the webhook that redeemed each.
         self._vouchers: dict[str, dict[str, Any]] = {}
+        #: Push: the subscriptions streams made, by the ID their cursors name, and the open streams.
+        self._push_subs: dict[str, _PushSub] = {}
+        self._streams: list[_TestStream] = []
 
     def __repr__(self) -> str:
         return f"TestClient(app={self._test_app_name!r})"
@@ -257,6 +317,8 @@ class TestClient(Wakeshift):
         self._emitted.clear()
         self._fail.clear()
         self._vouchers.clear()
+        self._close_streams()
+        self._push_subs.clear()
 
     def fail_next(self, op: FailOp, error: FailError) -> None:
         """Makes the next ``op`` (``subscribe`` or ``unsubscribe``, a tool's
@@ -298,6 +360,7 @@ class TestClient(Wakeshift):
         on_subscribe work to finish, so what they emit is in ``emits``, then
         stops every watch, as Wakeshift.aclose does."""
         await settle(self)
+        self._close_streams()
         await super().aclose()
 
     def _mint_voucher(self, event: str, args: dict[str, Any], tool: str, user: str | None, options: dict[str, Any]) -> str:
@@ -306,9 +369,121 @@ class TestClient(Wakeshift):
         self._vouchers[token] = {"event": event, "args": args, "tool": tool, "user": user, "options": options, "url": None}
         return token
 
+    # Push (events/stream): the upstream as Wakeshift serves it. Cursors are
+    # the fake's own (c2.test.<sub>.<seq>).
+
+    @contextlib.asynccontextmanager
+    async def _open_stream(self, path: str, body: Any) -> AsyncIterator[Any]:
+        b: dict[str, Any] = body if isinstance(body, dict) else {}
+        call = b.get("call") if isinstance(b.get("call"), dict) else {}
+        assert isinstance(call, dict)
+        bad = _TestStream(403, json.dumps({"error": {"code": "bad_voucher", "message": _BAD_VOUCHER}}))
+        cursor = b.get("cursor")
+        held_id = cursor.split(".")[2] if isinstance(cursor, str) and cursor.count(".") >= 3 else ""
+        v: dict[str, Any] | None = None
+        ev = self._events.get(str(b.get("name")))
+        if ev is None:
+            yield _TestStream(404, json.dumps({"error": {"code": "unknown_event", "message": f"no event {b.get('name')}"}}))
+            return
+        if isinstance(b.get("voucher"), str):
+            v = self._vouchers.get(b["voucher"])
+            if v is None or v["event"] != b.get("name") or _canonical(v["args"]) != _canonical(b.get("arguments")):
+                yield bad
+                return
+            if v["user"] and v["user"] != call.get("user"):
+                yield bad
+                return
+            if v.get("push") and v["push"] != held_id:
+                yield bad
+                return
+        elif ev.access == "tools":
+            yield _TestStream(403, json.dumps({"error": {"code": "tools_only", "message": "tools only"}}))
+            return
+        hb = b.get("heartbeat_ms")
+        grant = min(45_000, max(10_000, hb if isinstance(hb, int) else 30_000))
+        held = self._push_subs.get(held_id)
+        created = held is None
+        truncated = held is None and cursor is not None
+        if held is None:
+            # A null cursor (or one whose subscription is gone): a new subscription.
+            n = next(self._ids)
+            if v is not None:
+                o = v["options"]
+                sub = TestSubscription(
+                    event=v["event"],
+                    args=dict(v["args"]),
+                    tool=v["tool"],
+                    user=v["user"],
+                    via="tool",
+                    state="created",
+                    once=bool(o.get("once")),
+                    replay=o.get("replay"),
+                    ttl=o.get("ttl"),
+                )
+                v["push"] = f"sub_test_{n}"
+            else:
+                sub = TestSubscription(b["name"], b.get("arguments") or {}, None, call.get("user"), "native", "created")
+            held = self._push_subs[f"sub_test_{n}"] = _PushSub(sub)
+            self.subscriptions.append(sub)
+        s = _TestStream(200, sub=held.sub, grant_ms=grant)
+        s.sub_id = next(k for k, h in self._push_subs.items() if h is held)
+        s.seq = held.seq
+        active: dict[str, Any] = {"type": "active", "cursor": s.cursor(), "truncated": truncated, "heartbeat_ms": grant}
+        if created:
+            active["created"] = True
+            if v is not None:
+                active["via"], active["tool"] = "tool:" + v["tool"], v["tool"]
+        s.write(active)
+        held.streams.append(s)
+        self._streams.append(s)
+        try:
+            yield s
+        finally:
+            with contextlib.suppress(ValueError):
+                held.streams.remove(s)
+            with contextlib.suppress(ValueError):
+                self._streams.remove(s)
+
+    def _push(self, e: TestEmit) -> None:
+        """An emit, to the push streams it matches."""
+        tos = None
+        if e.to is not None:
+            raw = e.to if isinstance(e.to, list) else [e.to]
+            tos = [r if isinstance(r, str) else (r.get("user") or r.get("native")) if isinstance(r, dict) else None for r in raw]
+        for held in self._push_subs.values():
+            if _key(held.sub.event, held.sub.args) != _key(e.event, e.args):
+                continue
+            if tos is not None and held.sub.user not in tos:
+                continue
+            held.seq += 1
+            now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            for s in held.streams:
+                s.seq = held.seq
+                s.write(
+                    {
+                        "type": "event",
+                        "occurrence": {
+                            "eventId": f"evt_test_{next(self._ids)}",
+                            "name": e.event,
+                            "timestamp": now,
+                            "data": e.payload,
+                            "cursor": s.cursor(),
+                            "_meta": {"ai.wakeshift/text": e.text},
+                        },
+                    }
+                )
+
+    def _close_streams(self) -> None:
+        """Ends every push stream as Wakeshift does on a deploy: close, and the clients reconnect."""
+        for s in list(self._streams):
+            s.write({"type": "close"})
+            s.end()
+
     # The fake: answers the app API as Wakeshift would, in memory.
 
-    async def _request(self, method: str, path: str, body: Any = None, *, timeout: float | None = None) -> dict[str, Any]:
+    async def _request(
+        self, method: str, path: str, body: Any = None, *, timeout: float | None = None, retries: int | None = None
+    ) -> dict[str, Any]:
         b: dict[str, Any] = body if isinstance(body, dict) else {}
         raw_call = b.get("call")
         call: dict[str, Any] = raw_call if isinstance(raw_call, dict) else {}
@@ -321,7 +496,7 @@ class TestClient(Wakeshift):
             return {"id": "test-app", "name": self._test_app_name, "key": {"key_id": "test", "name": "test"}}
         if path in ("/manifest", "/manifest/merge"):
             # It hands out subscribe vouchers, as Wakeshift does.
-            return {**b, "features": ["subscribe_vouchers"]}
+            return {**b, "features": ["subscribe_vouchers", "push"]}
         if path == "/events/emit":
             sent = {k: b.get(k) for k in ("name", "arguments", "payload", "text", "to")}
             if b.get("id") in self._emitted:
@@ -330,9 +505,11 @@ class TestClient(Wakeshift):
                     raise APIError("this id was used for a different emit", code="id_reused", status=409)
                 return {"matched": 0, "duplicate": True}
             given = b.get("id") if not str(b.get("id") or "").startswith("sdk-") else None  # the SDK's own retry id
-            self.emits.append(
-                TestEmit(b["name"], b.get("arguments") or {}, b.get("payload") or {}, b.get("text") or "", given, b.get("to"))
+            emitted = TestEmit(
+                b["name"], b.get("arguments") or {}, b.get("payload") or {}, b.get("text") or "", given, b.get("to")
             )
+            self.emits.append(emitted)
+            self._push(emitted)
             if b.get("id"):
                 self._emitted[b["id"]] = (b["id"], sent)
             k = _key(b["name"], b.get("arguments"))
@@ -377,6 +554,7 @@ class TestClient(Wakeshift):
                 "session": str(call.get("session") or "wsc_test"),
                 "agent": {"harness": call.get("harness") or "", "via": "test"},
                 "pending": b.get("pending") or "pa_test",
+                "wakes": self._test_wakes,
             }
             if not b.get("defer_addition"):
                 out["addition"] = {"text": "Wakeshift (test client): this conversation is subscribed."}
@@ -453,6 +631,17 @@ class TestClient(Wakeshift):
                 "next_poll_ms": 10000,
                 "created": created,
             }
+        if path == "/events/stream/end":
+            # An explicit cancel (stdio) ends the stream's subscription.
+            cur = b.get("cursor")
+            sid = cur.split(".")[2] if isinstance(cur, str) and cur.count(".") >= 3 else ""
+            held = self._push_subs.pop(sid, None)
+            if held is None:
+                return {"ended": False}
+            for s in list(held.streams):
+                s.end()
+            self.unsubscribes.append(TestUnsubscribe(held.sub.event, held.sub.args, True))
+            return {"ended": True}
         if path == "/users/forget":
             return {"forgotten": False}
         raise APIError(f"the test client doesn't answer {method} {path}", code="unsupported", status=404)
@@ -510,7 +699,15 @@ class TestToolCall(ToolCall):
     one with ``wake.redeem``). ``await call.finish()`` runs each event's
     on_subscribe for the subscriptions the call created, as a real call does
     once the tool succeeded (``async with with_call(...)`` runs it for you).
-    ``fail_next`` makes its next subscribe or unsubscribe fail."""
+    ``fail_next`` makes its next subscribe or unsubscribe fail.
+
+    ``wakes`` is True once a subscribe made a subscription (or, for a native
+    call, a native line) the call still holds, as when Wakeshift wakes the
+    conversation; False before a subscribe, after a failed one, or always when
+    made with ``wakes=False``, to test the tool's path without Wakeshift.
+    ``call_limit`` is the one it was made with once a subscribe made or renewed
+    a subscription (never for a native call), as Wakeshift gives it for Claude
+    Code (60) or Codex (300); None by default, a limit that isn't known."""
 
     __test__ = False
 
@@ -524,6 +721,8 @@ class TestToolCall(ToolCall):
         context: Any,
         events: Sequence[WakeEvent[Any, Any]] | None,
         wake: Wakeshift | None,
+        wakes: bool = True,
+        call_limit: float | None = None,
     ) -> None:
         super().__init__(
             _SENTINEL,
@@ -541,6 +740,9 @@ class TestToolCall(ToolCall):
             wake=wake,
         )
         self._given_session = session or "wsc_test"
+        self._wakes_answer = wakes
+        self._subscribe_failed = False
+        self._given_limit = call_limit_of(call_limit)
         #: Every subscribe, in order.
         self.subscriptions: list[TestSubscription] = []
         #: Every unsubscribe, in order.
@@ -577,6 +779,20 @@ class TestToolCall(ToolCall):
             pending = [t for t in list(w._background) if not t.done()]
             await asyncio.gather(*pending, return_exceptions=True)
 
+    @property
+    def wakes(self) -> bool:
+        """Whether Wakeshift wakes this conversation for what the call
+        subscribed: True once a subscribe made a subscription (a native line,
+        for a native call) the call still holds, unless made with ``wakes=False``."""
+        return bool(self._seen) and self._wakes_answer and not self._subscribe_failed
+
+    @property
+    def call_limit(self) -> float | None:
+        """As on a real call: the ``call_limit`` the stand-in was made with once
+        a subscribe made or renewed a subscription; None before, and for a
+        native call."""
+        return self._call_limit
+
     def __repr__(self) -> str:
         return f"TestToolCall(tool={self.tool!r}, user={self.user!r}, native={self.native!r})"
 
@@ -601,6 +817,7 @@ class TestToolCall(ToolCall):
         if event.personal and not self.user and not self.native:
             raise usage("bad_arguments", f"{event.name} is personal: subscribe needs a user, who the subscription belongs to")
         if "subscribe" in self._fail:
+            self._subscribe_failed = True  # as on a real call: any failed subscribe makes wakes False
             raise _failure(self._wake, self._fail.pop("subscribe"))
         k = _key(event.name, a_json)
         state = "native" if self.native else "renewed" if k in self._seen else "created"
@@ -624,6 +841,7 @@ class TestToolCall(ToolCall):
         if state == "created" or k in self._created:
             self._created[k] = (event, a_obj, context, contextvars.copy_context())
         self.session = SessionKey(self._given_session)
+        self._call_limit = self._given_limit
         self._n += 1
         return Subscription(
             state=state,  # type: ignore[arg-type]
@@ -660,14 +878,30 @@ def tool_call(
     context: Any = None,
     events: Sequence[WakeEvent[Any, Any]] | None = None,
     wake: Wakeshift | None = None,
+    wakes: bool = True,
+    call_limit: float | None = None,
 ) -> TestToolCall:
     """A stand-in ToolCall (``TestToolCall``) to pass a tool's function in a
     unit test: ``user`` as identify would give it, ``session`` as the
     session_key the agent passed, ``native`` for a client that subscribes
     itself, ``context`` as the tool's Context, ``events`` to check
     subscribes against the tool's declared events, ``wake`` to check events
-    belong to that client (a ``TestClient`` records the subscribes too)."""
-    return TestToolCall(tool=tool, user=user, session=session, native=native, context=context, events=events, wake=wake)
+    belong to that client (a ``TestClient`` records the subscribes too),
+    ``wakes=False`` for a conversation Wakeshift can't wake (``call.wakes``
+    stays False), to test the tool's path without Wakeshift, and ``call_limit``
+    for the program's per-call limit a subscribe sets (``call.call_limit``:
+    60 for Claude Code, 300 for Codex; None, the default, when not known)."""
+    return TestToolCall(
+        tool=tool,
+        user=user,
+        session=session,
+        native=native,
+        context=context,
+        events=events,
+        wake=wake,
+        wakes=wakes,
+        call_limit=call_limit,
+    )
 
 
 tool_call.__test__ = False  # type: ignore[attr-defined]  # pytest: not a test, whatever imports it

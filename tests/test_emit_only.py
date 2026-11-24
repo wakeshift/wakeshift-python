@@ -1,6 +1,6 @@
 """A process that only emits needs no MCP SDK: plain wakeshift installs beside
 FastMCP 2 or 3 (which sit on mcp 1.x) and emits, mints publish URLs and reads
-status (design §5, #63/#64). CI also runs this file in environments with
+status (#63/#64). CI also runs this file in environments with
 fastmcp 2.x or 3.x and plain wakeshift, where attach serves on FastMCP's
 own mcp 1.x."""
 

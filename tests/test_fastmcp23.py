@@ -425,7 +425,7 @@ async def test_a_disabled_client_registers_tools_as_written() -> None:
 
 async def test_a_tools_call_handler_set_after_attach_gets_the_strip_too() -> None:
     """attach can come first: a vendor that replaces (or wraps) the low-level
-    tools/call handler after attach (Magic Hour's validator refusing unknown
+    tools/call handler after attach (a validator refusing unknown
     arguments) never sees session_key, and the wrapped tool still gets its block."""
     import mcp.types as mt
 
@@ -459,7 +459,7 @@ async def test_a_tools_call_handler_set_after_attach_gets_the_strip_too() -> Non
 
 
 async def test_on_list_tools_middleware_sees_the_builtins() -> None:
-    """A vendor's on_list_tools (Magic Hour's securitySchemes) amends the
+    """A vendor's on_list_tools (adding securitySchemes) amends the
     built-ins too: they're in FastMCP's registry, listed as any tool is."""
     schemes = [{"type": "oauth2"}]
 

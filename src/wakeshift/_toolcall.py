@@ -1,4 +1,4 @@
-"""Tools that subscribe (docs/subscribe-from-tools.md). A tool registered
+"""Tools that subscribe. A tool registered
 with ``@attached.tool(subscribes=[...])``, or registered elsewhere and named in
 attach's ``wrap``, gets a :class:`ToolCall` (a parameter, or
 ``wake.current_call()``) and subscribes the calling conversation with
@@ -28,6 +28,7 @@ import copy
 import dataclasses
 import inspect
 import json
+import math
 import re
 import typing
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -47,10 +48,13 @@ from ._client import (
     _takes_tasks,
     _transport_session,
 )
+from ._clientrequests import BOUNDS as CLIENT_REQUEST_BOUNDS
+from ._clientrequests import ELICIT_FORM, claim_session, offered_kinds, run_form, validate_request
 from ._errors import UsageError, usage
 from ._log import logger, warn
+from ._push import _PushConfig, streams_for
 from ._secrets import SessionKey, _reveal, _session
-from ._spec import EXTENSION_KEY, TOP_LEVEL_KEY, bridged_client, dialect_of
+from ._spec import EXTENSION_KEY, TOP_LEVEL_KEY, _push_client, declares_events_extension, native_client
 from ._text import WAKESHIFT_FIELD_SCHEMA, wake_args
 
 if TYPE_CHECKING:
@@ -235,6 +239,7 @@ def merge_block(
     meta: Mapping[str, Any] | None = None,
     *,
     string: bool = False,
+    before: bool = False,
 ) -> dict[str, Any]:
     """A tool result (the wire form) with Wakeshift's block added: its text as
     a block after the app's content, then a text-carried beacon last, its
@@ -243,7 +248,9 @@ def merge_block(
     own _meta carries a connector beacon gets no second one, in _meta or its
     text. ``string``: the tool returned a string, which stays
     one text block. A structured result (structuredContent an object) gets
-    the text in its ``wakeshift`` field too. The shared fixture
+    the text in its ``wakeshift`` field too. ``before``: the text goes
+    before the app's content instead (a client request's outcome placement);
+    the beacon stays last. The shared fixture
     sdk/typescript/test/wrapped-block.json pins it."""
     out = dict(result)
     out["content"] = list(out.get("content") or [])
@@ -251,7 +258,9 @@ def merge_block(
     own_meta = out.get("_meta") if isinstance(out.get("_meta"), dict) else None
     meta_beacon = own_meta is not None and CONNECTOR_META_KEY in own_meta
     _drop_trailers(out)
-    if text:
+    if text and before:
+        out["content"].insert(0, {"type": "text", "text": text})
+    elif text:
         out["content"].append({"type": "text", "text": text})
     if not meta_beacon and trailer:
         out["content"].append({"type": "text", "text": trailer})
@@ -382,6 +391,10 @@ class _Scope:
         #: Watches started in the call for subscriptions it created: a rollback stops them.
         self.watches: list[Any] = []
         self.native: list[dict[str, Any]] = []
+        #: The native lines the call still offers (a subscribe that came back
+        #: native, and not unsubscribed in the same call), by event and
+        #: canonical arguments.
+        self.native_live: set[tuple[str, str]] = set()
         #: call.subscribe's context= for a tools-only event's native line, by
         #: event and canonical arguments: kept with the voucher the line hands
         #: out (never sent: the lines above are).
@@ -389,6 +402,9 @@ class _Scope:
         #: Wakeshift's notes from the call's unsubscribes (one that ended
         #: nothing because the call passed no session key), for the block.
         self.notes: list[str] = []
+        #: The kinds of client request the call offered on /calls/addition
+        #: (_clientrequests.py): only those may run.
+        self.offered: list[str] = []
 
     @property
     def wrapped(self) -> bool:
@@ -416,6 +432,15 @@ class _Scope:
         if self.busy == 0:
             self.idle.set()
 
+    def drop_native(self, name: str, args: Any) -> None:
+        """Removes the native line for name and args (an unsubscribe in the call)."""
+        key = json.dumps(args, sort_keys=True, separators=(",", ":"))
+        self.native = [
+            line
+            for line in self.native
+            if not (line["name"] == name and json.dumps(line["arguments"], sort_keys=True, separators=(",", ":")) == key)
+        ]
+
     def add_native(self, name: str, args: dict[str, Any], options: Mapping[str, Any] | None = None) -> None:
         """A native line, once per event and arguments. options: call.subscribe's
         once, ttl and replay, for a tools-only event's line: the core keeps them
@@ -428,6 +453,22 @@ class _Scope:
             logger.debug("wakeshift: a call subscribed a native client to more than 20 events; only 20 are named")
             return
         self.native.append({"name": name, "arguments": args, **(options or {})})
+
+
+def skips_wait(wakes: bool, call_limit: float | None, seconds: float | None) -> bool:
+    """call.should_skip_wait's rule (skip-wait.json): skip a wait the agent
+    asked for only when Wakeshift wakes the conversation and the wait reaches
+    the program's per-call limit."""
+    if not wakes or call_limit is None or seconds is None or isinstance(seconds, bool):
+        return False
+    return math.isfinite(seconds) and seconds >= call_limit
+
+
+def call_limit_of(v: Any) -> float | None:
+    """A core's call_limit, or None for none or anything but a positive number."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+        return None
+    return float(v)
 
 
 class ToolCall:
@@ -467,7 +508,7 @@ class ToolCall:
         #: The tool being called.
         self.tool = tool
         #: The client subscribes to the app's events itself (MCP Events:
-        #: ChatGPT, an app's house agents): subscribe then makes no
+        #: ChatGPT, an app's own first-party agents): subscribe then makes no
         #: conversation subscription, and the block tells it what to subscribe to.
         self.native = native
         #: A native client's conversation, when it names one (ChatGPT's
@@ -500,12 +541,62 @@ class ToolCall:
         self._ua = headers.get("user-agent", "") if headers else ""
         self._headers = headers
         self._tasks = _takes_tasks(meta, headers)
+        # The client is one push wakes (opencode): its subscribes go to
+        # the core whatever the SDK decided, which answers native_line when it
+        # chose native push (Wakeshift's plugin doesn't listen for the
+        # conversation), and keeps the bridged path otherwise (the downgrade).
+        self._push_woken = _push_client(self._client, self._ua, meta)
+        # The request declares the MCP Events extension (its _meta's
+        # capabilities, or its session's initialize): sent as call.events_ext.
+        exts = _client_capabilities(rc).get("extensions")
+        self._events_ext = declares_events_extension(meta) or (isinstance(exts, Mapping) and EXTENSION_KEY in exts)
+        # The core's wakes answer to the latest subscribe that made or renewed
+        # a subscription (an older core leaves it out: False).
+        self._wakes_answer = False
+        self._subscribe_failed = False
+        self._call_limit: float | None = None
+
+    @property
+    def call_limit(self) -> float | None:
+        """How many seconds the agent's program lets one tool call take before
+        it gives up on it, from what Wakeshift recognized the program as
+        (Claude Code: 60, Codex: 300), or None when that isn't known. Set by
+        subscribe; None before. It's the program's default: a user's own
+        setting may raise it."""
+        return self._call_limit
+
+    def should_skip_wait(self, seconds: float | None) -> bool:
+        """Whether to skip a wait of ``seconds`` the agent asked for (a
+        vendor's ``wait_seconds``) and return at once: True only when
+        ``wakes`` is True and the wait reaches ``call_limit``, so the program
+        would cut the call off before the wait ends. Keep the subscription
+        either way. None (no wait asked for) is False."""
+        return skips_wait(self.wakes, self._call_limit, seconds)
+
+    @property
+    def wakes(self) -> bool:
+        """Whether Wakeshift wakes this conversation for what the call
+        subscribed: skip your own polling or waiting only when it's True;
+        otherwise behave as without Wakeshift. Set by subscribe; True only
+        once a wake is confirmed, so False before and while the user's choice
+        of how to be notified is pending."""
+        s = self._scope
+        if s is None or self._subscribe_failed:
+            return False
+        # A native client (a ChatGPT Work chat on the web) is woken through
+        # MCP Events once the call offers it a line.
+        return bool(s.native_live) or (bool(s.live) and self._wakes_answer)
 
     def __repr__(self) -> str:
         return f"ToolCall(tool={self.tool!r}, user={self.user!r}, native={self.native!r})"
 
     def _wire(self, session: SessionKey | None = None) -> dict[str, Any]:
         """The call as Wakeshift takes it."""
+        # Only where push is served for this request: the core reported it
+        # (an older one refuses fields it doesn't know), the response
+        # streams, and the app hasn't turned push off (the core can't tell).
+        scope = self._scope
+        events_ext = self._events_ext and scope is not None and scope.attached._push_now(scope.rc)
         c = _call_of(
             client_name=self._client,
             meta=self._meta,
@@ -518,8 +609,12 @@ class ToolCall:
             tasks=self._tasks,
             # A native caller's transport session binds an anonymous voucher;
             # only to a core that hands them out (an older one refuses fields
-            # it doesn't know).
-            transport_session=_transport_session(self._headers) if self.native and self._vouchers_known() else None,
+            # it doesn't know). A push-woken caller's native line can
+            # carry a voucher too.
+            transport_session=_transport_session(self._headers)
+            if (self.native or (events_ext and self._push_woken)) and self._vouchers_known()
+            else None,
+            events_ext=events_ext,
         )
         return c.to_json()
 
@@ -598,7 +693,7 @@ class ToolCall:
                 # thread): Wakeshift never finds a session by that ID alone,
                 # so for anything else it would only start a new one.
                 return None
-            out = await s.attached._wake._request_app("POST", "/calls/session", {"call": wire})
+            out = await s.attached._wake._in_call("subscribe", "POST", "/calls/session", {"call": wire})
             s.pending = out.get("pending") or ""
             self.session = _session(out.pop("session", None))
             self.recognized = _recognized(out.get("agent"))
@@ -643,6 +738,27 @@ class ToolCall:
         event's on_subscribe, as ``Subscribed.context``: never sent to
         Wakeshift, never logged. on_subscribe runs, after the call succeeds,
         in a copy of the contextvars this subscribe ran in."""
+        try:
+            return await self._subscribe(
+                event, args, once=once, replay=replay, ttl=ttl, reason=reason, label=label, context=context
+            )
+        except BaseException:
+            # Any subscribe of the call that failed makes wakes False: the tool keeps its own wait.
+            self._subscribe_failed = True
+            raise
+
+    async def _subscribe(
+        self,
+        event: "WakeEvent[_A, Any]",
+        args: "_A | Mapping[str, Any]",
+        *,
+        once: bool,
+        replay: timedelta | int | float | str | None,
+        ttl: timedelta | int | float | str | None,
+        reason: str | None,
+        label: str | None,
+        context: Any,
+    ) -> Subscription:
         self._check_event(event)
         self._check_declared(event)
         a_obj, a_json = event._parse_args(args)
@@ -654,7 +770,7 @@ class ToolCall:
         run_in = contextvars.copy_context()
         s = await self._enter()
         try:
-            if self.native:
+            if self.native and not self._push_woken:
                 options: dict[str, Any] = {}
                 if once:
                     options["once"] = True
@@ -663,6 +779,10 @@ class ToolCall:
                 if replay_s is not None:
                     options["replay"] = replay_s
                 return await self._native(s, event, a_obj, a_json, options, context)
+            if self._push_woken and self._events_ext and not s.attached._wake._push_known:
+                # Whether the core serves push decides events_ext and the SDK's verdict: asked first.
+                await s.attached._wake._push_offered()
+                self.native, self.native_conversation = s.attached._native_of(s.rc, s.rc, self._client)
             if event.personal and not self.user:
                 raise usage(
                     "bad_arguments",
@@ -681,9 +801,25 @@ class ToolCall:
                 body["reason"] = reason
             if label:
                 body["label"] = label
-            out = await s.attached._wake._request_app("POST", "/event-subscriptions", body)
+            out = await s.attached._wake._in_call("subscribe", "POST", "/event-subscriptions", body)
             if out.get("pending"):
                 s.pending = out["pending"]
+            # Only for a call that told Wakeshift it declared the extension
+            # where push is served: never a native line where push is off.
+            if out.get("native_line") is True and self._push_woken and body["call"].get("events_ext") is True:
+                # The core chose native push for this caller: the block
+                # carries the native line (a tools-only event's with a
+                # voucher), and the bridged subscription stays as the fallback.
+                line: dict[str, Any] = {}
+                if once:
+                    line["once"] = True
+                if ttl_s is not None:
+                    line["ttl"] = ttl_s
+                if replay_s is not None:
+                    line["replay"] = replay_s
+                s.add_native(event.name, a_json, line)
+                if event.access == "tools" and context is not None:
+                    s.native_contexts[_live_key(event.name, a_json)] = context
             s.armed = True
             self.session = _session(out.pop("session", None))
             rec = _recognized(out.get("agent"))
@@ -700,6 +836,8 @@ class ToolCall:
                     if _live_key(c.name, c.arguments) == _live_key(event.name, a_json):
                         c.context, c.vars = context, run_in
             s.live.add(_live_key(event.name, a_json))
+            self._wakes_answer = out.get("wakes") is True
+            self._call_limit = call_limit_of(out.get("call_limit"))
             s.states[_live_key(event.name, a_json)] = "created" if created else "renewed"
             return Subscription(
                 state="created" if created else "renewed",
@@ -732,10 +870,11 @@ class ToolCall:
         if event.access == "tools":
             # While the core hands out subscribe vouchers, the line carries one,
             # so the client subscribes with what the tool gave it, signed in or
-            # not (docs/subscribe-vouchers.md §7.1).
-            if not await s.attached._wake._vouchers_offered():
+            # not.
+            if not await s.attached._wake._vouchers_offered_in_call():
                 return self._unavailable(event, "client_unsupported")
             s.states[key] = "native"
+            s.native_live.add(key)
             s.add_native(event.name, a_json, options)
             if context is not None:
                 s.native_contexts[key] = context
@@ -747,6 +886,7 @@ class ToolCall:
         ):
             return self._unavailable(event, "refused")
         s.states[key] = "native"
+        s.native_live.add(key)
         s.add_native(event.name, a_json)
         return Subscription(state="native", user=self.user, recognized=self.recognized)
 
@@ -774,10 +914,13 @@ class ToolCall:
             self._check_event(event)
             _, a_json = event._parse_args(args)
             wake = s.attached._wake
-            if self.native:
+            if self.native and not self._push_woken:
+                # The result no longer offers the line, nor counts it as a wake.
+                s.native_live.discard(_live_key(event.name, a_json))
+                s.drop_native(event.name, a_json)
                 if not self.user:
                     return False
-                listed = await wake._request_app("POST", "/event-subscriptions/list", {"user": self.user})
+                listed = await wake._in_call("subscribe", "POST", "/event-subscriptions/list", {"user": self.user})
                 ended = False
                 for sub in listed.get("subscriptions") or []:
                     if (
@@ -786,11 +929,16 @@ class ToolCall:
                         or not _same_json(sub.get("arguments"), a_json)
                     ):
                         continue
-                    out = await wake._request_app("POST", "/event-subscriptions/end", {"user": self.user, "id": sub.get("id")})
+                    out = await wake._in_call(
+                        "subscribe", "POST", "/event-subscriptions/end", {"user": self.user, "id": sub.get("id")}
+                    )
                     ended = ended or bool(out.get("ended"))
                 return ended
-            out = await wake._request_app(
-                "POST", "/event-subscriptions/unsubscribe", {"call": self._wire(), "name": event.name, "arguments": a_json}
+            out = await wake._in_call(
+                "subscribe",
+                "POST",
+                "/event-subscriptions/unsubscribe",
+                {"call": self._wire(), "name": event.name, "arguments": a_json},
             )
             # addition: the call passed no session key, so it ended nothing;
             # the block says to call again with it.
@@ -838,15 +986,17 @@ def _recognized(agent: Any) -> Recognized:
     return Recognized(harness=a.get("harness"), via=a.get("via"), claimed=a.get("claimed"))
 
 
-def _speaks_events(capabilities: Mapping[str, Any] | None, client_name: str, user_agent: str = "") -> bool:
-    """A client that speaks MCP Events: it declared the extension, or it's one known to (ChatGPT);
-    never a harness Wakeshift wakes itself (BRIDGED_CLIENTS: its name wins)."""
-    if bridged_client(client_name, user_agent):
-        return False
-    caps = capabilities or {}
-    exts = caps.get("extensions")
-    ext = exts.get(EXTENSION_KEY) if isinstance(exts, Mapping) else None
-    return ext is not None or client_name.lower() == "openai-mcp"
+def _speaks_events(
+    capabilities: Mapping[str, Any] | None,
+    client_name: str,
+    user_agent: str = "",
+    meta: Mapping[str, Any] | None = None,
+    *,
+    serves_push: bool = False,
+) -> bool:
+    """A client that speaks MCP Events, from its session's capabilities and
+    the request's _meta: native_client, the one rule every SDK has."""
+    return native_client(client_name, user_agent, meta, (capabilities or {}).get("extensions"), serves_push)
 
 
 # ── The attachment ────────────────────────────────────────────────────────
@@ -926,9 +1076,13 @@ class Attachment:
         self._wait = False
         #: Wakeshift serves MCP Events here (False: the server has its own).
         self._serves_events = True
+        #: attach's client_requests: False offers the core no client request (_clientrequests.py).
+        self._client_requests = True
         #: Wakeshift advertises MCP Events here: it serves them, and an event
         #: is open natively (personal, authorize or public).
         self._advertises = False
+        #: attach's push option, read (_push.py): off until attach_events sets it.
+        self._push = _PushConfig(on=False)
         #: The events each tool that subscribes declares, by name: the ones
         #: registered with tool() and the ones wrap names.
         self._declared: dict[str, list[WakeEvent[Any, Any]]] = {}
@@ -1256,16 +1410,29 @@ class Attachment:
             return Identity(), "anonymous"
         return who, None
 
+    def _push_now(self, rc: Any) -> bool:
+        """Whether push (events/stream) would be listed for this request,
+        from the core's last answer, without asking: a client push wakes
+        is then decided by what it declares."""
+        return self._push.on and self._advertises and self._wake._push_known and streams_for(rc)
+
+    async def _decide_push(self, rc: Any, client: str) -> None:
+        """For a client push wakes, asks the core whether it serves push
+        if it hasn't said yet, so the verdict reads its answer."""
+        if not (self._push.on and self._advertises) or self._wake._push_known:
+            return
+        _, meta, headers = _request_info(rc)
+        if _push_client(client, headers.get("user-agent", "") if headers else "", meta):
+            await self._wake._push_offered()
+
     def _native_of(self, context: Any, rc: Any, client: str) -> tuple[bool, str | None]:
         """Whether a call comes from a client that subscribes to the app's
-        events itself, on stateless servers too (which never see initialize),
-        in this order: the app's override (is_native_client); ChatGPT's
-        _meta["openai/session"]; a client name (initialize's, or _meta's, else
-        identify's) or User-Agent of a known native client; never a harness
-        Wakeshift wakes itself (BRIDGED_CLIENTS: its name wins over
-        capabilities); a client that declares MCP Events. The conversation is ChatGPT's, when it names one.
-        Never, on a host without MCP Events (FastMCP 2/3): every client gets
-        the block."""
+        events itself, on stateless servers too (which never see initialize):
+        the app's override (is_native_client), else native_client (the one
+        rule in every SDK), for the client name (initialize's, or _meta's,
+        else identify's), User-Agent, _meta and initialize's capabilities. The
+        conversation is ChatGPT's, when it names one. Never, on a host without
+        MCP Events (FastMCP 2/3): every client gets the block."""
         if not getattr(self._host, "native_events", True):
             return False, None
         _, meta, headers = _request_info(rc)
@@ -1273,23 +1440,13 @@ class Attachment:
         conversation = conv if isinstance(conv, str) and conv else None
         if self._is_native_client is not None and self._is_native_client(self._request(rc)):
             return True, conversation
-        if conversation:
-            return True, conversation
+        # ChatGPT's desktop app can't subscribe natively (Codex mode waits in
+        # the foreground; a regular chat is told it can't be woken), though it
+        # sends openai/session too: the rule says no before it reads that.
         ua = headers.get("user-agent", "") if headers else ""
-        if dialect_of(client, ua) == "chatgpt":
-            return True, None
-        if bridged_client(client, ua):
+        if not native_client(client, ua, meta, _client_capabilities(rc).get("extensions"), self._push_now(rc)):
             return False, None
-        caps = _client_capabilities(rc)
-        exts = caps.get("extensions")
-        if isinstance(exts, Mapping) and EXTENSION_KEY in exts:
-            return True, None
-        meta_caps = meta.get("io.modelcontextprotocol/clientCapabilities")
-        if isinstance(meta_caps, Mapping):
-            mexts = meta_caps.get("extensions")
-            if isinstance(mexts, Mapping) and EXTENSION_KEY in mexts:
-                return True, None
-        return False, None
+        return True, conversation
 
     async def _new_call(self, scope: _Scope, declared: "list[WakeEvent[Any, Any]]") -> "ToolCall":
         """The ToolCall for a call of a tool that subscribes."""
@@ -1513,9 +1670,12 @@ class Attachment:
                     and "execution" in t
                 ):
                     tools[i] = {k: v for k, v in t.items() if k != "execution"}
-        client, _, headers = _request_info(ctx)
+        client, list_meta, headers = _request_info(ctx)
         ua = headers.get("user-agent", "") if headers else ""
-        if self._serves_events and _speaks_events(_client_capabilities(ctx), client, ua):
+        await self._decide_push(ctx, client)
+        if self._serves_events and _speaks_events(
+            _client_capabilities(ctx), client, ua, list_meta, serves_push=self._push_now(ctx)
+        ):
             # A client that speaks MCP Events subscribes natively.
             tools[:] = [t for t in tools if not (isinstance(t, Mapping) and t.get("name") == "subscribe_events")]
         # The list differs by what each request declares (the wait tool,
@@ -1623,7 +1783,7 @@ class Attachment:
         except Exception as err:
             if not scope.armed and not scope.created and scope.native:
                 # Only native lines, so nothing to roll back: the tool's result
-                # goes out as it would without Wakeshift (docs/subscribe-vouchers.md §7.2).
+                # goes out as it would without Wakeshift.
                 assert scope.call is not None
                 self._wake._log(
                     "native_unavailable",
@@ -1683,7 +1843,8 @@ class Attachment:
             w.stop.set()
         for c in scope.created:
             try:
-                await self._wake._request_app(
+                await self._wake._in_call(
+                    "block",
                     "POST",
                     "/event-subscriptions/unsubscribe",
                     {
@@ -1718,6 +1879,8 @@ class Attachment:
         add = add or {}
         if scope.native_contexts:
             self._remember_vouchers(scope, str(add.get("text") or ""))
+        if isinstance(add.get("requests"), list) and add["requests"]:
+            add = await self._run_request(scope, add)
         # Notes from the call's unsubscribes come first, whatever else it gets.
         text = "\n\n".join(t for t in (" ".join(scope.notes), str(add.get("text") or "").strip()) if t)
         out = merge_block(
@@ -1726,6 +1889,7 @@ class Attachment:
             str(add.get("trailer") or ""),
             add.get("meta") if isinstance(add.get("meta"), Mapping) else None,
             string=scope.string,
+            before=add.get("placement") == "before",
         )
         if text and out.get("structuredContent") is not None and not isinstance(out.get("structuredContent"), dict):
             self._warn_once(
@@ -1734,6 +1898,82 @@ class Attachment:
                 "conversation is woken: hosts that show only structuredContent won't see it",
             )
         return out
+
+    async def _run_request(self, scope: _Scope, add: Mapping[str, Any]) -> dict[str, Any]:
+        """The addition with the outcome of the client request it carries
+        (_clientrequests.py), run within the SDK's own bounds: the outcome's
+        text in place of the core's, its placement and its beacon; the
+        outcome reported. A request it can't run leaves the addition as the
+        core gave it (today's text), reported unsupported. Never raises but
+        for the call's own cancellation, reported cancel."""
+        import anyio
+
+        plain = {k: add[k] for k in ("text", "trailer", "meta") if k in add}
+        raw = add["requests"][0]
+        token = raw.get("token") if isinstance(raw, Mapping) else None
+        token = token if isinstance(token, str) else ""
+        app = await self._wake._app_name() or self._wake._app_id or ""
+        # A kind this call didn't offer (attach's client_requests off, a host
+        # that can't send it) is refused like a kind the SDK doesn't know.
+        bad = validate_request(raw, app) if ELICIT_FORM in scope.offered else "kind"
+        if not bad and not claim_session(scope.rc):
+            bad = "rate"
+        if bad:
+            self._refused_request(bad)
+            if token:
+                await self._report_outcome(token, "unsupported")
+            return plain
+        try:
+            ran = await run_form(scope.rc, raw, app)
+        except anyio.get_cancelled_exc_class():
+            # The client cancelled the call (or went away) while the form was
+            # open: its result goes nowhere, but the outcome is reported.
+            with anyio.CancelScope(shield=True):
+                await self._report_outcome(token, "cancel")
+            raise
+        await self._report_outcome(token, ran.outcome)
+        out: dict[str, Any] = {"text": str(ran.result["text"]).strip(), "placement": ran.result["placement"]}
+        if ran.result["beacon"] == "keep":
+            return {**plain, **out}
+        meta = dict(add.get("meta") or {}) if isinstance(add.get("meta"), Mapping) else {}
+        meta.pop(CONNECTOR_META_KEY, None)
+        return {**out, "meta": meta}
+
+    async def _report_outcome(self, token: str, outcome: str) -> None:
+        """Tells the core a client request's outcome, waiting at most
+        report_wait_ms (so the next subscribing call sees it; the report
+        goes on after that) and never failing the call's result."""
+        wake = self._wake
+
+        async def send() -> None:
+            try:
+                await wake._request(
+                    "POST",
+                    "/requests/outcome",
+                    {"token": token, "outcome": outcome},
+                    timeout=CLIENT_REQUEST_BOUNDS.report_wait_ms / 1000,
+                    retries=1,
+                )
+            except Exception as err:
+                wake._log(
+                    "client_request_report_failed",
+                    f"Couldn't report a client request's outcome to Wakeshift ({type(err).__name__})",
+                    error_type=type(err).__name__,
+                )
+
+        task = asyncio.ensure_future(send())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        await asyncio.wait({task}, timeout=CLIENT_REQUEST_BOUNDS.report_wait_ms / 1000)
+
+    def _refused_request(self, reason: str) -> None:
+        """Logs, once per bound, that the core sent a client request past the
+        SDK's bounds: the call keeps today's text."""
+        self._wake._log(
+            "client_request_refused",
+            f"Wakeshift sent a client request past this SDK's bounds ({reason}), so the call's result keeps Wakeshift's usual text",
+            reason=reason,
+        )
 
     def _remember_vouchers(self, scope: _Scope, text: str) -> None:
         """Keeps each subscribe's context= with the voucher the block hands out
@@ -1754,21 +1994,38 @@ class Attachment:
             # Every subscription the call made, it also ended: no block (it
             # would tell the agent to start listening for nothing).
             return None
-        if call.native:
-            # The manifest's answer first, so a native call's wire knows
-            # whether the core hands out vouchers.
-            await self._wake._vouchers_offered()
         wire = call._wire()
         if not scope.pending and not scope.native and not wire.get("session") and not wire.get("conversation"):
             if not conversation_key(wire.get("meta")):
                 return None
-        body: dict[str, Any] = {"call": wire}
-        if scope.pending:
-            body["pending"] = scope.pending
-        if scope.native:
-            body["native"] = scope.native
+        if call.native and not self._wake._breaker.is_open:
+            # A native call makes no subscribe request, so on a fresh process
+            # its addition is the first to wait for the manifest: that wait
+            # gets the subscribe budget, as a bridged call's subscribe does,
+            # and the addition then its own block budget.
+            await self._wake._vouchers_offered_in_call()
+
+        def body() -> dict[str, Any]:
+            # Built after the manifest's answer, so a native call's wire knows
+            # whether the core hands out vouchers.
+            wired = call._wire()
+            # The kinds of client request this call can run
+            # (_clientrequests.py), only for a call that subscribed: the core
+            # describes one only for a subscribing call's first ask.
+            scope.offered = (
+                offered_kinds(scope.rc, _client_capabilities(scope.rc), not self._client_requests) if scope.pending else []
+            )
+            if scope.offered:
+                wired["client_requests"] = list(scope.offered)
+            b: dict[str, Any] = {"call": wired}
+            if scope.pending:
+                b["pending"] = scope.pending
+            if scope.native:
+                b["native"] = scope.native
+            return b
+
         try:
-            return await self._wake._request_app("POST", "/calls/addition", body)
+            return await self._wake._in_call("block", "POST", "/calls/addition", body)
         except Exception as err:
             if scope.armed or scope.native:
                 raise

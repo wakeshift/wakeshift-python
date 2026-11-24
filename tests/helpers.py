@@ -17,8 +17,9 @@ import httpx2
 
 from wakeshift import Wakeshift
 
-# The golden files the Go and Node SDKs test against too: beside the Node
-# SDK's tests in Wakeshift's repository, copied to tests/golden in the export.
+# The golden files the Go and Node SDKs test against too: in tests/golden
+# where it exists (the published Python SDK), else beside the Node SDK's tests
+# (sdk/typescript/test).
 GOLDEN = Path(__file__).resolve().parent / "golden"
 if not GOLDEN.is_dir():
     GOLDEN = Path(__file__).resolve().parents[2] / "typescript" / "test"

@@ -85,7 +85,7 @@ def test_only_a_test_key_needs_a_core(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class Core:
-    """Answers /api/apps/v1/app and /oauth/token, recording each request."""
+    """Answers /api/apps/v1/app, recording each request."""
 
     def __init__(self, app: tuple[int, Any] = (200, APP)) -> None:
         self.app = app
@@ -95,8 +95,6 @@ class Core:
         self.sent.append(request)
         if request.url.path == "/api/apps/v1/app":
             return httpx2.Response(self.app[0], json=self.app[1])
-        if request.url.path == "/oauth/token":
-            return httpx2.Response(200, json={"access_token": "at", "expires_in": 900, "wakeshift_user": "u-1"})
         return httpx2.Response(200, json={"workspace": "w-1"})
 
     def wake(self, key: str = NEW_KEY) -> Wakeshift:

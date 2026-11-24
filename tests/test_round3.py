@@ -208,7 +208,7 @@ async def test_a_tool_without_subscribes_needs_no_toolcall_and_never_raises(keye
 
     @attached.tool()
     async def unwatch(job: str) -> str:
-        """Subscribes nothing, but ends a subscription (Channel3's unwatch_product)."""
+        """Subscribes nothing, but ends a subscription (like an unwatch_product tool)."""
         ended.append(await wake.current_call().unsubscribe(watched, {"job": job}))
         return "stopped"
 
@@ -453,5 +453,5 @@ async def test_events_poll_of_a_tools_only_event_names_the_webhook() -> None:
     assert entry["delivery"] == ["webhook"]
     assert (
         polled["error"]["message"]
-        == "crawl.finished can't be polled: it's subscribed to only through this app's tools, with a webhook"
+        == "crawl.finished can't be polled: it's subscribed to only through this app's tools, with a webhook or by push"
     )

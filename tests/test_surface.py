@@ -1,5 +1,5 @@
-"""The public surface (design §5, sdk/typescript/test/SURFACE.md): __all__ is
-exactly the design's list, every public class says it's wakeshift's, the
+"""The public surface: __all__ is
+exactly the designed list, every public class says it's wakeshift's, the
 modules behind it are private, and what the release deletes is gone."""
 
 from __future__ import annotations
@@ -14,9 +14,7 @@ from pathlib import Path
 
 import wakeshift
 
-SURFACE = Path(__file__).resolve().parents[2] / "typescript" / "test" / "SURFACE.md"
-
-#: Design §5's __all__, sorted, then the advanced names.
+#: The designed __all__, sorted, then the advanced names.
 ALL = [
     "APIConnectionError",
     "APIError",
@@ -48,8 +46,8 @@ ALL = [
 ]
 ADVANCED = ["AgentScope", "AppInfo", "Manifest", "WakeLimit"]
 #: Added after the design (release-gate round 2): the built-in tools' names,
-#: on_subscribe's argument and event.watch's result.
-ADDED = ["BUILTIN_TOOL_NAMES", "Subscribed", "WatchResult"]
+#: on_subscribe's argument and event.watch's result; attach's push option; then the in-call budget.
+ADDED = ["BUILTIN_TOOL_NAMES", "Subscribed", "WatchResult", "PushOptions", "CallTimeouts"]
 
 DELETED = [
     "wrapped_tool",
@@ -94,17 +92,6 @@ def test_all_is_the_designs_list() -> None:
     assert wakeshift.BUILTIN_TOOL_NAMES == ("subscribe_events", "unsubscribe_events", "list_subscriptions", "wakeshift_wait")
     for name in wakeshift.__all__:
         assert hasattr(wakeshift, name), name
-
-
-def test_the_surface_checklist_lists_the_same_names() -> None:
-    if not SURFACE.is_file():
-        return  # the published copy has no checklist
-    text = SURFACE.read_text()
-    section = text[text.index("### `__all__`, sorted") : text.index("### Signatures (the stub)")]
-    listed = re.findall(r"^- \[ \] `(\w+)`$", section, re.M)
-    advanced = re.findall(r"Advanced: (.*)$", section, re.M)[0]
-    assert listed == ALL
-    assert re.findall(r"`(\w+)`", advanced) == ["AppInfo", "Manifest", "AgentScope", "WakeLimit"]
 
 
 def test_public_classes_are_wakeshifts_and_their_modules_private() -> None:
@@ -152,10 +139,20 @@ def test_the_sources_text_names_nothing_the_release_deletes() -> None:
 
 def test_signatures_follow_the_stub() -> None:
     init = inspect.signature(wakeshift.Wakeshift.__init__)
-    assert list(init.parameters) == ["self", "key", "core", "required", "timeout", "max_retries", "http_client"]
+    assert list(init.parameters) == ["self", "key", "core", "required", "timeout", "max_retries", "call_timeouts", "http_client"]
     assert init.parameters["timeout"].default == 20.0 and init.parameters["max_retries"].default == 2
     attach = inspect.signature(wakeshift.Wakeshift.attach)
-    assert list(attach.parameters) == ["self", "server", "identify", "require_user", "wrap", "builtin_tools", "is_native_client"]
+    assert list(attach.parameters) == [
+        "self",
+        "server",
+        "identify",
+        "require_user",
+        "wrap",
+        "builtin_tools",
+        "is_native_client",
+        "push",
+        "client_requests",
+    ]
     define = inspect.signature(wakeshift.Wakeshift.define_event)
     assert list(define.parameters) == [
         "self",

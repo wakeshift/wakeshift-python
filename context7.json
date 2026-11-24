@@ -23,6 +23,8 @@
     "builtin_tools={\"wait\": True} turns on wakeshift_wait; only where a request may stay open 30 seconds or more.",
     "Never log call.session, tokens or tool arguments; use wakeshift.redact_secrets on text you log yourself.",
     "From sync code, use asyncio.run(event.emit(...)) or asgiref's async_to_sync(event.emit); asyncio only.",
-    "Write event descriptions as plain statements of what happened, not instructions to the agent."
+    "Write event descriptions as plain statements of what happened, not instructions to the agent.",
+    "Skip a tool's own polling or waiting only when call.wakes is True after call.subscribe; when the agent asked for a wait (wait_seconds), return at once only if call.should_skip_wait(seconds) (call.wakes, and the wait reaches call.call_limit: Claude Code 60 s, Codex 300 s). Keep the subscription either way.",
+    "MCP Events clients (ChatGPT, OpenClaw, Mastra, opencode and others) are served by attach on mcp 2.x hosts with nothing more to write, by webhook, poll and push (events/stream). Push is offered only where the transport can stream (not json_response=True); pass push=False to attach when something in front of the server forces JSON answers."
   ]
 }

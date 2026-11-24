@@ -1,5 +1,5 @@
-"""warnings.json: which situations log, at which level and with which code
-(design §2.11). Each situation runs on a fresh client; its lines at info
+"""warnings.json: which situations log, at which level and with which code.
+Each situation runs on a fresh client; its lines at info
 level and above, from construction on, must be exactly the fixture's, in
 order, each with the fields it gives. The message contains the code's fix
 verbatim and never the vendor's own error message."""
@@ -264,6 +264,26 @@ async def situation(op: str, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, 
             r = await s.call("watch", {"table": "oak"}, **{"User-Agent": "claude-code/2.1"})
             assert not r["result"].get("isError") and [c["text"] for c in r["result"]["content"]] == ["watching"], r
         return s.lines()
+    if op == "core_unavailable":
+        s = Scene()
+        s.core.on("POST", "/event-subscriptions", lambda b: (503, {"error": {"code": "unavailable", "message": "down"}}))
+        caught: list[str] = []
+
+        async def tolerant(call: ToolCall) -> None:
+            try:
+                await call.subscribe(s.news, {"table": "oak"})
+            except APIError as err:
+                caught.append(err.code)
+
+        s.body = tolerant
+        sent: list[int] = []
+        for _ in range(7):
+            r = await s.call("watch", {"table": "oak"})
+            assert not r["result"].get("isError") and [c["text"] for c in r["result"]["content"]] == ["watching"], r
+            sent.append(len(s.core.bodies("/event-subscriptions")))
+        assert sent == [1, 2, 3, 4, 5, 5, 5], sent
+        assert caught == ["unavailable"] * 5 + ["unreachable"] * 2, caught
+        return s.lines()
     if op == "authorize_throws":
         s = Scene()
         s.authorize_error = Error("boom-canary")
@@ -285,6 +305,19 @@ async def situation(op: str, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, 
             with pytest.raises(APIError) as e:
                 await s.chat.emit({"channel": "eng"}, {"text": "hi"})
             assert e.value.code == "unauthenticated"
+        return s.lines()
+    if op == "manifest_refused":
+        s = Scene()
+        s.core.on(
+            "POST",
+            "/manifest/merge",
+            lambda b: (400, {"error": {"code": "bad_request", "message": 'events "a" and "b": topics can make the same topic'}}),
+        )
+        for i in range(3):
+            s.clock[0] = 10.0 * i
+            with pytest.raises(APIError) as e:
+                await s.chat.emit({"channel": "eng"}, {"text": "hi"})
+            assert e.value.code == "bad_request"
         return s.lines()
     if op == "subscribe_in_flight":
         s = Scene()

@@ -3,6 +3,7 @@ and bridged (the same cases as the Node SDK's events tests)."""
 
 from __future__ import annotations
 
+import copy
 import re
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,7 @@ from pydantic import BaseModel, Field
 from wakeshift import Identity, ToolCall, WakeshiftError
 from wakeshift import _spec as wspec
 from wakeshift._events import _default_text
-from wakeshift._spec import EXTENSION_KEY, bridged_client, dialect_of
+from wakeshift._spec import EXTENSION_KEY, chatgpt_desktop, chatgpt_desktop_chat, chatgpt_not_native, dialect_of, native_client
 from wakeshift._text import TEXT
 from wakeshift._toolcall import _speaks_events
 
@@ -528,8 +529,11 @@ async def test_draft_clients_get_the_drafts_codes() -> None:
         assert (await rpc("events/unsubscribe", {"name": "chat.message", "arguments": {"channel": "eng"}, "delivery": delivery}))[
             "error"
         ]["code"] == -32023
-        assert (await rpc("events/stream", {}))["error"]["code"] == -32026
-        assert (await rpc("events/poll", {}))["error"]["code"] == -32023  # no such event
+        assert (await rpc("events/stream", {"name": "chat.message"}))["error"]["code"] == -32026
+        assert (await rpc("events/poll", {"name": "no.such.event"}))["error"]["code"] == -32023  # no such event
+        # No params.name: InvalidParams, before push or the event (SEP-3415).
+        assert (await rpc("events/stream", {}))["error"]["code"] == -32602
+        assert (await rpc("events/poll", {}))["error"]["code"] == -32602
         # A client that declared the extension isn't offered subscribe_events either.
         names = sorted(t["name"] for t in (await rpc("tools/list", {}))["result"]["tools"])
         assert names == ["list_subscriptions", "unsubscribe_events"]
@@ -846,13 +850,20 @@ def test_default_text_golden(case: dict[str, Any]) -> None:
 
 
 def test_bridged_clients_by_name_or_user_agent() -> None:
-    assert bridged_client("claude-code", "")
-    assert bridged_client("", "claude-code/2.1.316 (sdk-cli)")
-    assert bridged_client("Cursor", "") and bridged_client("", "Cursor/1.0.0")
-    assert bridged_client("capy", "") and bridged_client("", "capy")
-    assert bridged_client("muse-custom-connector", "")
-    assert not bridged_client("openai-mcp", "openai-mcp/1.0.0")
-    assert not bridged_client("acme-agent", "acme/1")
+    # Never native, whatever they declare (the client table's bridged entries).
+    declares = {"io.modelcontextprotocol/clientCapabilities": {"extensions": {EXTENSION_KEY: {}}}}
+    for client, ua in [
+        ("claude-code", ""),
+        ("", "claude-code/2.1.316 (sdk-cli)"),
+        ("Cursor", ""),
+        ("", "Cursor/1.0.0"),
+        ("capy", ""),
+        ("", "capy"),
+        ("muse-custom-connector", ""),
+        ("opencode", ""),
+    ]:
+        assert not native_client(client, ua, declares, None), (client, ua)
+    assert native_client("acme-agent", "acme/1", declares, None)
 
 
 def test_dialect_of_chatgpt_through_codex() -> None:
@@ -860,4 +871,50 @@ def test_dialect_of_chatgpt_through_codex() -> None:
     assert dialect_of("", "openai-mcp/1.0.0 (Codex)") == "chatgpt"
     assert dialect_of("", "openai-mcp/1.0.0") == "chatgpt"
     assert dialect_of("openai-mcp", "") == "chatgpt"
-    assert dialect_of("", "codex-mcp-client/0.166.0") == "draft"
+    assert dialect_of("", "codex-mcp-client/0.166.0") == "spec"
+    assert dialect_of("acme", "", {"openai/session": "c1"}) == "chatgpt"
+
+
+DESKTOP_CAPS = {
+    "experimental": {"openai/visibility": {"enabled": True}},
+    "elicitation": {"form": {}, "url": {}},
+    "extensions": {
+        "io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app", "text/html+skybridge"]},
+        "openai/elicitation": {"form": {}, "userVerification": {}},
+        "openai/form": {},
+    },
+}
+WEB_CAPS = {
+    "experimental": {"openai/visibility": {"enabled": True}},
+    "extensions": {
+        "io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]},
+        "openai/elicitation": {"userVerification": {}},
+    },
+}
+
+
+def test_chatgpt_desktop_by_its_capabilities() -> None:
+    """ChatGPT's desktop app (Codex mode): its client name, with both the
+    skybridge mime type and openai/form (as observed);
+    a Work chat on the web, the desktop app's regular chat and anything less
+    are ChatGPT."""
+    caps = "io.modelcontextprotocol/clientCapabilities"
+    assert chatgpt_desktop("openai-mcp (Codex)", {caps: DESKTOP_CAPS})
+    assert not chatgpt_desktop("openai-mcp (Codex)", {caps: WEB_CAPS, "traceparent": "00-x"})
+    regular = {"extensions": {"io.modelcontextprotocol/ui": {"mimeTypes": ["text/html;profile=mcp-app"]}}}
+    desktop_chat = {caps: regular, "openai/userAgent": "Codex Desktop/26.1103.60933 (Mac OS; arm64)"}
+    assert not chatgpt_desktop("openai-mcp", desktop_chat)
+    assert chatgpt_desktop_chat("openai-mcp", desktop_chat) and chatgpt_not_native("openai-mcp", desktop_chat)
+    assert not chatgpt_desktop_chat("openai-mcp", {"openai/userAgent": "Mozilla/5.0"})
+    assert not chatgpt_desktop_chat("openai-mcp", {"openai/session": "x"}), "the web's chats send none"
+    assert not chatgpt_desktop_chat("openai-mcp (Codex)", desktop_chat), "Codex mode's name"
+    assert not chatgpt_not_native("openai-mcp (Codex)", {caps: WEB_CAPS})
+    no_form = copy.deepcopy(DESKTOP_CAPS)
+    del no_form["extensions"]["openai/form"]
+    no_skybridge = copy.deepcopy(DESKTOP_CAPS)
+    no_skybridge["extensions"]["io.modelcontextprotocol/ui"]["mimeTypes"] = ["text/html;profile=mcp-app"]
+    assert not chatgpt_desktop("openai-mcp (Codex)", {caps: no_form})
+    assert not chatgpt_desktop("openai-mcp (Codex)", {caps: no_skybridge})
+    assert not chatgpt_desktop("openai-mcp (Codex)", {}), "no capabilities to go by"
+    assert not chatgpt_desktop("openai-mcp (Codex)", {caps: "x"}), "malformed"
+    assert not chatgpt_desktop("openai-mcp", {caps: DESKTOP_CAPS})

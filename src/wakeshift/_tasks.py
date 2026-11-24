@@ -1,5 +1,5 @@
-"""MCP Tasks as a wake path (docs/harnesses.md, "Claude Code: MCP tasks as a
-wake path"): for a client that takes MCP tasks on protocol 2026-07-28, attach
+"""MCP Tasks as a wake path (docs/harnesses.md, "Claude Code", MCP tasks):
+for a client that takes MCP tasks on protocol 2026-07-28, attach
 with ``wait=True`` serves Wakeshift's wait tool, wakeshift_wait (off by
 default). Its call is answered with a task
 that completes when the conversation's next Wakeshift messages arrive; the

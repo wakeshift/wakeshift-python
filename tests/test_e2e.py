@@ -14,6 +14,7 @@ import re
 import secrets
 import signal
 import subprocess
+import tempfile
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -48,7 +49,13 @@ class Lines:
 
     def __init__(self, cmd: str) -> None:
         self.q: queue.Queue[dict[str, Any]] = queue.Queue()
-        self.proc = subprocess.Popen(["sh", "-c", cmd], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+        self.proc = subprocess.Popen(
+            ["sh", "-c", cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            env={**os.environ, "HOME": LINK_HOME},
+        )
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self) -> None:
@@ -129,12 +136,25 @@ def text_of(r: dict[str, Any]) -> str:
     return "\n".join(c.get("text", "") for c in r["result"]["content"])
 
 
-MONITOR = re.compile(r"with this command: (u='https?://[^']+/v1/stream/wait\?[^']+'; c=; p=\$PPID; .*?; done) \.")
+MONITOR = re.compile(r"with this command: (f=\$HOME/\.wakeshift/links/[0-9a-f]{16}; [^\n]*?c=; p=\$PPID; .*?; done; fi) \.")
+LINK_STEP = re.compile(
+    r"If you haven't written this conversation's link to the file ~/\.wakeshift/links/([0-9a-f]{16}) yet, first write it .*? its whole content this one line: (\S+) \."
+)
+# Since November 2026 the Monitor's command reads the conversation's link
+# from a file the agent writes with its file tool (the result's link step):
+# monitor_of writes it as the agent would, in a HOME of these tests' own,
+# and the commands run with that HOME.
+LINK_HOME = tempfile.mkdtemp(prefix="wakeshift-links-")
 
 
 def monitor_of(r: dict[str, Any]) -> str:
-    m = MONITOR.search(text_of(r))
-    assert m, text_of(r)
+    text = text_of(r)
+    for key, link in LINK_STEP.findall(text):
+        os.makedirs(os.path.join(LINK_HOME, ".wakeshift", "links"), exist_ok=True)
+        with open(os.path.join(LINK_HOME, ".wakeshift", "links", key), "w") as f:
+            f.write(link + "\n")
+    m = MONITOR.search(text)
+    assert m, text
     return m.group(1)
 
 
@@ -524,7 +544,7 @@ async def test_wrapped_tools_against_a_real_core() -> None:
         )
         assert (
             native_sub["error"]["message"]
-            == "crawl.finished can't be polled: it's subscribed to only through this app's tools, with a webhook"
+            == "crawl.finished can't be polled: it's subscribed to only through this app's tools, with a webhook or by push"
         )
         assert (await crawl.emit({"job": "j-py"}, {"pages": 3})).matched == 1
 
@@ -670,11 +690,13 @@ async def test_fastmcp_against_a_real_core() -> None:
 
 
 async def test_a_chatgpt_shaped_client_redeems_a_subscribe_voucher() -> None:
-    """A ChatGPT-shaped client against a real core with subscribe vouchers
-    (docs/subscribe-vouchers.md §11.3): openai-mcp, a stateless server (no
-    Mcp-Session-Id), _meta["openai/session"] on tool calls, a webhook on
-    127.0.0.1. The tool's result hands out the voucher; an emit lands before
-    the subscribe and is replayed. Skipped on a core without vouchers."""
+    """A ChatGPT-shaped client against a real core with subscribe vouchers:
+    openai-mcp, a stateless server (no
+    Mcp-Session-Id), _meta["openai/session"] on tool calls, a signed-in
+    user, a webhook on 127.0.0.1. The tool's result hands out the voucher;
+    an emit lands before the subscribe and is replayed. Skipped on a core
+    without vouchers. (Anonymous, without a transport session, it would get
+    no voucher: one bound to nothing is a bearer.)"""
     core, key = harness()
     wake = Wakeshift(key, core=core)
     subscribed: list[tuple[str | None, str, str | None]] = []
@@ -686,7 +708,7 @@ async def test_a_chatgpt_shaped_client_redeems_a_subscribe_voucher() -> None:
         on_subscribe=lambda s: subscribed.append((s.user, s.via, s.tool)),
     )
     server = MCPServer("crawler")
-    attached = wake.attach(server)
+    attached = wake.attach(server, identify=lambda r: Identity(user="gpt-user"))
 
     @attached.tool(subscribes=[crawl])
     async def start_crawl(job: str, call: ToolCall) -> str:
@@ -719,9 +741,16 @@ async def test_a_chatgpt_shaped_client_redeems_a_subscribe_voucher() -> None:
         "secret": "whsec_" + base64.b64encode(secrets.token_bytes(32)).decode(),
     }
     gpt = {"User-Agent": "openai-mcp/1.0.0"}
+
+    def gpt26(method: str) -> dict[str, str]:
+        # _meta names 2026-07-28, so the transport's headers say so too (the
+        # events/* checks refuse anything else).
+        return {**gpt, "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": method}
+
     meta = {
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "io.modelcontextprotocol/clientInfo": {"name": "openai-mcp", "version": "1.0.0"},
+        "io.modelcontextprotocol/clientCapabilities": {},
     }
 
     async def arrived(n: int) -> None:
@@ -753,7 +782,7 @@ async def test_a_chatgpt_shaped_client_redeems_a_subscribe_voucher() -> None:
             assert m, said
             voucher = m.group(1)
             assert (await crawl.emit({"job": job}, {"pages": 1})).matched == 0
-            listed = (await rpc("events/list", {"_meta": meta}, headers=gpt))["result"]["events"]
+            listed = (await rpc("events/list", {"_meta": meta}, headers=gpt26("events/list")))["result"]["events"]
             entry = next(e for e in listed if e["name"] == "crawl.finished")
             assert entry["inputSchema"]["required"] == ["job", "wakeshift_voucher"]
             params = {
@@ -763,23 +792,23 @@ async def test_a_chatgpt_shaped_client_redeems_a_subscribe_voucher() -> None:
                 "ttlMs": 3600000,
                 "_meta": meta,
             }
-            sub = await rpc("events/subscribe", params, headers=gpt)
+            sub = await rpc("events/subscribe", params, headers=gpt26("events/subscribe"))
             assert "result" in sub, sub
             await arrived(1)
             assert got[0] == {"name": "crawl.finished", "data": {"pages": 1}}
             assert (await crawl.emit({"job": job}, {"pages": 2})).matched == 1
             await arrived(2)
-            again = await rpc("events/subscribe", params, headers=gpt)
+            again = await rpc("events/subscribe", params, headers=gpt26("events/subscribe"))
             assert again["result"]["id"] == sub["result"]["id"], again
             other = await rpc(
                 "events/subscribe",
                 {**params, "arguments": {"job": job}, "delivery": {**delivery, "url": delivery["url"] + "2"}},
-                headers=gpt,
+                headers=gpt26("events/subscribe"),
             )
             assert other["error"]["code"] == -32012, other
             await asyncio.sleep(0.1)
-            assert subscribed == [(None, "tool", "start_crawl")]
-            await rpc("events/unsubscribe", {**params, "_meta": meta}, headers=gpt)
+            assert subscribed == [("gpt-user", "tool", "start_crawl")]
+            await rpc("events/unsubscribe", {**params, "_meta": meta}, headers=gpt26("events/unsubscribe"))
     finally:
         hook.shutdown()
         await wake.aclose()
