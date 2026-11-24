@@ -2,7 +2,7 @@
 
 What changed in each release of `wakeshift`. 0.4.0 is the first published release: to start with it, read the [README](README.md). Its notes below, and the earlier releases', are for apps that ran the preview builds.
 
-## Unreleased
+## 0.11.0 (2026-11-24)
 
 ### Added
 
